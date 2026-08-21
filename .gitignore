@@ -1,0 +1,35 @@
+# Working notes, research, and agent instructions. Local only — never published.
+docs/
+CLAUDE.md
+AGENTS.md
+.claude/
+notes/
+scratch/
+*.private.md
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Environment — model API keys live here, never committed
+.env
+.env.local
+
+# Extraction sandbox scratch + the permanent contract cache
+.leeway/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
+
+# Coverage
+coverage/
