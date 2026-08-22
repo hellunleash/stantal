@@ -54,6 +54,14 @@ export type ModuleExtractOptions = {
 type DescriptorSite = {
   node: ObjectExpression;
   module: ParsedModule;
+  /**
+   * Set when the tool's name is a sibling argument rather than a key in the
+   * descriptor — `server.registerTool(name, config, handler)`. The object alone
+   * does not say what it is called.
+   */
+  nameNode?: Expression;
+  /** Set when the description is a bare argument, as in the older `tool()` signature. */
+  descriptionNode?: Expression;
 };
 
 /** `pack.js:412`, or just the file when the parser gave no location. */
@@ -120,12 +128,63 @@ function isDescriptor(node: AnyNode): node is ObjectExpression {
   return SCHEMA_KEYS.some((key) => keys.has(key));
 }
 
+/**
+ * Registration calls that name a tool and describe it in separate arguments.
+ *
+ * The whole `McpServer` family registers this way, so a reader that only
+ * matches `{ name, inputSchema }` object literals misses every server built on
+ * the official SDK — which is the largest population of packages whose tool
+ * descriptions are the entire contract.
+ */
+const REGISTRATION_METHODS = new Set(["registerTool", "tool", "addTool", "defineTool"]);
+
+function callSite(node: AnyNode, module: ParsedModule): DescriptorSite | null {
+  if (node.type !== "CallExpression") return null;
+  if (node.callee.type !== "MemberExpression" || node.callee.computed) return null;
+  if (node.callee.property.type !== "Identifier") return null;
+  if (!REGISTRATION_METHODS.has(node.callee.property.name)) return null;
+
+  const [first, second, third] = node.arguments;
+  if (first === undefined || first.type === "SpreadElement") return null;
+
+  // `registerTool(name, { description, inputSchema }, handler)`
+  if (second !== undefined && second.type === "ObjectExpression") {
+    const keys = propertyMap(second);
+    const describes = keys.has("description") || SCHEMA_KEYS.some((k) => keys.has(k));
+    // `.tool()` is an ordinary method name elsewhere. Requiring the second
+    // argument to actually describe a tool keeps this from matching everything.
+    return describes ? { node: second, module, nameNode: first as Expression } : null;
+  }
+
+  // `tool(name, "description", schema, handler)` — the older signature, where
+  // the descriptor is spread across arguments and there is no object at all.
+  if (second !== undefined && third !== undefined && third.type === "ObjectExpression") {
+    return {
+      node: third,
+      module,
+      nameNode: first as Expression,
+      descriptionNode: second as Expression,
+    };
+  }
+
+  return null;
+}
+
 function descriptorSites(modules: readonly ParsedModule[]): DescriptorSite[] {
   const sites: DescriptorSite[] = [];
   for (const module of modules) {
     const found: DescriptorSite[] = [];
+    const claimed = new Set<ObjectExpression>();
     walk(module.program as AnyNode, (node) => {
-      if (isDescriptor(node)) found.push({ node, module });
+      const call = callSite(node, module);
+      if (call !== null) {
+        found.push(call);
+        claimed.add(call.node);
+        return;
+      }
+      // A config object already claimed by its registration call must not be
+      // counted twice, once named and once anonymous.
+      if (isDescriptor(node) && !claimed.has(node)) found.push({ node, module });
     });
     // The walk is a stack, so it finds them out of order. Source order is what
     // makes "the first declaration wins" a rule rather than an accident.
@@ -145,7 +204,7 @@ function readDescriptor(site: DescriptorSite, graph: ModuleGraph): ReadDescripto
   const evidence = evidenceAt(site);
   const notes: ExtractionNote[] = [];
 
-  const nameNode = properties.get("name");
+  const nameNode = site.nameNode ?? properties.get("name");
   const name = nameNode === undefined ? undefined : evaluate(nameNode as AnyNode, resolve).value;
   if (typeof name !== "string" || name.length === 0) {
     // Without a name there is no tool to report, and no way to say which one is
@@ -165,7 +224,7 @@ function readDescriptor(site: DescriptorSite, graph: ModuleGraph): ReadDescripto
     };
   }
 
-  const descriptionNode = properties.get("description");
+  const descriptionNode = site.descriptionNode ?? properties.get("description");
   let description: unknown = null;
   if (descriptionNode !== undefined) {
     description = evaluate(descriptionNode as AnyNode, resolve).value;

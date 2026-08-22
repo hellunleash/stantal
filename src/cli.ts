@@ -47,6 +47,24 @@ ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY / GOOGLE_API_KEY.
 STANTAL_JUDGE forces a provider or "none"; STANTAL_JUDGE_MODEL picks a model.
 `.trim();
 
+/**
+ * Load a local `.env` if there is one.
+ *
+ * Best effort and deliberately silent. A key is optional everywhere in this
+ * tool, so a missing or malformed file is not a reason to stop — it just means
+ * the judge does not run and findings stay unconfirmed. A real environment
+ * variable always wins over the file.
+ */
+function loadDotEnv(): void {
+  const load = (process as NodeJS.Process & { loadEnvFile?: (path: string) => void }).loadEnvFile;
+  if (typeof load !== "function") return; // Node older than 20.12
+  try {
+    load(".env");
+  } catch {
+    // No file, or unreadable. Both are normal.
+  }
+}
+
 // --- Rendering ---------------------------------------------------------------
 
 const useColor =
@@ -284,6 +302,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 0;
   }
 
+  loadDotEnv();
   const judge = values["no-judge"] === true ? null : judgeFromEnv();
 
   if (positionals[0] === "history") {

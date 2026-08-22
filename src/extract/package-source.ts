@@ -123,8 +123,41 @@ function firstExisting(source: PackageSource, candidates: string[]): string | nu
  * Kept separate from the read so the "package does not export this" answer is
  * pure and testable without a filesystem.
  */
+/**
+ * The prefix that marks an executable entry rather than an importable one.
+ *
+ * `bin:mcp-server-filesystem` is a real door and is named as one, because a
+ * consumer reaches it by spawning a command rather than importing a module.
+ */
+export const BIN_PREFIX = "bin:";
+
+/** `bin` normalized to a map, whichever of the two shapes the package used. */
+function binEntries(pkg: PackageJson): Map<string, string> {
+  const bin = pkg["bin"];
+  if (typeof bin === "string") {
+    const name = typeof pkg.name === "string" ? pkg.name.replace(/^@[^/]+\//, "") : "default";
+    return new Map([[name, bin]]);
+  }
+  if (bin !== null && typeof bin === "object" && !Array.isArray(bin)) {
+    return new Map(
+      Object.entries(bin as Record<string, unknown>).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
+  }
+  return new Map();
+}
+
 export function declaredEntryPoints(pkg: PackageJson, query: EntryPointQuery = {}): string[] | null {
   const subpath = query.subpath ?? ".";
+
+  // An executable door. Whole categories of package — MCP servers above all —
+  // ship no `exports` and no `main`; the command *is* the interface, and the
+  // tool descriptions behind it are the contract.
+  if (subpath.startsWith(BIN_PREFIX)) {
+    const target = binEntries(pkg).get(subpath.slice(BIN_PREFIX.length));
+    return target === undefined ? null : [target];
+  }
   const options = {
     require: query.condition === "require",
     ...(query.conditions ? { conditions: query.conditions } : {}),
@@ -163,17 +196,28 @@ export function declaredEntryPoints(pkg: PackageJson, query: EntryPointQuery = {
  * two things that were never the same surface.
  */
 export function exportedSubpaths(pkg: PackageJson): string[] {
+  const bins = [...binEntries(pkg).keys()].map((name) => `${BIN_PREFIX}${name}`).sort();
   const exports = pkg.exports;
-  if (exports === undefined || exports === null) return ["."];
-  if (typeof exports === "string") return ["."];
-  if (Array.isArray(exports)) return ["."];
 
-  const keys = Object.keys(exports as Record<string, unknown>);
-  // An `exports` object with no "./" keys is a bare condition map for ".".
-  const subpaths = keys.filter((key) => key === "." || key.startsWith("./"));
-  if (subpaths.length === 0) return ["."];
+  const importable = (): string[] => {
+    if (exports === undefined || exports === null) return ["."];
+    if (typeof exports === "string" || Array.isArray(exports)) return ["."];
 
-  return subpaths.filter((key) => !key.includes("*")).sort();
+    const keys = Object.keys(exports as Record<string, unknown>);
+    // An `exports` object with no "./" keys is a bare condition map for ".".
+    const subpaths = keys.filter((key) => key === "." || key.startsWith("./"));
+    if (subpaths.length === 0) return ["."];
+    return subpaths.filter((key) => !key.includes("*")).sort();
+  };
+
+  // A package with a `bin` and no `exports`/`main` is not a library at all, and
+  // offering it a phantom "." door would only ever produce `file_missing`.
+  const hasImportable =
+    (exports !== undefined && exports !== null) ||
+    typeof pkg.main === "string" ||
+    typeof pkg.module === "string";
+
+  return hasImportable || bins.length === 0 ? [...importable(), ...bins] : bins;
 }
 
 /** Resolve a subpath to a file that actually exists in the package. */

@@ -193,3 +193,98 @@ describe("extraction gaps", () => {
     expect(result.skipped[0]).toMatchObject({ target: "build.target" });
   });
 });
+
+describe("guidance_removed, widened", () => {
+  const withParams = (description: string): Tool => ({
+    name: "search",
+    description,
+    params: [param("query", true), param("depth", false, "How deep to go.")],
+  });
+
+  const LONG =
+    "Searches the web and returns results in natural language. " +
+    "Deep search uses smart query expansion and provides high-quality context for each result. " +
+    "You can provide additional query variations for even better results.";
+  const SHORT = "Searches the web and returns results in natural language.";
+
+  test("fires when guidance about the tool is deleted, not just about a parameter", async () => {
+    const result = await classifyProse(surface([withParams(LONG)], "1.0.0"), surface([withParams(SHORT)]));
+    // Measured against real histories, the parameter-only version of this rule
+    // missed descriptions collapsing from 224 characters to 65.
+    const finding = result.findings.find((f) => f.rule === "guidance_removed");
+    expect(finding?.target).toBe("search");
+    expect(finding?.confidence).toBe("certain");
+    expect(finding?.evidence.quote).toContain("smart query expansion");
+  });
+
+  test("reports one finding per target, however many sentences went", async () => {
+    const result = await classifyProse(surface([withParams(LONG)], "1.0.0"), surface([withParams(SHORT)]));
+    // A rewrite that drops six sentences is one event. Six rows would inflate
+    // every count downstream.
+    expect(result.findings.filter((f) => f.rule === "guidance_removed")).toHaveLength(1);
+    expect(result.findings[0]?.headline).toContain("more sentence");
+  });
+
+  test("does not fire when a sentence was merely reworded", async () => {
+    const reworded = withParams(
+      "Searches the web and returns results in natural language. " +
+        "Deep search uses smart query expansion, providing high-quality context for every result. " +
+        "You can supply additional query variations for even better results.",
+    );
+    const result = await classifyProse(surface([withParams(LONG)], "1.0.0"), surface([reworded]));
+    // Every tightening pass rewrites most sentences. Reporting those would bury
+    // the one deletion that matters.
+    expect(result.findings.filter((f) => f.rule === "guidance_removed")).toEqual([]);
+  });
+
+  test("ignores a trivially short deletion", async () => {
+    const before = withParams("Searches the web and returns results in natural language. Fast.");
+    const result = await classifyProse(surface([before], "1.0.0"), surface([withParams(SHORT)]));
+    expect(result.findings.filter((f) => f.rule === "guidance_removed")).toEqual([]);
+  });
+
+  test("narrows to a parameter when the deleted sentence names one", async () => {
+    const before: Tool = {
+      name: "search",
+      description: "Searches the web. Pass `depth` only when a shallow result is not enough for the task.",
+      params: [param("query", true), param("depth", false)],
+    };
+    const after: Tool = { ...before, description: "Searches the web." };
+    const result = await classifyProse(surface([before], "1.0.0"), surface([after]));
+    expect(result.findings[0]).toMatchObject({ rule: "mode_switch_changed", target: "search.depth" });
+  });
+});
+
+describe("extraction gaps, scoped", () => {
+  const schemaGap: ExtractionNote = {
+    code: "descriptor_schema_unresolved",
+    scope: "schema",
+    target: "search",
+    evidence: "pack.js:20",
+    detail: "zod",
+  };
+
+  test("a schema gap does not silence findings about the tool's prose", async () => {
+    const before: Tool = {
+      name: "search",
+      description: "Searches the web. Deep search expands your query and returns richer context for each hit.",
+      params: [],
+    };
+    const after: Tool = { ...before, description: "Searches the web." };
+
+    const result = await classifyProse(
+      surface([before], "1.0.0", [schemaGap]),
+      surface([after], "2.0.0", [schemaGap]),
+    );
+    // A tool whose schema is built by zod still ships a readable description.
+    // Collapsing the two gaps threw away most real findings.
+    expect(result.findings.map((f) => f.rule)).toEqual(["guidance_removed"]);
+  });
+
+  test("a schema gap still silences claims about parameters", async () => {
+    const tool: Tool = { name: "search", description: "Searches the web.", params: [param("depth", false)] };
+    const result = await classifyProse(null, surface([tool], "2.0.0", [schemaGap]));
+    expect(result.findings).toEqual([]);
+    expect(result.skipped[0]?.target).toBe("search.depth");
+  });
+});

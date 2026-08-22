@@ -12,7 +12,7 @@ import {
   looksLikeExample,
   looksLikeModeSwitch,
   mentionsParameter,
-  removedSentences,
+  deletedSentences,
 } from "./text.js";
 
 /**
@@ -71,18 +71,45 @@ function contractOf(result: SurfaceResult): Contract | null {
  * prose rule would fire on it — reporting our own blind spot as the package
  * shipping nothing.
  */
-function unreadable(results: readonly SurfaceResult[]): Map<string, string> {
-  const out = new Map<string, string>();
+type Blocked = {
+  /** Tools whose prose could not be read. Nothing about their text is safe. */
+  descriptions: Map<string, string>;
+  /** Tools whose schema could not be read. Nothing about their parameters is safe. */
+  parameters: Map<string, string>;
+};
+
+/**
+ * What extraction could not read, split by what it actually blocks.
+ *
+ * The split matters and an earlier version got it wrong by collapsing the two.
+ * A tool whose schema is built at runtime — zod, a builder, a generated map —
+ * still ships a perfectly readable description, and blocking prose analysis for
+ * it threw away the majority of real findings across every history measured.
+ *
+ * A schema gap blocks claims about parameters. A description gap blocks claims
+ * about text. Neither blocks the other.
+ */
+function unreadable(results: readonly SurfaceResult[]): Blocked {
+  const blocked: Blocked = { descriptions: new Map(), parameters: new Map() };
+
   for (const result of results) {
     if (!result.present) continue;
     for (const note of result.notes as ExtractionNote[]) {
       if (note.scope === "surface") continue; // a tool-set gap, handled by Layer 0
       if (note.target === null) continue;
       const tool = note.target.split(".")[0] ?? note.target;
-      out.set(tool, `${note.code} at ${note.evidence ?? "unknown location"}`);
+      const reason = `${note.code} at ${note.evidence ?? "unknown location"}`;
+      const bucket = note.scope === "description" ? blocked.descriptions : blocked.parameters;
+      bucket.set(tool, reason);
     }
   }
-  return out;
+
+  return blocked;
+}
+
+/** Whether a candidate names a parameter, which decides which gap can block it. */
+function isParameterClaim(candidate: Candidate): boolean {
+  return candidate.target.includes(".");
 }
 
 // --- Rules over a single contract -------------------------------------------
@@ -125,71 +152,106 @@ function undocumentedOptional(tool: Tool): Candidate[] {
 
 // --- Rules over a version pair ----------------------------------------------
 
-/** Sentences that referred to a parameter and are gone, where the parameter remains. */
+/** Below this, a deleted sentence is an edit rather than a loss of guidance. */
+const MIN_GUIDANCE_LENGTH = 40;
+
+/**
+ * Guidance that was shipped and is gone.
+ *
+ * Most deleted prose is about the tool, not about a named parameter — "use this
+ * when...", "returns...", "do not call this if...". An earlier version of this
+ * rule only fired when a removed sentence named a surviving parameter, and
+ * measured against real release histories it caught almost nothing: tool
+ * descriptions collapsing from 224 characters to 65 went unreported, which is
+ * precisely the change this product exists to catch.
+ *
+ * So the target is the tool by default, and narrows to a parameter only when the
+ * removed sentence actually refers to one.
+ *
+ * At most one finding per target. A rewrite that drops six sentences is one
+ * event, and reporting it six times would inflate every count downstream.
+ */
 function guidanceRemoved(before: Tool, after: Tool): Candidate[] {
   if (before.description === null || after.description === null) return [];
   const surviving = new Set(after.params.map((p) => p.name));
-  const out: Candidate[] = [];
 
-  for (const sentence of removedSentences(before.description, after.description)) {
-    for (const name of surviving) {
-      const mention = mentionsParameter(sentence, name);
-      if (mention === null) continue;
+  type Strongest = { rule: ProseRule; quote: string; param: string | null; count: number };
+  const strongest = new Map<string, Strongest>();
 
-      // A mode-switch sentence is its own rule: losing "pass X only when…" does
-      // not just remove guidance, it removes the thing that told a model which
-      // of two behaviours it was asking for.
-      const rule: ProseRule = looksLikeModeSwitch(sentence) ? "mode_switch_changed" : "guidance_removed";
-      out.push({
-        rule,
-        tool: after.name,
-        target: `${after.name}.${name}`,
-        before: before.description,
-        after: after.description,
-        quote: sentence,
-        headline:
-          rule === "mode_switch_changed"
-            ? `the sentence setting when to pass \`${name}\` was removed`
-            : `guidance for \`${name}\` was removed from the description`,
-      });
-      break; // one finding per removed sentence
+  for (const sentence of deletedSentences(before.description, after.description)) {
+    if (sentence.length < MIN_GUIDANCE_LENGTH) continue;
+
+    const param = [...surviving].find((name) => mentionsParameter(sentence, name) !== null) ?? null;
+    const target = param === null ? after.name : `${after.name}.${param}`;
+
+    // Losing "pass X only when..." does not just remove guidance; it removes the
+    // thing that told a model which of two behaviours it was asking for.
+    const rule: ProseRule = looksLikeModeSwitch(sentence)
+      ? "mode_switch_changed"
+      : looksLikeExample(sentence)
+        ? "example_removed"
+        : "guidance_removed";
+
+    const existing = strongest.get(target);
+    if (existing === undefined) {
+      strongest.set(target, { rule, quote: sentence, param, count: 1 });
+      continue;
+    }
+
+    existing.count += 1;
+    // A mode switch outranks plain guidance, and a longer quote is better
+    // evidence than a shorter one.
+    const outranks = rule === "mode_switch_changed" && existing.rule !== "mode_switch_changed";
+    if (outranks || (rule === existing.rule && sentence.length > existing.quote.length)) {
+      existing.rule = rule;
+      existing.quote = sentence;
     }
   }
 
-  return out;
-}
+  return [...strongest.entries()].map(([target, entry]) => {
+    const more = entry.count > 1 ? ` (and ${entry.count - 1} more sentence(s))` : "";
+    const subject = entry.param === null ? `\`${after.name}\`` : `\`${entry.param}\``;
+    const headline =
+      entry.rule === "mode_switch_changed"
+        ? `the sentence setting when to pass ${subject} was removed${more}`
+        : entry.rule === "example_removed"
+          ? `a worked example was removed from ${subject}${more}`
+          : `guidance for ${subject} was removed from the description${more}`;
 
-function exampleDelta(before: Tool, after: Tool): Candidate[] {
-  if (before.description === null || after.description === null) return [];
-  const out: Candidate[] = [];
-
-  for (const sentence of removedSentences(before.description, after.description)) {
-    if (!looksLikeExample(sentence)) continue;
-    out.push({
-      rule: "example_removed",
+    return {
+      rule: entry.rule,
       tool: after.name,
-      target: after.name,
+      target,
       before: before.description,
       after: after.description,
-      quote: sentence,
-      headline: `a worked example was removed from \`${after.name}\``,
-    });
-  }
+      quote: entry.quote,
+      headline,
+    };
+  });
+}
 
-  for (const sentence of addedSentences(before.description, after.description)) {
-    if (!looksLikeExample(sentence)) continue;
-    out.push({
-      rule: "example_added",
+/**
+ * A worked example that appeared.
+ *
+ * Removals are handled by `guidanceRemoved`, which already classifies a deleted
+ * example as one. Only additions are left here, and they are the one thing in
+ * the taxonomy that is usually good news.
+ */
+function exampleAdded(before: Tool, after: Tool): Candidate[] {
+  if (before.description === null || after.description === null) return [];
+
+  return addedSentences(before.description, after.description)
+    .filter(looksLikeExample)
+    .slice(0, 1)
+    .map((sentence) => ({
+      rule: "example_added" as const,
       tool: after.name,
       target: after.name,
       before: before.description,
       after: after.description,
       quote: sentence,
       headline: `a worked example was added to \`${after.name}\``,
-    });
-  }
-
-  return out;
+    }));
 }
 
 // --- Orchestration ----------------------------------------------------------
@@ -207,7 +269,7 @@ function candidatesFor(from: SurfaceResult | null, to: SurfaceResult): Candidate
     const earlier = before.get(tool.name);
     if (earlier === undefined) continue;
     out.push(...guidanceRemoved(earlier, tool));
-    out.push(...exampleDelta(earlier, tool));
+    out.push(...exampleAdded(earlier, tool));
   }
 
   return out;
@@ -274,7 +336,10 @@ export async function classifyProse(
   const skipped: ProseResult["skipped"] = [];
   const usable: Candidate[] = [];
   for (const candidate of all) {
-    const reason = blocked.get(candidate.tool);
+    // A gap only blocks the kind of claim it actually covers.
+    const reason = isParameterClaim(candidate)
+      ? (blocked.parameters.get(candidate.tool) ?? blocked.descriptions.get(candidate.tool))
+      : blocked.descriptions.get(candidate.tool);
     if (reason === undefined) usable.push(candidate);
     else skipped.push({ target: candidate.target, reason });
   }
