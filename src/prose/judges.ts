@@ -1,3 +1,4 @@
+import { askViaSdk, sdkAvailable, SdkUnavailableError, type ModuleLoader } from "./judge-sdk.js";
 import {
   JUDGE_SYSTEM_PROMPT,
   renderQuestion,
@@ -10,20 +11,20 @@ import {
 /**
  * Model-backed judges.
  *
- * Three providers, one code path, spoken over plain HTTP rather than three
- * vendor SDKs. That is a deliberate trade:
+ * Three providers, two transports, one code path.
  *
- * - The CLI has to be worth running on the first `npx` with nothing installed.
- *   Three SDKs would be roughly a hundred packages for a feature most first runs
- *   never reach, since the judge only engages when a key is present.
- * - Nothing here needs an SDK. One POST with a JSON body, and the reply is
- *   checked by `verifyAnswer` before it can become a finding, so a malformed or
- *   invented answer already fails closed. Structured-output modes would make the
- *   reply tidier; they would not make it more trustworthy, because the trust
- *   comes from the quote check, not from the wire format.
+ * Plain HTTP is the floor: it needs nothing installed, so the judge works on a
+ * first `npx` the moment a key exists. The vendor SDKs are the ceiling — typed
+ * errors, their retry policy, and their own credential resolution — and are used
+ * automatically whenever one is installed (see `judge-sdk.ts`).
  *
- * All of this sits behind the `Judge` interface, so swapping any of it for an
- * official SDK is a contained change.
+ * Neither is declared as a dependency. Measured, they cost 7 packages
+ * (`@anthropic-ai/sdk`), 8 (`openai`) and 49 (`@google/genai`), which is a lot
+ * to carry for a feature most first runs never reach.
+ *
+ * Both transports send the same prompt and hand the reply to the same parser and
+ * the same quote check. Which one ran can never change what counts as a finding,
+ * so they are two ways to send one request rather than two behaviours.
  *
  * What leaves the machine: tool names and descriptions from a published package.
  * That is public data. No key, no source, and nothing from the user's own repo
@@ -32,6 +33,15 @@ import {
 
 export type JudgeProvider = "anthropic" | "openai" | "gemini";
 
+/**
+ * How the request is sent.
+ *
+ * `auto` uses the vendor SDK when it is installed and plain HTTP otherwise, so
+ * the tool works with nothing installed and gets the SDK's retries and typed
+ * errors for free the moment one is.
+ */
+export type JudgeTransport = "auto" | "http" | "sdk";
+
 export type JudgeConfig = {
   provider: JudgeProvider;
   apiKey: string;
@@ -39,6 +49,9 @@ export type JudgeConfig = {
   /** Override for a proxy or a compatible endpoint. */
   baseUrl?: string;
   timeoutMs?: number;
+  transport?: JudgeTransport;
+  /** Injected in tests so the SDK path runs without installing anything. */
+  loadModule?: ModuleLoader;
 };
 
 export class JudgeError extends Error {
@@ -201,6 +214,13 @@ function wireFor(config: JudgeConfig, prompt: string): Wire {
   }
 }
 
+/** Which transport a config will actually use, resolved once per run. */
+export async function resolveTransport(config: JudgeConfig): Promise<"http" | "sdk"> {
+  const requested = config.transport ?? "auto";
+  if (requested !== "auto") return requested;
+  return (await sdkAvailable(config.provider, config.loadModule)) ? "sdk" : "http";
+}
+
 export function createJudge(config: JudgeConfig): Judge {
   const model = config.model ?? DEFAULT_MODEL[config.provider];
   const timeoutMs = config.timeoutMs ?? 120_000;
@@ -210,8 +230,33 @@ export function createJudge(config: JudgeConfig): Judge {
 
     async ask(questions) {
       if (questions.length === 0) return [];
+      const prompt = buildPrompt(questions);
 
-      const wire = wireFor(config, buildPrompt(questions));
+      if ((await resolveTransport(config)) === "sdk") {
+        try {
+          return parseAnswers(
+            await askViaSdk(
+              {
+                provider: config.provider,
+                apiKey: config.apiKey,
+                model,
+                system: JUDGE_SYSTEM_PROMPT,
+                prompt,
+                baseUrl: config.baseUrl,
+                timeoutMs,
+              },
+              config.loadModule,
+            ),
+          );
+        } catch (error) {
+          // "install this package" is the most actionable message this layer
+          // produces. Wrapping it would bury it in a cause nobody prints.
+          if (error instanceof SdkUnavailableError) throw error;
+          throw new JudgeError(`${config.provider} SDK judge call failed`, error);
+        }
+      }
+
+      const wire = wireFor(config, prompt);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -267,10 +312,12 @@ export function judgeFromEnv(env: NodeJS.ProcessEnv = process.env): Judge | null
 
   const model = env["LEEWAY_JUDGE_MODEL"];
   const baseUrl = env["LEEWAY_JUDGE_BASE_URL"];
+  const transport = env["LEEWAY_JUDGE_TRANSPORT"]?.toLowerCase();
   return createJudge({
     provider: chosen.provider,
     apiKey: chosen.key,
     ...(model ? { model } : {}),
     ...(baseUrl ? { baseUrl } : {}),
+    ...(transport === "http" || transport === "sdk" || transport === "auto" ? { transport } : {}),
   });
 }

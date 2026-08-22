@@ -149,3 +149,106 @@ describe("judgeFromEnv", () => {
     expect(judgeFromEnv({ ANTHROPIC_API_KEY: "k", LEEWAY_JUDGE: "none" })).toBeNull();
   });
 });
+
+describe("transports", () => {
+  /** A stand-in for a vendor SDK, so the SDK path runs with nothing installed. */
+  function fakeSdk(reply: unknown, seen: { request?: unknown } = {}) {
+    class Client {
+      constructor(public options: Record<string, unknown>) {}
+      messages = {
+        create: async (request: unknown) => {
+          seen.request = request;
+          return reply;
+        },
+      };
+      chat = {
+        completions: {
+          create: async (request: unknown) => {
+            seen.request = request;
+            return reply;
+          },
+        },
+      };
+      models = {
+        generateContent: async (request: unknown) => {
+          seen.request = request;
+          return reply;
+        },
+      };
+    }
+    return { default: Client, Anthropic: Client, OpenAI: Client, GoogleGenAI: Client };
+  }
+
+  const ANSWER = '{"answers":[{"id":"documented:build.target","verdict":"no","quote":null}]}';
+
+  test("uses the SDK when one is installed, without any HTTP call", async () => {
+    const calls = stubFetch({});
+    const seen: { request?: unknown } = {};
+    const judge = createJudge({
+      provider: "anthropic",
+      apiKey: "k",
+      loadModule: async () => fakeSdk({ content: [{ type: "text", text: ANSWER }] }, seen),
+    });
+
+    expect((await judge.ask([QUESTION]))[0]?.verdict).toBe("no");
+    expect(calls).toEqual([]); // the HTTP path never ran
+    expect(seen.request).toMatchObject({ model: "claude-opus-5" });
+  });
+
+  test("falls back to HTTP when the SDK is not installed", async () => {
+    const calls = stubFetch({ content: [{ type: "text", text: ANSWER }] });
+    const judge = createJudge({
+      provider: "anthropic",
+      apiKey: "k",
+      loadModule: async () => {
+        throw new Error("Cannot find module");
+      },
+    });
+
+    expect((await judge.ask([QUESTION]))[0]?.verdict).toBe("no");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("both transports produce the same answer from the same reply", async () => {
+    const seen: { request?: unknown } = {};
+    const viaSdk = await createJudge({
+      provider: "openai",
+      apiKey: "k",
+      loadModule: async () => fakeSdk({ choices: [{ message: { content: ANSWER } }] }, seen),
+    }).ask([QUESTION]);
+
+    stubFetch({ choices: [{ message: { content: ANSWER } }] });
+    const viaHttp = await createJudge({ provider: "openai", apiKey: "k", transport: "http" }).ask([QUESTION]);
+
+    // The transport is how the request is sent. It must never be able to change
+    // what counts as a finding.
+    expect(viaSdk).toEqual(viaHttp);
+  });
+
+  test("an explicit sdk transport says so when the package is missing", async () => {
+    const judge = createJudge({
+      provider: "gemini",
+      apiKey: "k",
+      transport: "sdk",
+      loadModule: async () => {
+        throw new Error("Cannot find module");
+      },
+    });
+    await expect(judge.ask([QUESTION])).rejects.toThrow(/@google\/genai/);
+  });
+
+  test("an explicit http transport ignores an installed SDK", async () => {
+    const calls = stubFetch({ content: [{ type: "text", text: ANSWER }] });
+    await createJudge({
+      provider: "anthropic",
+      apiKey: "k",
+      transport: "http",
+      loadModule: async () => fakeSdk({ content: [] }),
+    }).ask([QUESTION]);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("the transport is selectable from the environment", () => {
+    expect(judgeFromEnv({ OPENAI_API_KEY: "k", LEEWAY_JUDGE_TRANSPORT: "http" })).not.toBeNull();
+  });
+});
