@@ -21,6 +21,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "acorn": "^8.18.0",
+    "resolve.exports": "^2.0.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {
