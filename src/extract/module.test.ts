@@ -116,6 +116,69 @@ describe("extractFromModule", () => {
     expect(result.fidelity).toBe("complete");
   });
 
+  test("finds a constant through an `export * from` barrel", () => {
+    const core = packageOf({
+      "package.json": JSON.stringify({ name: "@example/core", exports: { ".": "./index.js" } }),
+      // The normal shape of a constants package: an index that re-exports
+      // everything, with the value one file further in.
+      "index.js": `export * from "./tools.js";\nexport * from "./other.js";`,
+      "tools.js": `export const BUILD_TOOL = "build";`,
+      "other.js": `export const UNRELATED = 1;`,
+    });
+    const result = extractFromModule({
+      package: "@example/tools",
+      version: "2.0.0",
+      subpath: "./pack",
+      source: memoryPackageSource(
+        {
+          "package.json": MANIFEST,
+          "dist/pack.js": `
+            import { BUILD_TOOL } from "@example/core";
+            export const tools = [{ name: BUILD_TOOL, description: "Build.", inputSchema: { type: "object", properties: {} } }];
+          `,
+        },
+        { "@example/core": core },
+      ),
+    });
+
+    if (!result.present) throw new Error(`expected a contract, got ${result.absence.reason}`);
+    expect(result.contract.tools.map((t) => t.name)).toEqual(["build"]);
+  });
+
+  test("follows a shim that imports the pack instead of re-exporting it", () => {
+    // A published entry point is often a format shim: it imports the pack and
+    // adapts it. The descriptors still belong to this door.
+    const result = extract({
+      "dist/pack.js": `export function build() {}\n${PACK}`,
+      "dist/shim.js": `import { tools } from "./pack.js";\nexport const toolSet = tools;`,
+    });
+    expect(result.present).toBe(true);
+  });
+
+  test("does not pull descriptors in from a plain import of another package", () => {
+    const other = packageOf({
+      "package.json": JSON.stringify({ name: "@example/other", exports: { ".": "./index.js" } }),
+      "index.js": `export const tools = [{ name: "somebody_elses_tool", description: "x", inputSchema: { type: "object", properties: {} } }];`,
+    });
+    const result = extractFromModule({
+      package: "@example/tools",
+      version: "2.0.0",
+      subpath: "./pack",
+      source: memoryPackageSource(
+        {
+          "package.json": MANIFEST,
+          "dist/pack.js": `import { helper } from "@example/other";\n${PACK}`,
+        },
+        { "@example/other": other },
+      ),
+    });
+
+    if (!result.present) throw new Error("expected a contract");
+    // Merging a dependency's door into this one would destroy the divergence
+    // between surfaces, which is the finding this project exists to make.
+    expect(result.contract.tools.map((t) => t.name)).toEqual(["build", "open"]);
+  });
+
   test("reads descriptors through a barrel entry point", () => {
     const result = extract({
       "dist/pack.js": `export * from "./descriptors.js";`,

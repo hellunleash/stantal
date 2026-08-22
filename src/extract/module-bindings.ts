@@ -1,6 +1,6 @@
 import { parse } from "acorn";
 import type { AnyNode, Expression, Program } from "acorn";
-import { UNRESOLVED, evaluate, type BindingResolver } from "./js-literal.js";
+import { UNRESOLVED, evaluate, isUnresolved, type BindingResolver } from "./js-literal.js";
 import { resolveSpecifier, type EntryPointQuery, type PackageSource } from "./package-source.js";
 
 /**
@@ -39,6 +39,10 @@ type ModuleFacts = {
   exportsFrom: Map<string, ImportBinding>;
   /** Specifiers this module re-exports from. A barrel file is still the surface. */
   reexports: string[];
+  /** Relative specifiers this module imports. Same package, so the same door. */
+  relativeImports: string[];
+  /** `export * from` targets. A name not defined here may still be exported by one. */
+  exportStars: string[];
 };
 
 export function parseModule(code: string, source: PackageSource, path: string): ParsedModule | null {
@@ -86,6 +90,8 @@ function factsOf(module: ParsedModule): ModuleFacts {
     exportsLocal: new Map(),
     exportsFrom: new Map(),
     reexports: [],
+    relativeImports: [],
+    exportStars: [],
   };
 
   for (const statement of module.program.body) {
@@ -97,6 +103,9 @@ function factsOf(module: ParsedModule): ModuleFacts {
       case "ImportDeclaration": {
         const specifier = statement.source.value;
         if (typeof specifier !== "string") break;
+        if (specifier.startsWith("./") || specifier.startsWith("../")) {
+          facts.relativeImports.push(specifier);
+        }
         for (const entry of statement.specifiers) {
           if (entry.type === "ImportSpecifier") {
             const imported = specifierName(entry.imported);
@@ -134,7 +143,12 @@ function factsOf(module: ParsedModule): ModuleFacts {
       }
 
       case "ExportAllDeclaration": {
-        if (typeof statement.source.value === "string") facts.reexports.push(statement.source.value);
+        const source = statement.source.value;
+        if (typeof source !== "string") break;
+        facts.reexports.push(source);
+        // `export * as ns from` binds a namespace object, not the names inside
+        // it, so it is not a place a bare constant can be found.
+        if (!statement.exported) facts.exportStars.push(source);
         break;
       }
 
@@ -199,15 +213,27 @@ export class ModuleGraph {
   }
 
   /**
-   * The entry point plus every module it re-exports from, transitively.
+   * The entry point, plus the modules that make up the same door.
    *
-   * A published entry is frequently a barrel that only re-exports. Those files
-   * are not a different surface — they are the same door, one hop further in —
-   * so the descriptors in them belong to this contract. Plain imports are NOT
-   * followed: a module a pack merely depends on is not part of what it hands
-   * the consumer, and treating it as such would invent tools.
+   * A published entry point is rarely where the descriptors live. It is either a
+   * barrel that re-exports them, or a thin format shim that imports the pack and
+   * adapts it. Both are the same door one hop further in.
+   *
+   * Two kinds of hop are followed, and the difference matters:
+   *
+   * - **Re-exports, anywhere, including into another package.** A re-export is a
+   *   promise that what this module exports is what that one exports, so the
+   *   consumer receives those bindings directly. Packages really do move a pack
+   *   out of a sibling package and into themselves between releases; a walk that
+   *   stopped at the package boundary would read that as every tool vanishing.
+   * - **Relative imports, inside the package.** This is the shim-over-pack shape.
+   *
+   * A plain import of *another* package is not followed. That is a dependency
+   * this module uses, not a door it hands over, and pulling its descriptors in
+   * would merge two surfaces — destroying the very divergence this project
+   * exists to detect.
    */
-  surfaceModules(entry: ParsedModule, maxDepth = 3): ParsedModule[] {
+  surfaceModules(entry: ParsedModule, maxDepth = 5): ParsedModule[] {
     const collected: ParsedModule[] = [];
     // `load` memoizes, so the same file is always the same object; identity is
     // enough to stop a re-export cycle.
@@ -222,7 +248,9 @@ export class ModuleGraph {
       collected.push(next.module);
       if (next.depth >= maxDepth) continue;
 
-      for (const specifier of this.factsFor(next.module).reexports) {
+      const facts = this.factsFor(next.module);
+      // `relativeImports` is already filtered to same-package specifiers.
+      for (const specifier of [...facts.reexports, ...facts.relativeImports]) {
         const target = this.follow(next.module, specifier);
         if (target !== null) queue.push({ module: target, depth: next.depth + 1 });
       }
@@ -247,6 +275,22 @@ export class ModuleGraph {
 
     // Built output often exports a const without a matching specifier entry.
     if (facts.locals.has(name)) return this.local(module, name, depth, seen);
+
+    // `export * from "./x.js"` — a barrel index is the normal shape for a
+    // constants package, and the tool name is one file further in.
+    const key = `star ${module.path} ${name}`;
+    if (facts.exportStars.length === 0 || seen.has(key)) return UNRESOLVED;
+    seen.add(key);
+    try {
+      for (const specifier of facts.exportStars) {
+        const target = this.follow(module, specifier);
+        if (target === null) continue;
+        const value = this.exported(target, name, depth - 1, seen);
+        if (!isUnresolved(value)) return value;
+      }
+    } finally {
+      seen.delete(key);
+    }
     return UNRESOLVED;
   }
 
