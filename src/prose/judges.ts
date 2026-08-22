@@ -294,7 +294,7 @@ export function createJudge(config: JudgeConfig): Judge {
  * unconfirmed.
  */
 export function judgeFromEnv(env: NodeJS.ProcessEnv = process.env): Judge | null {
-  const requested = env["LEEWAY_JUDGE"]?.toLowerCase();
+  const requested = env["STANTAL_JUDGE"]?.toLowerCase();
   if (requested === "none") return null;
 
   const candidates: Array<{ provider: JudgeProvider; key: string | undefined }> = [
@@ -310,9 +310,9 @@ export function judgeFromEnv(env: NodeJS.ProcessEnv = process.env): Judge | null
 
   if (chosen === undefined || chosen.key === undefined || chosen.key.length === 0) return null;
 
-  const model = env["LEEWAY_JUDGE_MODEL"];
-  const baseUrl = env["LEEWAY_JUDGE_BASE_URL"];
-  const transport = env["LEEWAY_JUDGE_TRANSPORT"]?.toLowerCase();
+  const model = env["STANTAL_JUDGE_MODEL"];
+  const baseUrl = env["STANTAL_JUDGE_BASE_URL"];
+  const transport = env["STANTAL_JUDGE_TRANSPORT"]?.toLowerCase();
   return createJudge({
     provider: chosen.provider,
     apiKey: chosen.key,

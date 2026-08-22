@@ -34,7 +34,7 @@ export type Installed = {
   missing: string[];
 };
 
-export const DEFAULT_CACHE_ROOT = ".leeway/npm";
+export const DEFAULT_CACHE_ROOT = ".stantal/npm";
 
 /** `@scope/name` -> `@scope+name`, so one version is one directory on any OS. */
 function directoryName(name: string): string {
@@ -42,7 +42,7 @@ function directoryName(name: string): string {
 }
 
 /** Written only after a successful unpack, so a half-extracted directory is never trusted. */
-const MARKER = ".leeway-extracted";
+const MARKER = ".stantal-extracted";
 
 function readManifest(directory: string): PackageJson | null {
   try {

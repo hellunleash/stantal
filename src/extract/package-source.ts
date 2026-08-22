@@ -151,6 +151,31 @@ export function declaredEntryPoints(pkg: PackageJson, query: EntryPointQuery = {
   return [subpath];
 }
 
+/**
+ * Every subpath a consumer could import, as the package declares them.
+ *
+ * This is how the tool finds the doors without being told: a package that
+ * exposes `.`, `./ai-sdk` and `./mastra` has three surfaces, and each one is a
+ * separate contract that has to be read and compared on its own.
+ *
+ * Wildcard patterns are skipped. `./auth/*` cannot be enumerated without
+ * guessing what is behind it, and guessing a door is how you end up comparing
+ * two things that were never the same surface.
+ */
+export function exportedSubpaths(pkg: PackageJson): string[] {
+  const exports = pkg.exports;
+  if (exports === undefined || exports === null) return ["."];
+  if (typeof exports === "string") return ["."];
+  if (Array.isArray(exports)) return ["."];
+
+  const keys = Object.keys(exports as Record<string, unknown>);
+  // An `exports` object with no "./" keys is a bare condition map for ".".
+  const subpaths = keys.filter((key) => key === "." || key.startsWith("./"));
+  if (subpaths.length === 0) return ["."];
+
+  return subpaths.filter((key) => !key.includes("*")).sort();
+}
+
 /** Resolve a subpath to a file that actually exists in the package. */
 export function resolveEntryPoint(source: PackageSource, query: EntryPointQuery = {}): EntryPoint {
   const pkg = source.packageJson();

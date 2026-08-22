@@ -56,7 +56,7 @@ function fakeRegistry(packages: Record<string, FakePackage>) {
 
 const roots: string[] = [];
 function cacheRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), "leeway-test-"));
+  const root = mkdtempSync(join(tmpdir(), "stantal-test-"));
   roots.push(root);
   return root;
 }

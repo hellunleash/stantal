@@ -19,7 +19,7 @@ dist/
 .env.local
 
 # Extraction sandbox scratch + the permanent contract cache
-.leeway/
+.stantal/
 
 # Editor / OS
 .DS_Store

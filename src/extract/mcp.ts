@@ -94,7 +94,7 @@ export async function extractFromMcpServer(options: McpExtractOptions): Promise<
   });
 
   const client = new Client(
-    { name: "leeway", version: EXTRACTOR_VERSION },
+    { name: "stantal", version: EXTRACTOR_VERSION },
     { capabilities: {} },
   );
 

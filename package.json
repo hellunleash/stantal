@@ -1,11 +1,11 @@
 {
-  "name": "leeway",
+  "name": "stantal",
   "version": "0.0.0",
   "description": "Tells you whether a model will behave differently after you upgrade a package, before you take the upgrade.",
   "type": "module",
   "license": "MIT",
   "bin": {
-    "leeway": "./dist/cli.js"
+    "stantal": "./dist/cli.js"
   },
   "files": [
     "dist"

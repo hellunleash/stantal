@@ -15,7 +15,7 @@ import type { AnyNode } from "acorn";
  * ships no guidance" apart from "we could not read the guidance".
  */
 
-export const UNRESOLVED: unique symbol = Symbol("leeway.unresolved");
+export const UNRESOLVED: unique symbol = Symbol("stantal.unresolved");
 export type Unresolved = typeof UNRESOLVED;
 
 export function isUnresolved(value: unknown): value is Unresolved {

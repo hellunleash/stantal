@@ -135,18 +135,18 @@ describe("judgeFromEnv", () => {
   });
 
   test("an explicit provider choice wins over key order", () => {
-    const env = { ANTHROPIC_API_KEY: "a", OPENAI_API_KEY: "o", LEEWAY_JUDGE: "openai" };
+    const env = { ANTHROPIC_API_KEY: "a", OPENAI_API_KEY: "o", STANTAL_JUDGE: "openai" };
     expect(judgeFromEnv(env)?.id).toBe("openai:gpt-4o");
   });
 
   test("the model is overridable, because a backfill should not run on the priciest model", () => {
-    expect(judgeFromEnv({ ANTHROPIC_API_KEY: "k", LEEWAY_JUDGE_MODEL: "claude-haiku-4-5" })?.id).toBe(
+    expect(judgeFromEnv({ ANTHROPIC_API_KEY: "k", STANTAL_JUDGE_MODEL: "claude-haiku-4-5" })?.id).toBe(
       "anthropic:claude-haiku-4-5",
     );
   });
 
   test("can be switched off even with a key in the environment", () => {
-    expect(judgeFromEnv({ ANTHROPIC_API_KEY: "k", LEEWAY_JUDGE: "none" })).toBeNull();
+    expect(judgeFromEnv({ ANTHROPIC_API_KEY: "k", STANTAL_JUDGE: "none" })).toBeNull();
   });
 });
 
@@ -249,6 +249,6 @@ describe("transports", () => {
   });
 
   test("the transport is selectable from the environment", () => {
-    expect(judgeFromEnv({ OPENAI_API_KEY: "k", LEEWAY_JUDGE_TRANSPORT: "http" })).not.toBeNull();
+    expect(judgeFromEnv({ OPENAI_API_KEY: "k", STANTAL_JUDGE_TRANSPORT: "http" })).not.toBeNull();
   });
 });
