@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import { isPresent } from "./contract/surface.js";
 import { judgeFromEnv } from "./prose/judges.js";
 import { pacoteRegistry } from "./registry/npm.js";
+import { walkHistory, type HistoryResult } from "./history.js";
 import { buildReport, exitCodeFor, type Report, type SurfaceReport } from "./report.js";
 
 /**
@@ -19,6 +20,11 @@ const USAGE = `
 stantal — know whether an upgrade changes how a model uses your dependency
 
   stantal <package> <from> <to> [options]
+  stantal history <package> [options]
+
+Comparing two versions tells you whether to take an upgrade.
+Walking the history tells you which release broke it, and the last one that
+was fine — which is what a stranded consumer actually needs.
 
 Options
   --surface <subpath>   Read one door only, e.g. "." or "./ai-sdk".
@@ -26,6 +32,9 @@ Options
   --json                Print the full report as JSON.
   --no-judge            Skip the model judge even if a key is set.
   --cache <dir>         Where unpacked versions live. Default .stantal/npm
+  --since <version>     history: start here instead of the first release.
+  --until <version>     history: stop here instead of the latest.
+  --concurrency <n>     history: parallel version fetches. Default 4.
   --help, --version
 
 Exit codes
@@ -148,6 +157,97 @@ function render(report: Report): string {
   return out.join("\n");
 }
 
+function renderHistory(result: HistoryResult): string {
+  const { summary } = result;
+  const first = result.versions[0];
+  const last = result.versions[result.versions.length - 1];
+
+  const out: string[] = [
+    "",
+    `  ${bold(result.package)}  ${dim(`${summary.versionsWalked} releases, ${first} → ${last}`)}`,
+    "",
+    `  ${dim("FOUND")}  ${bold(String(summary.distinctFindings))} contract change(s) a model would read differently`,
+    `         ${summary.silent} of them with no structural signal at all${
+      summary.silent > 0 ? red("  ← invisible to every other tool") : ""
+    }`,
+    `         ${summary.unresolved} still present at ${last}`,
+    "",
+  ];
+
+  if (result.onsets.length > 0) {
+    out.push(`  ${dim("onset — the release that introduced it, and the last one before it")}`, "");
+  }
+
+  for (const onset of result.onsets) {
+    const severity = onset.severity === "high" ? red(onset.severity) : yellow(onset.severity);
+    const span = onset.resolvedAt === null ? `still present` : `fixed in ${onset.resolvedAt}`;
+    out.push(
+      `  ${severity}  ${onset.rule}  ${bold(onset.target)}  ${dim(onset.subpath)}`,
+      `    introduced in ${bold(onset.introducedAt)}${
+        onset.lastCleanVersion !== null ? dim(`, last clean ${onset.lastCleanVersion}`) : dim(" (first release walked)")
+      }`,
+      `    ${dim(`${onset.releasesAffected} release(s) affected, ${span}`)}`,
+      `    ${dim(truncate(onset.headline, 96))}`,
+      "",
+    );
+  }
+
+  const unreadable = result.steps.filter((s) => s.unreadableSurfaces.length > 0);
+  if (unreadable.length > 0) {
+    out.push(
+      `  ${dim(`${unreadable.length} release(s) had a surface that could not be read; nothing is claimed about those`)}`,
+      "",
+    );
+  }
+
+  const judgeNote =
+    result.judge === "none"
+      ? "no judge configured — semantic findings are unconfirmed leads"
+      : `judged by ${result.judge}`;
+  out.push(`  ${dim(judgeNote)}`, `  ${dim("run with --json for the full walk")}`, "");
+  return out.join("\n");
+}
+
+async function runHistory(
+  pkg: string | undefined,
+  values: { json?: boolean | undefined; cache?: string | undefined; since?: string | undefined; until?: string | undefined; concurrency?: string | undefined; surface?: string[] | undefined },
+  judge: ReturnType<typeof judgeFromEnv>,
+): Promise<number> {
+  if (pkg === undefined) {
+    process.stderr.write(`${USAGE}\n`);
+    return 2;
+  }
+
+  const quiet = values.json === true;
+  try {
+    const result = await walkHistory({
+      package: pkg,
+      registry: pacoteRegistry(),
+      judge,
+      ...(values.cache !== undefined ? { cacheRoot: values.cache } : {}),
+      ...(values.since !== undefined ? { since: values.since } : {}),
+      ...(values.until !== undefined ? { until: values.until } : {}),
+      ...(values.surface !== undefined ? { subpaths: values.surface } : {}),
+      ...(values.concurrency !== undefined ? { concurrency: Number(values.concurrency) } : {}),
+      // Progress goes to stderr so `--json` stays pipeable.
+      ...(quiet
+        ? {}
+        : {
+            onProgress: (done: number, total: number, version: string) => {
+              process.stderr.write(`\r  reading ${done}/${total}  ${version}${" ".repeat(12)}`);
+              if (done === total) process.stderr.write(`\r${" ".repeat(48)}\r`);
+            },
+          }),
+    });
+
+    process.stdout.write(quiet ? `${JSON.stringify(result, null, 2)}\n` : renderHistory(result));
+    return result.summary.distinctFindings > 0 ? 1 : 0;
+  } catch (error) {
+    process.stderr.write(`stantal: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
+}
+
 // --- Entry point -------------------------------------------------------------
 
 export async function main(argv: readonly string[]): Promise<number> {
@@ -161,6 +261,9 @@ export async function main(argv: readonly string[]): Promise<number> {
         json: { type: "boolean" },
         "no-judge": { type: "boolean" },
         cache: { type: "string" },
+        since: { type: "string" },
+        until: { type: "string" },
+        concurrency: { type: "string" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean" },
       },
@@ -181,13 +284,17 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 0;
   }
 
+  const judge = values["no-judge"] === true ? null : judgeFromEnv();
+
+  if (positionals[0] === "history") {
+    return runHistory(positionals[1], values, judge);
+  }
+
   const [pkg, from, to] = positionals;
   if (pkg === undefined || from === undefined || to === undefined) {
     process.stderr.write(`${USAGE}\n`);
     return 2;
   }
-
-  const judge = values["no-judge"] === true ? null : judgeFromEnv();
 
   try {
     const report = await buildReport({
