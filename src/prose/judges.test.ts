@@ -130,8 +130,8 @@ describe("judgeFromEnv", () => {
 
   test("picks up whichever key is present", () => {
     expect(judgeFromEnv({ OPENAI_API_KEY: "k" })?.id).toBe("openai:gpt-4o");
-    expect(judgeFromEnv({ GEMINI_API_KEY: "k" })?.id).toBe("gemini:gemini-2.0-flash");
-    expect(judgeFromEnv({ GOOGLE_API_KEY: "k" })?.id).toBe("gemini:gemini-2.0-flash");
+    expect(judgeFromEnv({ GEMINI_API_KEY: "k" })?.id).toBe("gemini:gemini-3.6-flash");
+    expect(judgeFromEnv({ GOOGLE_API_KEY: "k" })?.id).toBe("gemini:gemini-3.6-flash");
   });
 
   test("an explicit provider choice wins over key order", () => {

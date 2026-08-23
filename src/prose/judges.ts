@@ -1,3 +1,8 @@
+import {
+  cacheModeFromEnv,
+  cachingJudge,
+  DEFAULT_JUDGE_CACHE_DIR,
+} from "./judge-cache.js";
 import { askViaSdk, sdkAvailable, SdkUnavailableError, type ModuleLoader } from "./judge-sdk.js";
 import {
   JUDGE_SYSTEM_PROMPT,
@@ -67,7 +72,7 @@ export class JudgeError extends Error {
 const DEFAULT_MODEL: Record<JudgeProvider, string> = {
   anthropic: "claude-opus-5",
   openai: "gpt-4o",
-  gemini: "gemini-2.0-flash",
+  gemini: "gemini-3.6-flash",
 };
 
 const DEFAULT_BASE: Record<JudgeProvider, string> = {
@@ -292,6 +297,10 @@ export function createJudge(config: JudgeConfig): Judge {
  * Returns null when no key is present, which is the normal case for a first run
  * and is not an error. Layer 1 still produces findings; they are just labelled
  * unconfirmed.
+ *
+ * Whatever is picked comes back wrapped in the on-disk cache, so a question is
+ * paid for once and replayed after that. `STANTAL_JUDGE_CACHE=replay` makes a
+ * run incapable of calling out at all, and `off` disables the cache.
  */
 export function judgeFromEnv(env: NodeJS.ProcessEnv = process.env): Judge | null {
   const requested = env["STANTAL_JUDGE"]?.toLowerCase();
@@ -313,11 +322,18 @@ export function judgeFromEnv(env: NodeJS.ProcessEnv = process.env): Judge | null
   const model = env["STANTAL_JUDGE_MODEL"];
   const baseUrl = env["STANTAL_JUDGE_BASE_URL"];
   const transport = env["STANTAL_JUDGE_TRANSPORT"]?.toLowerCase();
-  return createJudge({
+  const judge = createJudge({
     provider: chosen.provider,
     apiKey: chosen.key,
     ...(model ? { model } : {}),
     ...(baseUrl ? { baseUrl } : {}),
     ...(transport === "http" || transport === "sdk" || transport === "auto" ? { transport } : {}),
+  });
+
+  const mode = cacheModeFromEnv(env);
+  if (mode === "off") return judge;
+  return cachingJudge(judge, {
+    dir: env["STANTAL_JUDGE_CACHE_DIR"] ?? DEFAULT_JUDGE_CACHE_DIR,
+    mode,
   });
 }

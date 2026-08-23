@@ -31,6 +31,8 @@ Options
                         Repeatable. Default: every subpath the package exports.
   --json                Print the full report as JSON.
   --no-judge            Skip the model judge even if a key is set.
+  --replay              Answer only from recorded judge replies. Never calls
+                        out, so the run is free and repeats identically.
   --cache <dir>         Where unpacked versions live. Default .stantal/npm
   --since <version>     history: start here instead of the first release.
   --until <version>     history: stop here instead of the latest.
@@ -45,6 +47,11 @@ Exit codes
 The judge is optional and off unless a key is present. It reads
 ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY / GOOGLE_API_KEY.
 STANTAL_JUDGE forces a provider or "none"; STANTAL_JUDGE_MODEL picks a model.
+
+Every judge reply is recorded to .stantal/judge and keyed on the text of the
+question, so a walk over 40 releases asks about an unchanged parameter once.
+STANTAL_JUDGE_CACHE=replay (or --replay) refuses to call out at all;
+"off" disables the cache. STANTAL_JUDGE_CACHE_DIR moves it.
 `.trim();
 
 /**
@@ -278,6 +285,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         surface: { type: "string", multiple: true },
         json: { type: "boolean" },
         "no-judge": { type: "boolean" },
+        replay: { type: "boolean" },
         cache: { type: "string" },
         since: { type: "string" },
         until: { type: "string" },
@@ -303,6 +311,9 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
 
   loadDotEnv();
+  // --replay is a shorthand for the env var, so a CI job can be free by flag
+  // rather than by remembering to set something.
+  if (values.replay === true) process.env["STANTAL_JUDGE_CACHE"] = "replay";
   const judge = values["no-judge"] === true ? null : judgeFromEnv();
 
   if (positionals[0] === "history") {
