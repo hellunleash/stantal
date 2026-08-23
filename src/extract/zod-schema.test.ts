@@ -413,6 +413,46 @@ describe("schemas reached indirectly", () => {
   });
 });
 
+describe("raw keeps what we chose not to model", () => {
+  it("records the base constructor and the whole chain", () => {
+    // The JSON-Schema path stores the untouched fragment so extraction is never
+    // lossy. The zod path owes the same debt.
+    const param = paramNamed(
+      `const SCHEMA = z.object({ a: z.string().trim().min(1).refine(check).optional() });`,
+      "a",
+    );
+    expect(param.raw).toEqual({
+      zod: "string",
+      chain: ["trim", "min", "refine", "optional"],
+    });
+  });
+
+  it("keeps a validator we do not model, like .refine()", () => {
+    const param = paramNamed(`const SCHEMA = z.object({ a: z.string().refine(isEven) });`, "a");
+    expect((param.raw as { chain: string[] }).chain).toContain("refine");
+  });
+
+  it("keeps the base of a union, whose members we report as unknown", () => {
+    const param = paramNamed(
+      `const SCHEMA = z.object({ a: z.union([z.string(), z.number()]) });`,
+      "a",
+    );
+    expect(param.type).toBe("unknown");
+    expect((param.raw as { zod: string }).zod).toBe("union");
+  });
+
+  it("records the chain through a helper, not just the outer links", () => {
+    const param = paramNamed(
+      `
+      function lenient() { return z.string().trim().min(1); }
+      const SCHEMA = z.object({ a: lenient().optional() });
+      `,
+      "a",
+    );
+    expect((param.raw as { chain: string[] }).chain).toEqual(["trim", "min", "optional"]);
+  });
+});
+
 describe("looksLikeZod", () => {
   it("accepts a named constant, because Schema.shape is the common case", () => {
     const { node, context: ctx } = context(`const SCHEMA = ArgsSchema.shape;`);

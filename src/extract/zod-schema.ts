@@ -546,6 +546,20 @@ function locateShape(node: AnyNode, context: ZodContext, depth = 0): Located | {
 
 // --- Reading one field ------------------------------------------------------
 
+/**
+ * The declaration as written, kept whether or not we modelled it.
+ *
+ * `Param.raw` exists so extraction is never lossy: the JSON-Schema path stores
+ * the untouched fragment, so a keyword we do not model is still on the record.
+ * The zod path owed the same debt and was not paying it — `.refine()`,
+ * `z.union([...])`, `.trim()` were simply gone.
+ *
+ * Stored as the base constructor plus the method chain, which is serializable
+ * (an AST node is not) and is exactly the part a future rule would want. It is
+ * never compared: `raw` is evidence, not a finding.
+ */
+type ZodDeclaration = { zod: string; chain: string[] };
+
 type FieldRead = {
   type: JsonType;
   required: boolean;
@@ -553,6 +567,7 @@ type FieldRead = {
   constraints: Constraints;
   children: Param[] | undefined;
   gaps: ZodGap[];
+  raw: ZodDeclaration;
 };
 
 /**
@@ -665,6 +680,7 @@ function readField(node: AnyNode, path: string, context: ZodContext, depth: numb
             reason: `\`${path}\` is built by a helper this reader could not follow`,
           },
         ],
+        raw: { zod: chain.base, chain: chain.links.map((l) => l.method) },
       };
     }
     const inner = readField(returned, path, bound.context, depth + 1);
@@ -685,6 +701,7 @@ function readField(node: AnyNode, path: string, context: ZodContext, depth: numb
         constraints: {},
         children: undefined,
         gaps: [{ path, reason: `the schema for \`${path}\` is a constant this reader could not follow` }],
+        raw: { zod: chain.base, chain: chain.links.map((l) => l.method) },
       };
     }
     const { node: target, rest } = descend(bound.node, bound.links);
@@ -757,6 +774,7 @@ function readField(node: AnyNode, path: string, context: ZodContext, depth: numb
     constraints,
     children,
     gaps,
+    raw: { zod: chain.base, chain: [] },
   };
 
   return applyLinks(base, chain.links, path, context, depth);
@@ -777,7 +795,14 @@ function applyLinks(
   context: ZodContext,
   depth: number,
 ): FieldRead {
-  const out: FieldRead = { ...read, constraints: { ...read.constraints }, gaps: [...read.gaps] };
+  const out: FieldRead = {
+    ...read,
+    constraints: { ...read.constraints },
+    gaps: [...read.gaps],
+    // Every method is recorded, including the ones below that are deliberately
+    // no-ops. What we chose not to model is exactly what `raw` is for.
+    raw: { zod: read.raw.zod, chain: [...read.raw.chain, ...links.map((l) => l.method)] },
+  };
 
   for (const link of links) {
     switch (link.method) {
@@ -892,6 +917,7 @@ function readShapeLiteral(
         description: null,
         constraints: {},
         children: undefined,
+        raw: { zod: "unreadable", chain: [] },
       });
       continue;
     }
@@ -904,6 +930,7 @@ function readShapeLiteral(
       description: field.description,
       constraints: field.constraints,
       children: field.children,
+      raw: field.raw,
     });
   }
 
