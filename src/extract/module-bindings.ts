@@ -326,4 +326,71 @@ export class ModuleGraph {
   resolverFor(module: ParsedModule, maxDepth = DEFAULT_MAX_DEPTH): BindingResolver {
     return (name) => this.local(module, name, maxDepth, new Set());
   }
+
+  /**
+   * The AST node a binding was initialised with, and the module it lives in.
+   *
+   * `resolverFor` folds a binding to a *value*, which is the right answer for a
+   * tool name and the wrong one for a schema built by calling functions. A zod
+   * schema has no static value — `z.string()` is a call, and calling it is the
+   * one thing this extractor must never do. Reading it means reading its shape,
+   * and that needs the node.
+   *
+   * The module comes back with the node because a constant imported from
+   * another file resolves its own identifiers there, not here.
+   */
+  nodeFor(
+    module: ParsedModule,
+    name: string,
+    maxDepth = DEFAULT_MAX_DEPTH,
+  ): { node: AnyNode; module: ParsedModule } | null {
+    return this.nodeLookup(module, name, maxDepth, new Set());
+  }
+
+  private nodeLookup(
+    module: ParsedModule,
+    name: string,
+    depth: number,
+    seen: Set<string>,
+  ): { node: AnyNode; module: ParsedModule } | null {
+    if (depth <= 0) return null;
+
+    const key = `node ${module.path} ${name}`;
+    if (seen.has(key)) return null; // a cycle; there is no node to read
+    seen.add(key);
+
+    try {
+      const facts = this.factsFor(module);
+
+      const init = facts.locals.get(name);
+      if (init !== undefined) return { node: init as AnyNode, module };
+
+      const imported = facts.imports.get(name);
+      if (imported !== undefined && imported.imported !== null) {
+        const target = this.follow(module, imported.specifier);
+        return target === null
+          ? null
+          : this.nodeLookup(target, imported.imported, depth - 1, seen);
+      }
+
+      const exported = facts.exportsFrom.get(name);
+      if (exported !== undefined && exported.imported !== null) {
+        const target = this.follow(module, exported.specifier);
+        return target === null
+          ? null
+          : this.nodeLookup(target, exported.imported, depth - 1, seen);
+      }
+
+      for (const specifier of facts.exportStars) {
+        const target = this.follow(module, specifier);
+        if (target === null) continue;
+        const found = this.nodeLookup(target, name, depth - 1, seen);
+        if (found !== null) return found;
+      }
+
+      return null;
+    } finally {
+      seen.delete(key);
+    }
+  }
 }

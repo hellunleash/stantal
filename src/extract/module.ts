@@ -6,10 +6,18 @@ import {
   type SurfaceAbsenceReason,
   type SurfaceResult,
 } from "../contract/surface.js";
-import { EXTRACTOR_VERSION, type Contract, type Ecosystem, type Surface, type Tool } from "../contract/types.js";
+import {
+  EXTRACTOR_VERSION,
+  type Contract,
+  type Ecosystem,
+  type Param,
+  type Surface,
+  type Tool,
+} from "../contract/types.js";
 import { evaluate, isUnresolved } from "./js-literal.js";
 import { ModuleGraph, type ParsedModule } from "./module-bindings.js";
 import { resolveEntryPoint, type EntryCondition, type PackageSource } from "./package-source.js";
+import { looksLikeZod, readZodSchema, type ZodContext } from "./zod-schema.js";
 
 /**
  * Module-pack adapter.
@@ -198,6 +206,90 @@ function descriptorSites(modules: readonly ParsedModule[]): DescriptorSite[] {
 
 type ReadDescriptor = { tool: Tool; notes: ExtractionNote[] } | { tool: null; notes: ExtractionNote[] };
 
+/**
+ * A `ZodContext` backed by the module graph.
+ *
+ * The context travels with the node, because a schema constant imported from
+ * another file resolves its own identifiers over there. Following that is the
+ * difference between reading a package that defines its schemas in one file and
+ * reading one that keeps them in a shared module — which is most of them.
+ */
+function zodContextFor(module: ParsedModule, graph: ModuleGraph): ZodContext {
+  const resolve = graph.resolverFor(module);
+  return {
+    binding(name) {
+      const found = graph.nodeFor(module, name);
+      if (found === null) return null;
+      return {
+        node: found.node,
+        context: found.module === module ? zodContextFor(module, graph) : zodContextFor(found.module, graph),
+      };
+    },
+    value: (node) => evaluate(node, resolve).value,
+  };
+}
+
+/**
+ * Read a descriptor's schema as zod, or say why it could not be.
+ *
+ * Returns null when the expression is not zod at all, so the caller falls back
+ * to the gap it would have reported anyway. A refusal comes back as parameters
+ * plus a note: the reading failed, and that fact suppresses claims downstream
+ * rather than looking like a tool with no parameters.
+ */
+function readZodDescriptor(
+  node: AnyNode,
+  site: DescriptorSite,
+  graph: ModuleGraph,
+  name: string,
+  evidence: string,
+): { params: Param[]; notes: ExtractionNote[] } | null {
+  if (!looksLikeZod(node)) return null;
+
+  const result = readZodSchema(node, zodContextFor(site.module, graph));
+  if (result === null) return null;
+
+  if ("refuse" in result) {
+    return {
+      params: [],
+      notes: [
+        {
+          code: "descriptor_schema_unresolved",
+          scope: "schema",
+          target: name,
+          evidence,
+          detail: `\`${name}\` declares its parameters with zod, and ${result.refuse}`,
+        },
+      ],
+    };
+  }
+
+  // A gap at the root means the parameter *set* is unknown, so it is recorded
+  // against the tool. A gap at a path means only that path is unknown. The
+  // difference decides how much the classifier has to withhold.
+  const notes: ExtractionNote[] = result.gaps.map((gap) => ({
+    code: "descriptor_schema_unresolved" as const,
+    scope: "schema" as const,
+    target: gap.path === "(root)" ? name : `${name}.${gap.path}`,
+    evidence,
+    detail: `\`${name}\`: ${gap.reason}`,
+  }));
+
+  // Zod that reads to nothing is a reading failure, not an empty contract. A
+  // zero-parameter tool diffs as "every parameter removed".
+  if (result.params.length === 0) {
+    notes.push({
+      code: "descriptor_schema_unresolved",
+      scope: "schema",
+      target: name,
+      evidence,
+      detail: `\`${name}\` declares its parameters with zod, but none of them could be read`,
+    });
+  }
+
+  return { params: result.params, notes };
+}
+
 function readDescriptor(site: DescriptorSite, graph: ModuleGraph): ReadDescriptor {
   const properties = propertyMap(site.node);
   const resolve = graph.resolverFor(site.module);
@@ -245,6 +337,28 @@ function readDescriptor(site: DescriptorSite, graph: ModuleGraph): ReadDescripto
 
   const schemaKey = SCHEMA_KEYS.find((key) => properties.has(key));
   const schemaNode = schemaKey === undefined ? undefined : properties.get(schemaKey);
+
+  // Zod gets the first look, before the literal folder.
+  //
+  // This ordering is not a preference, it is a correctness fix. A zod raw shape
+  // — `{ path: z.string() }` — folds to a *partial* object: every value drops
+  // out and an empty `{}` survives. An empty object is not UNRESOLVED, so a
+  // zod-last reader never even asks, and reports a tool that takes no
+  // parameters. That is a false claim, and it diffs as every parameter removed.
+  const asZod =
+    schemaNode === undefined ? null : readZodDescriptor(schemaNode as AnyNode, site, graph, name, evidence);
+  if (asZod !== null) {
+    notes.push(...asZod.notes);
+    return {
+      tool: {
+        name,
+        description: typeof description === "string" ? description : null,
+        params: asZod.params,
+      },
+      notes,
+    };
+  }
+
   const schema = schemaNode === undefined ? undefined : evaluate(schemaNode as AnyNode, resolve);
 
   if (schema === undefined || isUnresolved(schema.value)) {

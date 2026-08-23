@@ -74,7 +74,14 @@ function contractOf(result: SurfaceResult): Contract | null {
 type Blocked = {
   /** Tools whose prose could not be read. Nothing about their text is safe. */
   descriptions: Map<string, string>;
-  /** Tools whose schema could not be read. Nothing about their parameters is safe. */
+  /**
+   * Paths whose schema could not be read, keyed by `tool` or `tool.param`.
+   *
+   * Keyed by path rather than by tool because the reader now reports gaps at
+   * the precision it actually has. A tool whose `options` field is built by a
+   * shape-changing call still has a perfectly readable `url` next to it, and
+   * blocking the whole tool for that would throw away the readable half.
+   */
   parameters: Map<string, string>;
 };
 
@@ -97,10 +104,17 @@ function unreadable(results: readonly SurfaceResult[]): Blocked {
     for (const note of result.notes as ExtractionNote[]) {
       if (note.scope === "surface") continue; // a tool-set gap, handled by Layer 0
       if (note.target === null) continue;
-      const tool = note.target.split(".")[0] ?? note.target;
       const reason = `${note.code} at ${note.evidence ?? "unknown location"}`;
-      const bucket = note.scope === "description" ? blocked.descriptions : blocked.parameters;
-      bucket.set(tool, reason);
+
+      if (note.scope === "description") {
+        // Prose is read per tool, so a gap in it is a gap for the whole tool.
+        blocked.descriptions.set(note.target.split(".")[0] ?? note.target, reason);
+        continue;
+      }
+
+      // Schema gaps keep their full path. A bare tool name means the parameter
+      // set itself is unknown; anything longer names one branch of it.
+      blocked.parameters.set(note.target, reason);
     }
   }
 
@@ -110,6 +124,22 @@ function unreadable(results: readonly SurfaceResult[]): Blocked {
 /** Whether a candidate names a parameter, which decides which gap can block it. */
 function isParameterClaim(candidate: Candidate): boolean {
   return candidate.target.includes(".");
+}
+
+/**
+ * The recorded gap that covers this target, if any.
+ *
+ * A gap covers a target when it names the target or an ancestor of it: a gap on
+ * `crawl` covers `crawl.url`, and a gap on `crawl.options` covers
+ * `crawl.options.timeout` — but neither covers `crawl.limit`.
+ */
+function gapCovering(blocked: Map<string, string>, target: string): string | undefined {
+  const parts = target.split(".");
+  for (let end = parts.length; end > 0; end -= 1) {
+    const reason = blocked.get(parts.slice(0, end).join("."));
+    if (reason !== undefined) return reason;
+  }
+  return undefined;
 }
 
 // --- Rules over a single contract -------------------------------------------
@@ -338,7 +368,8 @@ export async function classifyProse(
   for (const candidate of all) {
     // A gap only blocks the kind of claim it actually covers.
     const reason = isParameterClaim(candidate)
-      ? (blocked.parameters.get(candidate.tool) ?? blocked.descriptions.get(candidate.tool))
+      ? (gapCovering(blocked.parameters, candidate.target) ??
+        blocked.descriptions.get(candidate.tool))
       : blocked.descriptions.get(candidate.tool);
     if (reason === undefined) usable.push(candidate);
     else skipped.push({ target: candidate.target, reason });
