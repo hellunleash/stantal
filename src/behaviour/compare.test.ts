@@ -167,6 +167,66 @@ describe("tool selection", () => {
     expect(result.findings.find((f) => f.rule === "tool_switched")?.severity).toBe("high");
   });
 
+  it("reports a rename once, not once per direction", () => {
+    // Measured on the real anchoring pair before this was fixed: three intents
+    // produced six findings, one saying the old name was dropped and one saying
+    // the new name was picked up. One event, reported once.
+    const result = compareRuns({
+      before: { contract: before, runs: runs(repeat(call("create", { prompt: "p" }), 5)) },
+      after: { contract: after, runs: runs(repeat(call("edit", {}), 5)) },
+    });
+
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.rule).toBe("tool_switched");
+    expect(result.findings[0]?.target).toBe("edit");
+    expect(result.findings[0]?.headline).toContain("used to reach `create`");
+  });
+
+  it("samples the old tool on the before side of a rename", () => {
+    // Sampling the new name on the old side returns nothing, and a finding
+    // whose evidence is half empty is one nobody can check.
+    const withId = contract(
+      [tool("create", [param("prompt", { required: true })]), tool("edit", [param("id")])],
+      "2.0.0",
+    );
+    const result = compareRuns({
+      before: { contract: before, runs: runs(repeat(call("create", { prompt: "p" }), 5)) },
+      after: { contract: withId, runs: runs(repeat(call("edit", { id: "x" }), 5)) },
+    });
+
+    const renamed = result.findings.find((f) => f.rule === "tool_switched");
+    expect(renamed?.evidence.beforeSample).toEqual({ prompt: "p" });
+    expect(renamed?.evidence.afterSample).toEqual({ id: "x" });
+  });
+
+  it("still reports each move separately when it is not a clean swap", () => {
+    // Two tools dropped and one gained is not a rename, and calling it one
+    // would be inventing a mapping the evidence does not support.
+    const wide = contract(
+      [tool("create", [param("prompt", { required: true })]), tool("edit", []), tool("make", [])],
+      "2.0.0",
+    );
+    const other: Intent = { id: "i9", text: "do it", slice: [], expectsNoCall: false };
+    const result = compareRuns({
+      before: {
+        contract: wide,
+        runs: [
+          { intent, choices: repeat(call("create", { prompt: "p" }), 5) },
+          { intent: other, choices: repeat(call("edit", {}), 5) },
+        ],
+      },
+      after: {
+        contract: wide,
+        runs: [
+          { intent, choices: repeat(call("make", {}), 5) },
+          { intent: other, choices: repeat(call("make", {}), 5) },
+        ],
+      },
+    });
+
+    expect(result.findings.filter((f) => f.rule === "tool_switched")).toHaveLength(2);
+  });
+
   it("does not also report fields on a tool it stopped choosing", () => {
     // One event, reported once. Field rates on an empty sample are meaningless.
     const result = compareRuns({

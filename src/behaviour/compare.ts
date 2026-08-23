@@ -99,10 +99,44 @@ function invalidRate(choices: readonly ToolChoice[], contract: Contract): Rate {
   return wilson(invalid, calls.length);
 }
 
+/**
+ * Which tools this intent stopped reaching, and which it started reaching.
+ *
+ * Split rather than reported per tool, because the interesting case — a rename
+ * — is exactly one of each, and naming it as one event is the difference
+ * between three findings and six.
+ */
+function movedTools(
+  tools: readonly string[],
+  before: readonly ToolChoice[],
+  after: readonly ToolChoice[],
+): { dropped: string[]; gained: string[] } {
+  const dropped: string[] = [];
+  const gained: string[] = [];
+
+  for (const tool of [...tools].sort()) {
+    const rateBefore = toolRate(before, tool);
+    const rateAfter = toolRate(after, tool);
+    if (!separated(rateBefore, rateAfter)) continue;
+    if (rateAfter.low > rateBefore.high) gained.push(tool);
+    else dropped.push(tool);
+  }
+
+  return { dropped, gained };
+}
+
 type Candidate = {
   rule: BehaviourRule;
   target: string;
   tool: string;
+  /**
+   * The tool to sample the *before* side from, when it differs from `tool`.
+   *
+   * Only a rename sets this. Sampling the new name on the old side returns
+   * nothing, and a finding whose evidence is half empty is a finding nobody can
+   * check.
+   */
+  beforeTool?: string;
   before: Rate;
   after: Rate;
   headline: string;
@@ -164,11 +198,29 @@ function candidatesFor(
   const beforeTools = new Map(input.before.contract.tools.map((t) => [t.name, t]));
   const afterTools = new Map(input.after.contract.tools.map((t) => [t.name, t]));
 
-  for (const tool of [...tools].sort()) {
-    const rateBefore = toolRate(before.choices, tool);
-    const rateAfter = toolRate(after.choices, tool);
+  const moved = movedTools([...tools], before.choices, after.choices);
+  const switched = new Set([...moved.dropped, ...moved.gained]);
 
-    if (separated(rateBefore, rateAfter)) {
+  // A rename is one event. Measured on the anchoring pair, the naive reading
+  // reported it twice per intent — once as "no longer picks the old name" and
+  // once as "now picks the new one" — turning three intents into six findings
+  // and inflating every count downstream.
+  if (moved.dropped.length === 1 && moved.gained.length === 1) {
+    const from = moved.dropped[0] as string;
+    const to = moved.gained[0] as string;
+    out.push({
+      rule: "tool_switched",
+      target: to,
+      tool: to,
+      beforeTool: from,
+      before: toolRate(before.choices, from),
+      after: toolRate(after.choices, to),
+      headline: `the model now reaches \`${to}\` for this request, where it used to reach \`${from}\``,
+    });
+  } else {
+    for (const tool of [...switched].sort()) {
+      const rateBefore = toolRate(before.choices, tool);
+      const rateAfter = toolRate(after.choices, tool);
       const direction = rateAfter.low > rateBefore.high ? "now" : "no longer";
       out.push({
         rule: "tool_switched",
@@ -178,10 +230,13 @@ function candidatesFor(
         after: rateAfter,
         headline: `the model ${direction} picks \`${tool}\` for this request`,
       });
-      // Field-level questions about a tool it stopped choosing are not
-      // meaningful, and the sample on one side would be empty anyway.
-      continue;
     }
+  }
+
+  for (const tool of [...tools].sort()) {
+    // Field-level questions about a tool it stopped choosing are not
+    // meaningful, and the sample on one side would be empty anyway.
+    if (switched.has(tool)) continue;
 
     for (const field of sharedOptionalFields(beforeTools.get(tool), afterTools.get(tool))) {
       const fieldBefore = fieldRate(before.choices, tool, field);
@@ -257,7 +312,7 @@ export function compareRuns(input: ComparisonInput): ComparisonResult {
           beforeSample:
             candidate.tool === "(any)"
               ? sampleText(before.choices)
-              : sampleArguments(before.choices, candidate.tool),
+              : sampleArguments(before.choices, candidate.beforeTool ?? candidate.tool),
           afterSample:
             candidate.tool === "(any)"
               ? sampleText(after.choices)
