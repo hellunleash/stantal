@@ -1,17 +1,29 @@
 import { parse } from "acorn";
 import type { AnyNode, Expression, Program, VariableDeclaration } from "acorn";
 import { describe, expect, it } from "vitest";
-import { inertContext, looksLikeZod, readZodSchema, type ZodContext } from "./zod-schema.js";
+import {
+  inertContext,
+  looksLikeZod,
+  readZodSchema,
+  zodNamespaces,
+  type ZodContext,
+} from "./zod-schema.js";
 
 /**
  * Reads `SCHEMA = <expression>` out of a snippet, so a test can name helper
  * constants above it exactly the way shipped code does.
  */
-function context(source: string): { node: AnyNode; context: ZodContext } {
+function context(source: string): { node: AnyNode; context: ZodContext; namespaces: Set<string> } {
   const program: Program = parse(source, { ecmaVersion: "latest", sourceType: "module" });
 
+  // Mirrors what the real module graph records: consts and function
+  // declarations alike, because a schema helper is usually a function.
   const bindings = new Map<string, AnyNode>();
   for (const statement of program.body) {
+    if (statement.type === "FunctionDeclaration" && statement.id.type === "Identifier") {
+      bindings.set(statement.id.name, statement as AnyNode);
+      continue;
+    }
     if (statement.type !== "VariableDeclaration") continue;
     for (const declarator of (statement as VariableDeclaration).declarations) {
       if (declarator.id.type === "Identifier" && declarator.init !== null && declarator.init !== undefined) {
@@ -24,15 +36,17 @@ function context(source: string): { node: AnyNode; context: ZodContext } {
   if (node === undefined) throw new Error("the snippet must declare SCHEMA");
 
   const base = inertContext();
+  const namespaces = zodNamespaces(program);
   const ctx: ZodContext = {
     binding(name) {
       const found = bindings.get(name);
       return found === undefined ? null : { node: found, context: ctx };
     },
     value: base.value,
+    isNamespace: (name) => namespaces.has(name),
   };
 
-  return { node, context: ctx };
+  return { node, context: ctx, namespaces };
 }
 
 function read(source: string) {
@@ -273,14 +287,140 @@ describe("refusing what it cannot prove", () => {
   });
 });
 
+describe("finding the namespace by what is called on it", () => {
+  it("accepts a namespace a bundler renamed", () => {
+    // Both of these are real, from real published packages.
+    const { namespaces } = context(`
+      const SCHEMA = external_exports.object({
+        a: external_exports.string(),
+        b: external_exports.number().optional(),
+      });
+    `);
+    expect(namespaces.has("external_exports")).toBe(true);
+  });
+
+  it("reads a schema through a renamed namespace", () => {
+    const { params: read } = params(`
+      const SCHEMA = z4.object({ a: z4.string(), b: z4.boolean().optional() });
+    `);
+    expect(read.map((p) => p.name)).toEqual(["a", "b"]);
+  });
+
+  it("does not mistake an ordinary utility object for zod", () => {
+    // Two core-looking names is not enough; an unrelated helper must not
+    // qualify and start producing parameters.
+    const { namespaces } = context(`
+      const SCHEMA = z.object({ a: z.string() });
+      const x = util.string(1);
+      const y = util.number(2);
+    `);
+    expect(namespaces.has("util")).toBe(false);
+  });
+});
+
+describe("schemas built by a helper", () => {
+  it("reads what a zero-argument helper returns", () => {
+    // `function lenientString() { return z.string().min(1); }` is a schema
+    // declaration wearing a function.
+    const param = paramNamed(
+      `
+      function lenientString() { return z.string().min(1); }
+      const SCHEMA = z.object({ q: lenientString().describe("the query") });
+      `,
+      "q",
+    );
+    expect(param.type).toBe("string");
+    expect(param.description).toBe("the query");
+    expect(param.constraints.minLength).toBe(1);
+  });
+
+  it("carries optionality out of the helper", () => {
+    const param = paramNamed(
+      `
+      function maybeNumber() { return z.number().optional(); }
+      const SCHEMA = z.object({ n: maybeNumber().describe("how many") });
+      `,
+      "n",
+    );
+    expect(param.required).toBe(false);
+  });
+
+  it("reads an arrow helper with an expression body", () => {
+    const param = paramNamed(
+      `
+      const str = () => z.string();
+      const SCHEMA = z.object({ a: str() });
+      `,
+      "a",
+    );
+    expect(param.type).toBe("string");
+  });
+
+  it("refuses a helper that takes arguments", () => {
+    // Its result depends on values we would have to invent. A gap is recorded
+    // and the field is kept, so the parameter set stays right.
+    const result = params(`
+      function withDefault(fallback) { return z.string().default(fallback); }
+      const SCHEMA = z.object({ a: withDefault("x") });
+    `);
+    expect(result.params.map((p) => p.name)).toEqual(["a"]);
+    expect(result.gaps.some((g) => g.path === "a")).toBe(true);
+  });
+
+  it("refuses a helper with a branch, where there is no single answer", () => {
+    const result = params(`
+      function pick() { if (FLAG) { return z.string(); } return z.number(); }
+      const SCHEMA = z.object({ a: pick() });
+    `);
+    expect(result.gaps.some((g) => g.path === "a")).toBe(true);
+  });
+
+  it("unwraps a preprocess wrapper used as a field", () => {
+    const param = paramNamed(
+      `const SCHEMA = z.object({ a: z.preprocess(coerce, z.string().min(2)) });`,
+      "a",
+    );
+    expect(param.type).toBe("string");
+    expect(param.constraints.minLength).toBe(2);
+  });
+});
+
+describe("schemas reached indirectly", () => {
+  it("reads through zodToJsonSchema, which only changes the representation", () => {
+    const { params: read } = params(`
+      const ArgsSchema = z.object({ path: z.string().describe("where") });
+      const SCHEMA = zodToJsonSchema(ArgsSchema);
+    `);
+    expect(read.map((p) => p.name)).toEqual(["path"]);
+    expect(read[0]?.description).toBe("where");
+  });
+
+  it("follows a member of a local object that holds a tool's pieces", () => {
+    const { params: read } = params(`
+      const Args = z.object({ fileKey: z.string() });
+      const TOOL = { name: "get_data", description: "d", parametersSchema: Args };
+      const SCHEMA = TOOL.parametersSchema;
+    `);
+    expect(read.map((p) => p.name)).toEqual(["fileKey"]);
+  });
+
+  it("resolves z.object() given a named shape constant", () => {
+    const { params: read } = params(`
+      const SHAPE = { url: z.string(), depth: z.number().optional() };
+      const SCHEMA = z.object(SHAPE);
+    `);
+    expect(read.map((p) => p.name)).toEqual(["url", "depth"]);
+  });
+});
+
 describe("looksLikeZod", () => {
   it("accepts a named constant, because Schema.shape is the common case", () => {
-    const { node } = context(`const SCHEMA = ArgsSchema.shape;`);
-    expect(looksLikeZod(node)).toBe(true);
+    const { node, context: ctx } = context(`const SCHEMA = ArgsSchema.shape;`);
+    expect(looksLikeZod(node, ctx.isNamespace)).toBe(true);
   });
 
   it("rejects a JSON Schema object literal", () => {
-    const { node } = context(`const SCHEMA = { type: "object", properties: {} };`);
-    expect(looksLikeZod(node)).toBe(false);
+    const { node, context: ctx } = context(`const SCHEMA = { type: "object", properties: {} };`);
+    expect(looksLikeZod(node, ctx.isNamespace)).toBe(false);
   });
 });

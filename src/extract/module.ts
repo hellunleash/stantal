@@ -17,7 +17,7 @@ import {
 import { evaluate, isUnresolved } from "./js-literal.js";
 import { ModuleGraph, type ParsedModule } from "./module-bindings.js";
 import { resolveEntryPoint, type EntryCondition, type PackageSource } from "./package-source.js";
-import { looksLikeZod, readZodSchema, type ZodContext } from "./zod-schema.js";
+import { looksLikeZod, readZodSchema, zodNamespaces, type ZodContext } from "./zod-schema.js";
 
 /**
  * Module-pack adapter.
@@ -70,6 +70,14 @@ type DescriptorSite = {
   nameNode?: Expression;
   /** Set when the description is a bare argument, as in the older `tool()` signature. */
   descriptionNode?: Expression;
+  /**
+   * Set when the schema *is* an argument rather than a key inside a descriptor.
+   *
+   * `server.tool(name, description, schema, ...)` passes the shape directly.
+   * Searching that object for an `inputSchema` key finds nothing, and the tool
+   * gets reported as taking no parameters — a false claim about a real API.
+   */
+  schemaNode?: Expression;
 };
 
 /** `pack.js:412`, or just the file when the parser gave no location. */
@@ -166,12 +174,14 @@ function callSite(node: AnyNode, module: ParsedModule): DescriptorSite | null {
 
   // `tool(name, "description", schema, handler)` — the older signature, where
   // the descriptor is spread across arguments and there is no object at all.
+  // The third argument is the schema itself, not a descriptor holding one.
   if (second !== undefined && third !== undefined && third.type === "ObjectExpression") {
     return {
       node: third,
       module,
       nameNode: first as Expression,
       descriptionNode: second as Expression,
+      schemaNode: third as Expression,
     };
   }
 
@@ -214,9 +224,24 @@ type ReadDescriptor = { tool: Tool; notes: ExtractionNote[] } | { tool: null; no
  * difference between reading a package that defines its schemas in one file and
  * reading one that keeps them in a shared module — which is most of them.
  */
+const NAMESPACES = new WeakMap<ParsedModule, Set<string>>();
+
+/** Which identifiers act as the zod namespace here. Computed once per module. */
+function namespacesFor(module: ParsedModule): Set<string> {
+  let found = NAMESPACES.get(module);
+  if (found === undefined) {
+    found = zodNamespaces(module.program);
+    NAMESPACES.set(module, found);
+  }
+  return found;
+}
+
 function zodContextFor(module: ParsedModule, graph: ModuleGraph): ZodContext {
   const resolve = graph.resolverFor(module);
+  const namespaces = namespacesFor(module);
   return {
+    // Accepts a dotted `ns.Name` as well as a plain one, so a schema behind a
+    // namespace import resolves like any other.
     binding(name) {
       const found = graph.nodeFor(module, name);
       if (found === null) return null;
@@ -226,6 +251,7 @@ function zodContextFor(module: ParsedModule, graph: ModuleGraph): ZodContext {
       };
     },
     value: (node) => evaluate(node, resolve).value,
+    isNamespace: (name) => namespaces.has(name),
   };
 }
 
@@ -244,9 +270,10 @@ function readZodDescriptor(
   name: string,
   evidence: string,
 ): { params: Param[]; notes: ExtractionNote[] } | null {
-  if (!looksLikeZod(node)) return null;
+  const context = zodContextFor(site.module, graph);
+  if (!looksLikeZod(node, context.isNamespace)) return null;
 
-  const result = readZodSchema(node, zodContextFor(site.module, graph));
+  const result = readZodSchema(node, context);
   if (result === null) return null;
 
   if ("refuse" in result) {
@@ -336,7 +363,7 @@ function readDescriptor(site: DescriptorSite, graph: ModuleGraph): ReadDescripto
   }
 
   const schemaKey = SCHEMA_KEYS.find((key) => properties.has(key));
-  const schemaNode = schemaKey === undefined ? undefined : properties.get(schemaKey);
+  const schemaNode = site.schemaNode ?? (schemaKey === undefined ? undefined : properties.get(schemaKey));
 
   // Zod gets the first look, before the literal folder.
   //

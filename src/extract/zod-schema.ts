@@ -1,4 +1,4 @@
-import type { AnyNode, Expression, ObjectExpression } from "acorn";
+import type { AnyNode, Expression, ObjectExpression, Program } from "acorn";
 import type { Constraints, JsonType, Param } from "../contract/types.js";
 import { evaluate, isUnresolved, type BindingResolver } from "./js-literal.js";
 
@@ -40,6 +40,15 @@ export type ZodContext = {
   binding(name: string): { node: AnyNode; context: ZodContext } | null;
   /** Fold a plain literal expression — a description string, a `.min()` bound. */
   value(node: AnyNode): unknown;
+  /**
+   * Is this identifier the zod namespace in the file being read?
+   *
+   * Not a name test. A bundler renames the import to whatever it likes —
+   * `external_exports` and `z4` are both real, from real published packages —
+   * so the namespace is identified by what is called on it. See
+   * `zodNamespaces`.
+   */
+  isNamespace(name: string): boolean;
 };
 
 /** A context that resolves nothing. Enough for a fully inline schema. */
@@ -47,8 +56,96 @@ export function inertContext(resolve: BindingResolver = () => undefined): ZodCon
   const context: ZodContext = {
     binding: () => null,
     value: (node) => evaluate(node, resolve).value,
+    isNamespace: looksNamedLikeZod,
   };
   return context;
+}
+
+/**
+ * Core constructors, used as the fingerprint that identifies a zod namespace.
+ *
+ * Chosen because they are the ones every schema file uses and almost nothing
+ * else does. `Math`, `JSON`, `path` and friends share none of them.
+ */
+const CORE_CONSTRUCTORS = new Set([
+  "string",
+  "number",
+  "boolean",
+  "object",
+  "array",
+  "enum",
+  "literal",
+  "union",
+  "record",
+  "preprocess",
+  "coerce",
+  "any",
+  "unknown",
+  "date",
+  "null",
+  "optional",
+  "nativeEnum",
+  "discriminatedUnion",
+  "tuple",
+]);
+
+/** How many distinct core constructors an identifier needs before we trust it. */
+const FINGERPRINT_THRESHOLD = 3;
+
+/**
+ * Which identifiers act as the zod namespace in this file.
+ *
+ * Published code almost never keeps the name `z`. A bundler rewrites it to
+ * whatever is free — `z4` in one package, `external_exports` in another — and a
+ * reader that only understood the letter `z` works on source and fails on
+ * everything shipped. Measured: this is the whole reason one package read eight
+ * tools and zero parameters.
+ *
+ * So the namespace is found by its fingerprint. An identifier qualifies when at
+ * least three distinct zod constructors are called on it somewhere in the file.
+ * Three is deliberate: one or two would let an unrelated utility object through.
+ */
+export function zodNamespaces(program: Program): Set<string> {
+  const seen = new Map<string, Set<string>>();
+
+  const visit = (node: unknown): void => {
+    if (node === null || typeof node !== "object") return;
+    const candidate = node as { type?: string; callee?: unknown };
+
+    if (candidate.type === "CallExpression") {
+      const callee = candidate.callee as
+        | { type?: string; computed?: boolean; object?: unknown; property?: unknown }
+        | undefined;
+      if (callee?.type === "MemberExpression" && callee.computed !== true) {
+        const object = callee.object as { type?: string; name?: string } | undefined;
+        const property = callee.property as { type?: string; name?: string } | undefined;
+        if (
+          object?.type === "Identifier" &&
+          typeof object.name === "string" &&
+          property?.type === "Identifier" &&
+          typeof property.name === "string" &&
+          CORE_CONSTRUCTORS.has(property.name)
+        ) {
+          const bucket = seen.get(object.name) ?? new Set<string>();
+          bucket.add(property.name);
+          seen.set(object.name, bucket);
+        }
+      }
+    }
+
+    for (const value of Object.values(node as Record<string, unknown>)) {
+      if (Array.isArray(value)) for (const item of value) visit(item);
+      else visit(value);
+    }
+  };
+
+  visit(program);
+
+  const roots = new Set<string>();
+  for (const [name, methods] of seen) {
+    if (methods.size >= FINGERPRINT_THRESHOLD || looksNamedLikeZod(name)) roots.add(name);
+  }
+  return roots;
 }
 
 /** Something in the schema that could not be read, and what it blocks. */
@@ -80,6 +177,21 @@ const SHAPE_CHANGING = new Set([
   "merge",
   "and",
   "or",
+]);
+
+/**
+ * Calls that convert a zod schema to JSON Schema at registration time.
+ *
+ * The low-level MCP SDK wants JSON Schema, so a large family of servers writes
+ * `inputSchema: zodToJsonSchema(ArgsSchema)`. The argument is the declaration;
+ * the call only changes its representation, and we never need the result.
+ */
+const CONVERTER_CALLS = new Set([
+  "zodToJsonSchema",
+  "toJsonSchema",
+  "toJSONSchema",
+  "zodToJson",
+  "zodSchemaToJson",
 ]);
 
 /** Wrappers whose schema argument is the thing we actually want. */
@@ -129,8 +241,8 @@ const BASE_TYPE: Record<string, JsonType> = {
   coerce: "unknown",
 };
 
-/** Does this identifier look like the zod namespace? */
-function isZodRoot(name: string): boolean {
+/** The obvious names, kept as a fallback for files with no call sites to sample. */
+function looksNamedLikeZod(name: string): boolean {
   return /^_{0,2}z(od)?[0-9_$]*$/i.test(name);
 }
 
@@ -151,7 +263,7 @@ type Link = { method: string; args: AnyNode[] };
  */
 type Chain = { base: string; baseArgs: AnyNode[]; links: Link[] };
 
-function flatten(node: AnyNode): Chain | null {
+function flatten(node: AnyNode, isNamespace: (name: string) => boolean): Chain | null {
   const links: Link[] = [];
   let cursor: AnyNode = node;
 
@@ -160,12 +272,23 @@ function flatten(node: AnyNode): Chain | null {
     if (cursor.type === "CallExpression") {
       const callee = cursor.callee as AnyNode;
 
+      // `lenientString()` — a local helper that returns a zod schema. Very
+      // common: a package wraps a type once and reuses it everywhere. The
+      // caller resolves the name and reads what the helper returns.
+      if (callee.type === "Identifier") {
+        return {
+          base: `!${callee.name}`,
+          baseArgs: [...(cursor.arguments as AnyNode[])],
+          links: links.reverse(),
+        };
+      }
+
       if (callee.type === "MemberExpression" && !callee.computed && callee.property.type === "Identifier") {
         const method = callee.property.name;
         const object = callee.object as AnyNode;
 
         // `z.string(...)` — the base. Anything deeper is not a zod chain.
-        if (object.type === "Identifier" && isZodRoot(object.name)) {
+        if (object.type === "Identifier" && isNamespace(object.name)) {
           return { base: method, baseArgs: [...(cursor.arguments as AnyNode[])], links: links.reverse() };
         }
 
@@ -174,7 +297,7 @@ function flatten(node: AnyNode): Chain | null {
           object.type === "MemberExpression" &&
           !object.computed &&
           object.object.type === "Identifier" &&
-          isZodRoot(object.object.name)
+          isNamespace(object.object.name)
         ) {
           return { base: method, baseArgs: [...(cursor.arguments as AnyNode[])], links: links.reverse() };
         }
@@ -214,14 +337,57 @@ function flatten(node: AnyNode): Chain | null {
  * reader would report `properties` and `required` as two parameters. So at
  * least one value has to be a chain actually rooted at zod.
  */
-function isRawShape(node: AnyNode): node is ObjectExpression {
+function isRawShape(node: AnyNode, isNamespace: (name: string) => boolean): node is ObjectExpression {
   if (node.type !== "ObjectExpression") return false;
   const properties = node.properties.filter((p) => p.type === "Property");
   if (properties.length === 0) return false;
 
-  const chains = properties.map((p) => flatten(p.value as AnyNode));
+  const chains = properties.map((p) => flatten(p.value as AnyNode, isNamespace));
   if (chains.some((chain) => chain === null)) return false;
   return chains.some((chain) => chain !== null && !chain.base.startsWith("#"));
+}
+
+/**
+ * The expression a zero-argument helper returns, if it is safe to read.
+ *
+ * `function lenientString() { return z.string().trim().min(1); }` is a schema
+ * declaration wearing a function. Reading it is not execution: the return
+ * expression is right there, and nothing is called to obtain it.
+ *
+ * **It must take no parameters.** A helper whose result depends on its
+ * arguments would need those arguments evaluated to be read correctly, and
+ * guessing them produces a schema that is confidently wrong. So a helper with
+ * parameters is refused rather than approximated.
+ */
+function returnedSchema(node: AnyNode): AnyNode | null {
+  const fn = node as {
+    type?: string;
+    params?: unknown[];
+    body?: { type?: string; body?: unknown[] };
+    expression?: boolean;
+  };
+
+  if (fn.type !== "FunctionDeclaration" && fn.type !== "FunctionExpression" && fn.type !== "ArrowFunctionExpression") {
+    return null;
+  }
+  if ((fn.params?.length ?? 0) > 0) return null;
+
+  // `() => z.string()` — an expression body is already the schema.
+  if (fn.type === "ArrowFunctionExpression" && fn.expression === true) {
+    return (fn.body as unknown as AnyNode) ?? null;
+  }
+
+  const statements = fn.body?.body;
+  if (!Array.isArray(statements)) return null;
+
+  // A single return, so there is no branch to choose between.
+  const returns = statements.filter(
+    (statement) => (statement as { type?: string }).type === "ReturnStatement",
+  );
+  if (returns.length !== 1 || statements.length !== 1) return null;
+
+  const argument = (returns[0] as { argument?: unknown }).argument;
+  return (argument as AnyNode) ?? null;
 }
 
 function propertyName(property: { key: AnyNode; computed: boolean }): string | null {
@@ -231,6 +397,70 @@ function propertyName(property: { key: AnyNode; computed: boolean }): string | n
     return property.key.value;
   }
   return null;
+}
+
+/**
+ * Resolve a named base, reaching through a namespace import if it takes one.
+ *
+ * `files.CreateOrUpdateFileSchema` from `import * as files` is one export of one
+ * module. It reads as a base `files` plus a member link, so a plain lookup of
+ * `files` finds nothing; the dotted name is what the graph can actually resolve.
+ */
+function resolveNamed(
+  name: string,
+  links: readonly Link[],
+  context: ZodContext,
+): { node: AnyNode; context: ZodContext; links: Link[] } | null {
+  const direct = context.binding(name);
+  if (direct !== null) return { ...direct, links: [...links] };
+
+  const first = links[0];
+  if (first === undefined || !first.method.startsWith(".")) return null;
+
+  const viaNamespace = context.binding(`${name}.${first.method.slice(1)}`);
+  if (viaNamespace === null) return null;
+  return { ...viaNamespace, links: links.slice(1) };
+}
+
+/**
+ * Follow `.foo` links into a resolved object literal.
+ *
+ * `inputSchema: TOOL.parametersSchema` where `TOOL` is a local
+ * `{ name, description, parametersSchema }` object is a common way to keep a
+ * tool's pieces together. Resolving `TOOL` and then ignoring `.parametersSchema`
+ * lands on the wrapper instead of the schema, and the read fails.
+ *
+ * `.shape` is skipped rather than followed: it is zod's own accessor for the
+ * raw shape, not a property of an object literal.
+ */
+function descend(
+  node: AnyNode,
+  links: readonly Link[],
+): { node: AnyNode; rest: Link[] } {
+  let cursor = node;
+  let index = 0;
+
+  while (index < links.length) {
+    const link = links[index];
+    if (link === undefined || !link.method.startsWith(".")) break;
+
+    const key = link.method.slice(1);
+    if (key === "shape") {
+      index += 1;
+      continue;
+    }
+
+    if (cursor.type !== "ObjectExpression") break;
+    const property = cursor.properties.find(
+      (p) => p.type === "Property" && propertyName(p) === key,
+    );
+    if (property === undefined || property.type !== "Property") break;
+
+    cursor = property.value as AnyNode;
+    index += 1;
+  }
+
+  return { node: cursor, rest: links.slice(index) };
 }
 
 /**
@@ -244,9 +474,9 @@ type Located = { literal: ObjectExpression; context: ZodContext };
 function locateShape(node: AnyNode, context: ZodContext, depth = 0): Located | { refuse: string } | null {
   if (depth > 8) return { refuse: "the schema nests deeper than this reader follows" };
 
-  if (isRawShape(node)) return { literal: node, context };
+  if (isRawShape(node, context.isNamespace)) return { literal: node, context };
 
-  const chain = flatten(node);
+  const chain = flatten(node, context.isNamespace);
   if (chain === null) return null;
 
   for (const link of chain.links) {
@@ -266,19 +496,49 @@ function locateShape(node: AnyNode, context: ZodContext, depth = 0): Located | {
   }
 
   if (chain.base === "object" || chain.base === "strictObject" || chain.base === "looseObject") {
-    const literal = chain.baseArgs[0];
-    if (literal === undefined || literal.type !== "ObjectExpression") {
-      return { refuse: `\`z.${chain.base}()\` was not given an object literal` };
+    const argument = chain.baseArgs[0];
+    if (argument === undefined) {
+      return { refuse: `\`z.${chain.base}()\` was called with no shape` };
     }
-    return { literal, context };
+    if (argument.type === "ObjectExpression") return { literal: argument, context };
+
+    // `z.object(SHAPE)` where the shape is kept in its own constant. Common in
+    // built output, where a bundler hoists the shape out of the call.
+    const chainArg = flatten(argument, context.isNamespace);
+    if (chainArg !== null && chainArg.base.startsWith("#")) {
+      return locateShape(argument, context, depth + 1);
+    }
+    return { refuse: `\`z.${chain.base}()\` was not given a shape this reader could resolve` };
   }
 
   // A named constant, optionally with `.shape` on the end. Both mean the same
   // thing here: find what the name was bound to and read that.
   if (chain.base.startsWith("#")) {
-    const bound = context.binding(chain.base.slice(1));
+    const bound = resolveNamed(chain.base.slice(1), chain.links, context);
     if (bound === null) return null;
-    return locateShape(bound.node, bound.context, depth + 1);
+    const { node: inner } = descend(bound.node, bound.links);
+    // A constant holding a bare shape — `const SHAPE = { url: z.string() }` —
+    // is the shape itself, not a chain to keep resolving.
+    if (isRawShape(inner, bound.context.isNamespace)) return { literal: inner, context: bound.context };
+    return locateShape(inner, bound.context, depth + 1);
+  }
+
+  if (chain.base.startsWith("!")) {
+    const name = chain.base.slice(1);
+
+    // `zodToJsonSchema(ArgsSchema)` — the argument is the declaration.
+    if (CONVERTER_CALLS.has(name)) {
+      const argument = chain.baseArgs[0];
+      if (argument === undefined) return null;
+      return locateShape(argument, context, depth + 1);
+    }
+
+    // A helper call: read what it returns.
+    const bound = context.binding(name);
+    if (bound === null) return null;
+    const returned = returnedSchema(bound.node);
+    if (returned === null) return null;
+    return locateShape(returned, bound.context, depth + 1);
   }
 
   return null;
@@ -374,13 +634,49 @@ function enumValues(args: readonly AnyNode[], context: ZodContext): unknown[] | 
 }
 
 function readField(node: AnyNode, path: string, context: ZodContext, depth: number): FieldRead | null {
-  const chain = flatten(node);
+  const chain = flatten(node, context.isNamespace);
   if (chain === null) return null;
+
+  // A helper call — `lenientString().describe("...")`. Read what the helper
+  // returns, then apply this chain's own modifiers on top of it.
+  if (chain.base.startsWith("!")) {
+    if (depth > 6) return null;
+    const name = chain.base.slice(1);
+
+    if (CONVERTER_CALLS.has(name)) {
+      const argument = chain.baseArgs[0];
+      if (argument === undefined) return null;
+      const converted = readField(argument, path, context, depth + 1);
+      return converted === null ? null : applyLinks(converted, chain.links, path, context, depth);
+    }
+
+    const bound = context.binding(name);
+    const returned = bound === null ? null : returnedSchema(bound.node);
+    if (bound === null || returned === null) {
+      return {
+        type: "unknown",
+        required: true,
+        description: null,
+        constraints: {},
+        children: undefined,
+        gaps: [
+          {
+            path,
+            reason: `\`${path}\` is built by a helper this reader could not follow`,
+          },
+        ],
+      };
+    }
+    const inner = readField(returned, path, bound.context, depth + 1);
+    if (inner === null) return null;
+    return applyLinks(inner, chain.links, path, context, depth);
+  }
 
   // A named field schema: read whatever the name points at, then apply this
   // chain's own modifiers on top.
   if (chain.base.startsWith("#")) {
-    const bound = context.binding(chain.base.slice(1));
+    if (depth > 6) return null;
+    const bound = resolveNamed(chain.base.slice(1), chain.links, context);
     if (bound === null) {
       return {
         type: "unknown",
@@ -391,9 +687,22 @@ function readField(node: AnyNode, path: string, context: ZodContext, depth: numb
         gaps: [{ path, reason: `the schema for \`${path}\` is a constant this reader could not follow` }],
       };
     }
-    const inner = readField(bound.node, path, bound.context, depth + 1);
+    const { node: target, rest } = descend(bound.node, bound.links);
+    const inner = readField(target, path, bound.context, depth + 1);
     if (inner === null) return null;
-    return applyLinks(inner, chain.links, path, context, depth);
+    return applyLinks(inner, rest, path, context, depth);
+  }
+
+  // A wrapper used as a field — `z.preprocess(fn, z.string().min(1))`. The
+  // schema is one of the arguments; the first is a function we never call.
+  const unwrapAt = UNWRAP_ARG[chain.base];
+  if (unwrapAt !== undefined) {
+    if (depth > 6) return null;
+    const inner = chain.baseArgs[unwrapAt];
+    if (inner === undefined) return null;
+    const read = readField(inner, path, context, depth + 1);
+    if (read === null) return null;
+    return applyLinks(read, chain.links, path, context, depth);
   }
 
   const type = BASE_TYPE[chain.base];
@@ -572,7 +881,18 @@ function readShapeLiteral(
 
     const field = readField(property.value as AnyNode, path, context, depth);
     if (field === null) {
+      // Kept, not dropped. Removing it would make the parameter *set* wrong,
+      // and a later version where the same field reads fine would then diff as
+      // a parameter being added. The gap suppresses claims about it either way.
       gaps.push({ path, reason: `\`${path}\` is not a zod schema this reader understands` });
+      params.push({
+        name,
+        type: "unknown",
+        required: true,
+        description: null,
+        constraints: {},
+        children: undefined,
+      });
       continue;
     }
 
@@ -616,7 +936,10 @@ export function readZodSchema(node: AnyNode, context: ZodContext): ZodReadResult
  * only decides which reader gets the first look, and `readZodSchema` returns
  * null for anything that turns out not to be zod, so the caller falls back.
  */
-export function looksLikeZod(node: AnyNode): boolean {
-  if (isRawShape(node)) return true;
-  return flatten(node) !== null;
+export function looksLikeZod(
+  node: AnyNode,
+  isNamespace: (name: string) => boolean = looksNamedLikeZod,
+): boolean {
+  if (isRawShape(node, isNamespace)) return true;
+  return flatten(node, isNamespace) !== null;
 }

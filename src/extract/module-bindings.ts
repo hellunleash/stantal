@@ -33,6 +33,8 @@ type ModuleFacts = {
   /** Module-level bindings, by local name. */
   locals: Map<string, Expression>;
   imports: Map<string, ImportBinding>;
+  /** `import * as ns` targets, by local name. Node lookup only, never folded. */
+  namespaces: Map<string, string>;
   /** Exported name -> local name in this module. */
   exportsLocal: Map<string, string>;
   /** Exported name -> where it is re-exported from. */
@@ -87,6 +89,7 @@ function factsOf(module: ParsedModule): ModuleFacts {
   const facts: ModuleFacts = {
     locals: new Map(),
     imports: new Map(),
+    namespaces: new Map(),
     exportsLocal: new Map(),
     exportsFrom: new Map(),
     reexports: [],
@@ -98,6 +101,18 @@ function factsOf(module: ParsedModule): ModuleFacts {
     switch (statement.type) {
       case "VariableDeclaration":
         declaratorsOf(statement, facts);
+        break;
+
+      // A function declaration is a binding like any other. It matters because
+      // packages routinely wrap a schema type once and reuse it —
+      // `function lenientString() { return z.string().min(1); }` — and a
+      // resolver that only knows `const` cannot follow the wrapper. Its value
+      // is never folded (a function has none); the zod reader reads what it
+      // returns, which is a declaration sitting in plain sight.
+      case "FunctionDeclaration":
+        if (statement.id?.type === "Identifier") {
+          facts.locals.set(statement.id.name, statement as unknown as Expression);
+        }
         break;
 
       case "ImportDeclaration": {
@@ -113,8 +128,13 @@ function factsOf(module: ParsedModule): ModuleFacts {
           } else if (entry.type === "ImportDefaultSpecifier") {
             facts.imports.set(entry.local.name, { specifier, imported: "default" });
           }
-          // A namespace import is deliberately skipped: resolving `ns.X` would
-          // mean modelling a whole module as a value.
+          else if (entry.type === "ImportNamespaceSpecifier") {
+            // Recorded for *node* lookup only. Folding `ns` to a value would
+            // mean modelling a whole module, which is why it stays out of
+            // `imports` — but `ns.X` names one export, and that is a node the
+            // graph can already find.
+            facts.namespaces.set(entry.local.name, specifier);
+          }
         }
         break;
       }
@@ -362,6 +382,18 @@ export class ModuleGraph {
     try {
       const facts = this.factsFor(module);
 
+      // `ns.Name` from `import * as ns from "./x.js"`. One export of one
+      // module, which is an ordinary lookup once the namespace is known.
+      const dot = name.indexOf(".");
+      if (dot > 0) {
+        const head = name.slice(0, dot);
+        const tail = name.slice(dot + 1);
+        const specifier = facts.namespaces.get(head);
+        if (specifier === undefined) return null;
+        const target = this.follow(module, specifier);
+        return target === null ? null : this.nodeLookup(target, tail, depth - 1, seen);
+      }
+
       const init = facts.locals.get(name);
       if (init !== undefined) return { node: init as AnyNode, module };
 
@@ -371,6 +403,12 @@ export class ModuleGraph {
         return target === null
           ? null
           : this.nodeLookup(target, imported.imported, depth - 1, seen);
+      }
+
+      const local = facts.exportsLocal.get(name);
+      if (local !== undefined && local !== name) {
+        const found = this.nodeLookup(module, local, depth - 1, seen);
+        if (found !== null) return found;
       }
 
       const exported = facts.exportsFrom.get(name);
