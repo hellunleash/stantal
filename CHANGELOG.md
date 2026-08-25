@@ -35,6 +35,19 @@ upgrade needs a full re-run.
   only first-turn failures are visible. Failures that depend on what the
   conversation already contains cannot be reproduced yet.
 
+## [0.0.1] - 2026-08-26
+
+No code change.
+
+### Added
+
+- `repository`, `homepage`, `bugs` and `keywords` in the manifest. `0.0.0` was
+  published without them, so the registry page carried no link back to the
+  source and no terms to be found by. npm serves these from the latest version,
+  so republishing was enough.
+- `CHANGELOG.md` now ships in the published tarball. npm includes `README` and
+  `LICENSE` on its own but not this.
+
 ## [0.0.0] - 2026-08-26
 
 Name reservation on npm. The code below is present and runs, but nothing about
@@ -101,5 +114,6 @@ These are properties of the tool, not features, and breaking one is a bug:
   `.omit()`, `.partial()` and `.extend()` produce a note carrying a path instead
   of a contract nobody can trust.
 
-[Unreleased]: https://github.com/hellunleash/stantal/compare/v0.0.0...HEAD
+[Unreleased]: https://github.com/hellunleash/stantal/compare/v0.0.1...HEAD
+[0.0.1]: https://github.com/hellunleash/stantal/compare/v0.0.0...v0.0.1
 [0.0.0]: https://github.com/hellunleash/stantal/releases/tag/v0.0.0
