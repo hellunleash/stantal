@@ -20,6 +20,16 @@ export type BehaviourRule =
   | "optional_field_appeared"
   /** The model stopped filling an optional field it used to fill. */
   | "optional_field_dropped"
+  /**
+   * The model puts a value in a field the older version did not declare.
+   *
+   * Distinct from `optional_field_appeared`, which is about a field both
+   * versions declare. Here there was nothing to fill before, so the older
+   * behaviour is not a sample that could have gone either way — which is why
+   * seeing it happen once is proof it *can* happen, even when k is far too
+   * small to say how often. That claim is reported `underpowered`.
+   */
+  | "new_field_used"
   /** The model stopped calling any tool for a request it used to serve. */
   | "call_abandoned"
   /** The model started calling a tool for a request it used to decline. */
@@ -35,6 +45,12 @@ export type Severity = "high" | "medium" | "low";
  * `measured` means both sides ran the full k and the intervals do not overlap.
  * `underpowered` means the difference is real in the samples taken but k was too
  * small to separate it from noise — reported, and labelled, never promoted.
+ *
+ * Most rules only produce a candidate once the intervals separate, so they are
+ * `measured` unless the two sides ran a different number of times. The
+ * exception is `new_field_used`: a field that did not exist cannot have been
+ * filled by chance, so one observation is worth reporting while still being far
+ * too little to state a rate.
  */
 export type Basis = "measured" | "underpowered";
 
@@ -73,6 +89,7 @@ const SEVERITY: Record<BehaviourRule, Severity> = {
   // A model that silently routes to a different code path is the failure this
   // product exists to catch, and it is invisible to every type checker.
   optional_field_appeared: "high",
+  new_field_used: "high",
   tool_switched: "high",
   call_abandoned: "high",
   arguments_invalid: "high",

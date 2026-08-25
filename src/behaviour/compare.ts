@@ -74,6 +74,23 @@ function fieldRate(choices: readonly ToolChoice[], tool: string, field: string):
   return wilson(filled, relevant.length);
 }
 
+/**
+ * How often a field *name* appeared in any call's arguments, over every call.
+ *
+ * The denominator for `new_field_used`, and deliberately not scoped to one
+ * tool. When the newer version introduced the tool as well as the field, a
+ * tool-scoped rate is 0 out of 0 — which reads as "we did not measure this"
+ * when the truth is "this could not happen": nothing declared the field, so no
+ * call could carry it. Counting over every call the older side made gives a
+ * real denominator for a claim that is really about possibility.
+ */
+function anyFieldRate(choices: readonly ToolChoice[], field: string): Rate {
+  const calls = choices.filter(
+    (c): c is Extract<ToolChoice, { kind: "tool_call" }> => c.kind === "tool_call",
+  );
+  return wilson(calls.filter((c) => c.arguments[field] !== undefined).length, calls.length);
+}
+
 function sampleArguments(choices: readonly ToolChoice[], tool: string): unknown {
   const found = choices.find((c) => calledTool(c) === tool);
   return found !== undefined && found.kind === "tool_call" ? found.arguments : null;
@@ -139,6 +156,14 @@ type Candidate = {
   beforeTool?: string;
   before: Rate;
   after: Rate;
+  /**
+   * Set when the candidate is worth reporting without the intervals separating.
+   *
+   * Only `new_field_used` uses it. Everything else is created only once
+   * `separated` is true, so leaving this unset keeps their basis exactly as it
+   * was.
+   */
+  underpowered?: boolean;
   headline: string;
 };
 
@@ -156,6 +181,24 @@ function sharedOptionalFields(before: Tool | undefined, after: Tool | undefined)
   return before.params
     .filter((p) => !p.required && optionalAfter.has(p.name))
     .map((p) => p.name);
+}
+
+/**
+ * Optional fields the newer version declares and the older one did not.
+ *
+ * This is the shape the whole layer exists for. Layer 0 reports that a field
+ * was added. Layer 1 reports that nothing documents it. Neither can say whether
+ * a model actually puts anything in it, and that is the difference between a
+ * defect in a contract and a defect that bites the person who took the upgrade.
+ *
+ * Kept separate from `sharedOptionalFields` on purpose. That one asks whether a
+ * rate moved, and needs the field on both sides to have two rates to compare.
+ * This one asks whether something became possible that was not possible before.
+ */
+function newOptionalFields(before: Tool | undefined, after: Tool | undefined): string[] {
+  if (after === undefined) return [];
+  const known = new Set((before?.params ?? []).map((p) => p.name));
+  return after.params.filter((p) => !p.required && !known.has(p.name)).map((p) => p.name);
 }
 
 function candidatesFor(
@@ -200,6 +243,8 @@ function candidatesFor(
 
   const moved = movedTools([...tools], before.choices, after.choices);
   const switched = new Set([...moved.dropped, ...moved.gained]);
+  /** New name -> old name, populated only for a clean one-for-one swap. */
+  const renamedFrom = new Map<string, string>();
 
   // A rename is one event. Measured on the anchoring pair, the naive reading
   // reported it twice per intent — once as "no longer picks the old name" and
@@ -208,6 +253,7 @@ function candidatesFor(
   if (moved.dropped.length === 1 && moved.gained.length === 1) {
     const from = moved.dropped[0] as string;
     const to = moved.gained[0] as string;
+    renamedFrom.set(to, from);
     out.push({
       rule: "tool_switched",
       target: to,
@@ -257,6 +303,48 @@ function candidatesFor(
     }
   }
 
+  // Unlike the loop above, a switched tool is *not* skipped here. That guard
+  // exists because a rate on a tool the model stopped choosing has an empty
+  // side, and an empty side cannot be compared. This rule does not need one: a
+  // field nothing declared could not be passed, whatever tool was picked.
+  // Skipping switched tools would have blocked exactly the case this rule was
+  // written for, since a renamed tool is a switched tool.
+  for (const tool of [...tools].sort()) {
+    const afterTool = afterTools.get(tool);
+    if (afterTool === undefined) continue;
+
+    // Follow a rename when there was a clean one. Otherwise compare against the
+    // tool of the same name, which may simply not have existed — in which case
+    // every optional field it declares is new.
+    const beforeName = renamedFrom.get(tool);
+    const previousTool = beforeTools.get(beforeName ?? tool);
+
+    for (const field of newOptionalFields(previousTool, afterTool)) {
+      const rateAfter = fieldRate(after.choices, tool, field);
+      if (rateAfter.hits === 0) continue;
+
+      const rateBefore = anyFieldRate(before.choices, field);
+      // If the older side passed this name anyway, that was a call the older
+      // contract did not declare — an invalid one, which `arguments_invalid`
+      // already reports. Claiming both would be one event counted twice.
+      if (rateBefore.hits > 0) continue;
+
+      out.push({
+        rule: "new_field_used",
+        target: `${tool}.${field}`,
+        tool,
+        ...(beforeName === undefined ? {} : { beforeTool: beforeName }),
+        before: rateBefore,
+        after: rateAfter,
+        // One observation proves the model will do this. It does not measure
+        // how often, and saying otherwise from a handful of runs would be the
+        // overclaim this layer is built to avoid.
+        underpowered: !separated(rateBefore, rateAfter),
+        headline: `the model fills \`${field}\`, which the older version did not declare`,
+      });
+    }
+  }
+
   const invalidBefore = invalidRate(before.choices, input.before.contract);
   const invalidAfter = invalidRate(after.choices, input.after.contract);
   if (invalidAfter.low > invalidBefore.high) {
@@ -295,7 +383,8 @@ export function compareRuns(input: ComparisonInput): ComparisonResult {
       // Both sides must have run the same number of times before a difference
       // can be called measured. Unequal k is not a comparison, it is two
       // samples of different strength wearing one label.
-      const balanced = before.choices.length === after.choices.length;
+      const balanced =
+        before.choices.length === after.choices.length && candidate.underpowered !== true;
 
       findings.push({
         rule: candidate.rule,

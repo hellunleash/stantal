@@ -360,3 +360,108 @@ describe("presenting a contract to a model", () => {
     expect(wire.inputSchema.properties["thing"]).toEqual({});
   });
 });
+
+describe("a field the older version did not declare", () => {
+  const OLD = contract([tool("make", [param("request", { required: true })])], "0.7.0");
+  const NEW = contract(
+    [tool("make", [param("request", { required: true }), param("target")])],
+    "0.24.0",
+  );
+
+  function compare(before: ToolChoice[], after: ToolChoice[]) {
+    return compareRuns({
+      before: { contract: OLD, runs: runs(before) },
+      after: { contract: NEW, runs: runs(after) },
+    });
+  }
+
+  it("is reported when the model puts something in it", () => {
+    const { findings } = compare(
+      repeat(call("make", { request: "a screen" }), 5),
+      repeat(call("make", { request: "a screen", target: "Roles Screen" }), 5),
+    );
+
+    const found = findings.find((f) => f.rule === "new_field_used");
+    expect(found?.target).toBe("make.target");
+    expect(found?.severity).toBe("high");
+    expect(found?.basis).toBe("measured");
+    expect(found?.evidence.before).toMatchObject({ hits: 0, runs: 5 });
+    expect(found?.evidence.after).toMatchObject({ hits: 5, runs: 5 });
+  });
+
+  it("is reported underpowered when one run in five fills it", () => {
+    // The measured shape of the anchoring case. One observation proves the
+    // model will do this; five runs cannot say how often, and the label has to
+    // carry that rather than the headline quietly implying a rate.
+    const after = [
+      call("make", { request: "a screen", target: "Roles Screen" }),
+      ...repeat(call("make", { request: "a screen" }), 4),
+    ];
+
+    const found = compare(repeat(call("make", { request: "a screen" }), 5), after).findings.find(
+      (f) => f.rule === "new_field_used",
+    );
+
+    expect(found?.basis).toBe("underpowered");
+    expect(found?.evidence.after).toMatchObject({ hits: 1, runs: 5 });
+  });
+
+  it("stays quiet when the model never touches it", () => {
+    const { findings } = compare(
+      repeat(call("make", { request: "a screen" }), 5),
+      repeat(call("make", { request: "a screen" }), 5),
+    );
+    expect(findings.filter((f) => f.rule === "new_field_used")).toEqual([]);
+  });
+
+  it("defers to arguments_invalid when the older side passed it too", () => {
+    // Passing a field the contract does not declare is an invalid call, and
+    // that rule already reports it. Reporting both would be one event twice.
+    const { findings } = compare(
+      repeat(call("make", { request: "a screen", target: "x" }), 5),
+      repeat(call("make", { request: "a screen", target: "x" }), 5),
+    );
+    expect(findings.filter((f) => f.rule === "new_field_used")).toEqual([]);
+  });
+
+  it("follows a rename, and measures the before side on the old tool", () => {
+    const renamedOld = contract([tool("create", [param("prompt", { required: true })])], "0.7.0");
+    const renamedNew = contract(
+      [tool("make", [param("request", { required: true }), param("target")])],
+      "0.24.0",
+    );
+
+    const { findings } = compareRuns({
+      before: { contract: renamedOld, runs: runs(repeat(call("create", { prompt: "a screen" }), 5)) },
+      after: {
+        contract: renamedNew,
+        runs: runs(repeat(call("make", { request: "a screen", target: "Roles" }), 5)),
+      },
+    });
+
+    const found = findings.find((f) => f.rule === "new_field_used");
+    expect(found?.target).toBe("make.target");
+    // Sampled against `create`, not against a tool that did not exist yet.
+    expect(found?.evidence.before).toMatchObject({ hits: 0, runs: 5 });
+    expect(found?.evidence.beforeSample).toEqual({ prompt: "a screen" });
+  });
+
+  it("says nothing about a new field that is required", () => {
+    // A required field is a structural break and belongs to Layer 0. The model
+    // has no choice about filling it, so its rate carries no information.
+    const requiredNew = contract(
+      [tool("make", [param("request", { required: true }), param("target", { required: true })])],
+      "0.24.0",
+    );
+
+    const { findings } = compareRuns({
+      before: { contract: OLD, runs: runs(repeat(call("make", { request: "a screen" }), 5)) },
+      after: {
+        contract: requiredNew,
+        runs: runs(repeat(call("make", { request: "a screen", target: "Roles" }), 5)),
+      },
+    });
+
+    expect(findings.filter((f) => f.rule === "new_field_used")).toEqual([]);
+  });
+});
