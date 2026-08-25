@@ -1,7 +1,8 @@
 <h1 align="center">Stantal</h1>
 
 <p align="center">
-  <b>A type checker for the half of an API contract that has no types.</b>
+  <b>Your tests pass. Your types check. The model still gets it wrong.</b><br/>
+  Stantal finds the upgrade that did it.
 </p>
 
 <p align="center">
