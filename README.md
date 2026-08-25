@@ -6,6 +6,7 @@
 </p>
 
 <p align="center">
+  <a href="https://www.npmjs.com/package/stantal"><img alt="npm" src="https://img.shields.io/npm/v/stantal?style=flat-square&color=cb3837&logo=npm" /></a>
   <img alt="status" src="https://img.shields.io/badge/status-early%20development-orange?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" />
   <img alt="typescript" src="https://img.shields.io/badge/TypeScript-strict-3178c6?style=flat-square&logo=typescript&logoColor=white" />
@@ -93,7 +94,8 @@ silently dropped.
 
 ## Status
 
-Early development. Not yet published to npm.
+Early development. The name is reserved on npm and the code runs, but nothing
+about the CLI's interface is stable yet. See [CHANGELOG.md](CHANGELOG.md).
 
 | | |
 |---|---|
@@ -101,9 +103,13 @@ Early development. Not yet published to npm.
 | ✅ | Fetch and unpack published versions |
 | ✅ | Layer 0 — structural comparison |
 | ✅ | Layer 1 — prose comparison, with an optional model judge |
-| ✅ | CLI |
-| 🔨 | Layer 2 — behavioural comparison |
+| ✅ | CLI, and the release-history walk |
+| ✅ | Layer 2 — behavioural comparison (single-turn only, see below) |
 | ⬜ | Verdict URLs, CI check, blast radius |
+
+**Layer 2's known limit:** a request is one user message with no history, so
+only first-turn failures are visible. A failure that depends on what the
+conversation already contains cannot be reproduced yet.
 
 ## Development
 

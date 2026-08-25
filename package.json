@@ -4,12 +4,37 @@
   "description": "Tells you whether a model will behave differently after you upgrade a package, before you take the upgrade.",
   "type": "module",
   "license": "MIT",
+  "author": "hellunleash (https://github.com/hellunleash)",
+  "homepage": "https://github.com/hellunleash/stantal#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hellunleash/stantal.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hellunleash/stantal/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "llm",
+    "agent",
+    "tool-calling",
+    "breaking-changes",
+    "semver",
+    "upgrade",
+    "api-contract",
+    "static-analysis"
+  ],
   "bin": {
     "stantal": "./dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "CHANGELOG.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=20"
   },
