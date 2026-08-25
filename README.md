@@ -6,6 +6,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/hellunleash/stantal/actions/workflows/ci.yml"><img alt="ci" src="https://img.shields.io/github/actions/workflow/status/hellunleash/stantal/ci.yml?branch=main&style=flat-square&label=ci" /></a>
   <a href="https://www.npmjs.com/package/stantal"><img alt="npm" src="https://img.shields.io/npm/v/stantal?style=flat-square&color=cb3837&logo=npm" /></a>
   <img alt="status" src="https://img.shields.io/badge/status-early%20development-orange?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" />

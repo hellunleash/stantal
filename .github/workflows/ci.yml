@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A run that is superseded is a run nobody reads.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: gate (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor the manifest claims, current LTS, and current. A package
+        # that says `>=20` and is only ever run on one version is claiming
+        # something nobody checked.
+        node: [20, 22, 24]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `ci`, not `install`, so a lockfile that disagrees with the manifest
+      # fails here instead of resolving to something nobody recorded.
+      - run: npm ci
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      # No API keys are configured for this workflow, on purpose. The suite is
+      # fixture-backed and offline, and it stays that way only if the place it
+      # runs most often has no way to reach a model.
+      - name: Test
+        run: npx vitest run
+
+      # The published artifact is `dist`. A suite that passes while the build
+      # is broken tells a user nothing about what `npx stantal` will do.
+      - name: Build
+        run: npm run build
+
+      - name: The bin the manifest promises exists and runs
+        run: node dist/cli.js --help
