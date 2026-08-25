@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Contract } from "../contract/types.js";
-import { present, type CallRequest, type ToolCaller, type ToolChoice, type WireTool } from "./caller.js";
+import { present, type CallRequest, type ToolCaller, type ToolChoice } from "./caller.js";
 import { compareRuns, type ComparisonResult, type IntentRuns } from "./compare.js";
 import { changedTools, modeForBump, selectIntents, type Intent, type SelectionMode } from "./intent.js";
 import { MIN_RUNS } from "./taxonomy.js";
@@ -63,7 +63,7 @@ type Cassette = {
   version: 1;
   caller: string;
   /** What was sent, stored so a changed contract cannot serve an old answer. */
-  request: { intent: string; tools: WireTool[] };
+  request: CallRequest;
   run: number;
   choice: ToolChoice;
   recordedAt: string;
@@ -157,7 +157,16 @@ async function runSide(
   const out: IntentRuns[] = [];
 
   for (const intent of intents) {
-    const request: CallRequest = { intent: intent.text, tools };
+    // The key is spread in only when there is history to carry. Setting it to
+    // `[]` would change the serialized request for every single-turn intent
+    // and invalidate every cassette recorded before history existed.
+    const request: CallRequest = {
+      intent: intent.text,
+      tools,
+      ...(intent.history !== undefined && intent.history.length > 0
+        ? { history: intent.history }
+        : {}),
+    };
     const choices: ToolChoice[] = [];
     for (let run = 0; run < k; run += 1) {
       const choice = await runOnce(caller, request, run, cache, stats);

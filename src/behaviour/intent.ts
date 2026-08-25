@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Contract, Tool } from "../contract/types.js";
+import type { Turn } from "./caller.js";
 
 /**
  * What a user asked for, held still while the contract moves under it.
@@ -24,6 +25,14 @@ export type Intent = {
   /** The user's request, verbatim. This is what goes to the model. */
   text: string;
   /**
+   * The conversation `text` continues, oldest first. Absent for a first turn.
+   *
+   * Part of the intent, so it is held still across both sides exactly like the
+   * text is. A corpus without this can only ever observe first-turn failures,
+   * which is a bound on what a clean Layer 2 run is allowed to mean.
+   */
+  history?: Turn[];
+  /**
    * Tools this request could plausibly reach.
    *
    * Drives affected-intent selection: a version pair only replays the intents
@@ -40,9 +49,19 @@ export type Intent = {
   expectsNoCall: boolean;
 };
 
-/** Stable identity of an intent's text, so a cache key survives a reordering. */
+/**
+ * Stable identity of an intent, so a cache key survives a reordering.
+ *
+ * History is part of it. Two intents ending in the same sentence after
+ * different conversations are different questions, and giving them one id
+ * would let an answer recorded for one be served for the other.
+ */
 export function intentHash(intent: Intent): string {
-  return createHash("sha256").update(intent.text).digest("hex").slice(0, 16);
+  const body =
+    intent.history === undefined || intent.history.length === 0
+      ? intent.text
+      : JSON.stringify({ history: intent.history, text: intent.text });
+  return createHash("sha256").update(body).digest("hex").slice(0, 16);
 }
 
 /**

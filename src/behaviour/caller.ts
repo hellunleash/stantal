@@ -20,11 +20,48 @@ export type ToolChoice =
   /** No tool was called. The text is kept because a clarifying question is a result. */
   | { kind: "no_call"; text: string };
 
+/**
+ * A turn that already happened, before the request being measured.
+ *
+ * This exists for one measured reason. A model fills an optional field with a
+ * value it can only have got from earlier in the conversation — a name it was
+ * just using, an id it was just handed. On a first turn there is nothing to
+ * fill it with, so leaving the field out is the *correct* answer, and a
+ * single-turn harness records the model getting it right and reports no
+ * difference. The failure is invisible, not absent.
+ *
+ * A tool call and its result are **one** turn, not two. They always arrive as a
+ * pair, and splitting them would let a corpus describe a call with no result —
+ * which is not a state any conversation is in when the next user message
+ * arrives.
+ */
+export type Turn =
+  | { role: "user"; text: string }
+  | { role: "assistant"; text: string }
+  | { role: "call"; tool: string; arguments: Record<string, unknown>; result: string };
+
 export type CallRequest = {
   /** The user's words, verbatim. Identical on both sides of a comparison. */
   intent: string;
   /** The contract as the model would receive it. */
   tools: WireTool[];
+  /**
+   * What was said before `intent`, oldest first. Absent for a first-turn request.
+   *
+   * Held identical across both sides of a comparison, exactly like `intent`,
+   * and for the same reason: anything that differs between the sides is a
+   * candidate explanation for the difference measured. That includes the case
+   * where history names a tool the newer version renamed. Both sides then see
+   * a conversation referring to the old name — which is what a real session
+   * spanning an upgrade looks like — and because it is identical on both, it
+   * cannot be what moved the result.
+   *
+   * Optional rather than defaulted to `[]` on purpose: `JSON.stringify` omits
+   * an undefined property, so a first-turn request serializes byte-identically
+   * to one recorded before this field existed. Every cassette already on disk
+   * stays valid.
+   */
+  history?: Turn[];
 };
 
 /** A tool in the shape every provider's tool-calling API expects. */

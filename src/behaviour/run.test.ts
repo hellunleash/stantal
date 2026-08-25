@@ -239,6 +239,68 @@ describe("the cassette", () => {
   });
 });
 
+describe("prior turns", () => {
+  const withHistory: Intent[] = [
+    {
+      id: "i1",
+      text: "make me a roles screen",
+      history: [{ role: "user", text: "we were talking about the admin panel" }],
+      slice: ["make"],
+      expectsNoCall: false,
+    },
+  ];
+
+  async function record(corpus: readonly Intent[], caller: ToolCaller) {
+    return runBehaviour({
+      from: { version: "0.7.0", contract: OLD },
+      to: { version: "0.24.0", contract: NEW },
+      intents: corpus,
+      caller,
+      k: 5,
+      cache: { mode: "record", dir },
+    });
+  }
+
+  it("an explicitly empty history is not sent, so old cassettes still match", async () => {
+    // The compatibility property the optional field exists for. `history: []`
+    // and no history at all have to produce the same request, or every cassette
+    // recorded before conversations existed is silently re-bought.
+    await record(intents, proseSensitiveCaller());
+
+    const second = proseSensitiveCaller();
+    const result = await record([{ ...(intents[0] as Intent), history: [] }], second);
+
+    expect(second.calls).toHaveLength(0);
+    expect(result.stats).toEqual({ hits: 10, misses: 0, writes: 0 });
+  });
+
+  it("a different conversation is a different question", async () => {
+    await record(intents, proseSensitiveCaller());
+
+    const second = proseSensitiveCaller();
+    await record(withHistory, second);
+
+    // Same closing sentence, different conversation before it. Serving the
+    // recorded answer here would report behaviour nobody measured.
+    expect(second.calls).toHaveLength(10);
+  });
+
+  it("carries the turns through to the caller", async () => {
+    const caller = proseSensitiveCaller();
+    await record(withHistory, caller);
+
+    expect(caller.calls[0]?.history).toEqual([
+      { role: "user", text: "we were talking about the admin panel" },
+    ]);
+  });
+
+  it("sends no history key for a first-turn intent", async () => {
+    const caller = proseSensitiveCaller();
+    await record(intents, caller);
+    expect(caller.calls[0]).not.toHaveProperty("history");
+  });
+});
+
 describe("behaviourCacheFromEnv", () => {
   it("records by default", () => {
     expect(behaviourCacheFromEnv({}).mode).toBe("record");

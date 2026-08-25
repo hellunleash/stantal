@@ -11,8 +11,10 @@ import type { CallRequest, ToolCaller, ToolChoice, WireTool } from "./caller.js"
  * call it would make measures its introspection, not its behaviour.
  *
  * What leaves the machine: tool names and descriptions from a published
- * package, plus an intent string. Public data either way. No key, no source,
- * and nothing from the user's own repository is ever part of a request.
+ * package, an intent string, and — when the intent continues a conversation —
+ * the prior turns of that conversation. All of it is generated from the
+ * package or by the corpus. No key, no source, and nothing from the user's own
+ * repository is ever part of a request.
  */
 
 export type CallerProvider = "anthropic" | "openai" | "gemini";
@@ -123,6 +125,119 @@ function geminiTools(tools: readonly WireTool[]): unknown[] {
   ];
 }
 
+// --- prior turns ------------------------------------------------------------
+
+/**
+ * A deterministic id for the nth tool call in history.
+ *
+ * Two of the three providers make the result name the call it answers. Deriving
+ * that id from the turn's position rather than generating one keeps the request
+ * byte-stable across runs, which is the only reason a cassette can be found
+ * again.
+ */
+function historyCallId(index: number): string {
+  return `stantal_${index}`;
+}
+
+type AnthropicBlock = Record<string, unknown>;
+type AnthropicMessage = { role: "user" | "assistant"; content: AnthropicBlock[] };
+
+function anthropicMessages(request: CallRequest): AnthropicMessage[] {
+  const out: AnthropicMessage[] = [];
+
+  // Anthropic carries a tool_result in the *user* message after the tool_use,
+  // and rejects a run of same-role messages. Appending a block to the last
+  // message whenever its role already matches satisfies both at once.
+  const push = (role: "user" | "assistant", block: AnthropicBlock): void => {
+    const last = out[out.length - 1];
+    if (last !== undefined && last.role === role) last.content.push(block);
+    else out.push({ role, content: [block] });
+  };
+
+  (request.history ?? []).forEach((turn, index) => {
+    switch (turn.role) {
+      case "user":
+        push("user", { type: "text", text: turn.text });
+        break;
+      case "assistant":
+        push("assistant", { type: "text", text: turn.text });
+        break;
+      case "call": {
+        const id = historyCallId(index);
+        push("assistant", { type: "tool_use", id, name: turn.tool, input: turn.arguments });
+        push("user", { type: "tool_result", tool_use_id: id, content: turn.result });
+        break;
+      }
+    }
+  });
+
+  push("user", { type: "text", text: request.intent });
+  return out;
+}
+
+function openaiMessages(request: CallRequest): unknown[] {
+  const out: unknown[] = [{ role: "system", content: CALLER_SYSTEM_PROMPT }];
+
+  (request.history ?? []).forEach((turn, index) => {
+    switch (turn.role) {
+      case "user":
+        out.push({ role: "user", content: turn.text });
+        break;
+      case "assistant":
+        out.push({ role: "assistant", content: turn.text });
+        break;
+      case "call": {
+        const id = historyCallId(index);
+        out.push({
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id,
+              type: "function",
+              // Arguments go on the wire as a JSON string here, not an object.
+              function: { name: turn.tool, arguments: JSON.stringify(turn.arguments) },
+            },
+          ],
+        });
+        out.push({ role: "tool", tool_call_id: id, content: turn.result });
+        break;
+      }
+    }
+  });
+
+  out.push({ role: "user", content: request.intent });
+  return out;
+}
+
+function geminiContents(request: CallRequest): unknown[] {
+  const out: unknown[] = [];
+
+  for (const turn of request.history ?? []) {
+    switch (turn.role) {
+      case "user":
+        out.push({ role: "user", parts: [{ text: turn.text }] });
+        break;
+      case "assistant":
+        // Gemini's word for the assistant is "model".
+        out.push({ role: "model", parts: [{ text: turn.text }] });
+        break;
+      case "call":
+        out.push({ role: "model", parts: [{ functionCall: { name: turn.tool, args: turn.arguments } }] });
+        // A functionResponse names the function instead of carrying a call id,
+        // so nothing has to be synthesized on this path.
+        out.push({
+          role: "user",
+          parts: [{ functionResponse: { name: turn.tool, response: { result: turn.result } } }],
+        });
+        break;
+    }
+  }
+
+  out.push({ role: "user", parts: [{ text: request.intent }] });
+  return out;
+}
+
 function wireFor(config: CallerConfig, request: CallRequest): Wire {
   const model = config.model ?? DEFAULT_MODEL[config.provider];
   const base = (config.baseUrl ?? DEFAULT_BASE[config.provider]).replace(/\/+$/, "");
@@ -142,7 +257,7 @@ function wireFor(config: CallerConfig, request: CallRequest): Wire {
           max_tokens: 2048,
           system: CALLER_SYSTEM_PROMPT,
           tools: anthropicTools(request.tools),
-          messages: [{ role: "user", content: request.intent }],
+          messages: anthropicMessages(request),
           ...(temperature === undefined ? {} : { temperature }),
         },
         read: (payload) => {
@@ -173,10 +288,7 @@ function wireFor(config: CallerConfig, request: CallRequest): Wire {
         body: {
           model,
           tools: openaiTools(request.tools),
-          messages: [
-            { role: "system", content: CALLER_SYSTEM_PROMPT },
-            { role: "user", content: request.intent },
-          ],
+          messages: openaiMessages(request),
           ...(temperature === undefined ? {} : { temperature }),
         },
         read: (payload) => {
@@ -204,7 +316,7 @@ function wireFor(config: CallerConfig, request: CallRequest): Wire {
         body: {
           systemInstruction: { parts: [{ text: CALLER_SYSTEM_PROMPT }] },
           tools: geminiTools(request.tools),
-          contents: [{ role: "user", parts: [{ text: request.intent }] }],
+          contents: geminiContents(request),
           ...(temperature === undefined ? {} : { generationConfig: { temperature } }),
         },
         read: (payload) => {

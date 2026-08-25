@@ -113,6 +113,75 @@ describe("seedIntents", () => {
     expect(second.calls).toHaveLength(1);
   });
 
+  it("turns a proposed conversation into turns, call paired with result", async () => {
+    const caller = proposing([
+      {
+        text: "add a checkout page to it",
+        tools: ["make"],
+        expectsNoCall: false,
+        history: [
+          {
+            user: "build me a store",
+            tool: "make",
+            arguments: { request: "a store" },
+            result: "Created 'Corner Store'.",
+          },
+        ],
+      },
+    ]);
+
+    const intents = await seedIntents({ anchor, caller, cacheDir: dir });
+
+    expect(intents[0]?.history).toEqual([
+      { role: "user", text: "build me a store" },
+      {
+        role: "call",
+        tool: "make",
+        arguments: { request: "a store" },
+        result: "Created 'Corner Store'.",
+      },
+    ]);
+  });
+
+  it("drops a call naming a tool the anchor does not declare, and keeps the turn", async () => {
+    // Same policy as a hallucinated slice tag. The user turn is the half that
+    // carries what the follow-up refers back to, so throwing the whole entry
+    // away would discard the point of the intent over a detail nothing measures.
+    const caller = proposing([
+      {
+        text: "rename it",
+        tools: ["make"],
+        expectsNoCall: false,
+        history: [{ user: "build me a store", tool: "invented", result: "Made it." }],
+      },
+    ]);
+
+    const intents = await seedIntents({ anchor, caller, cacheDir: dir });
+    expect(intents[0]?.history).toEqual([{ role: "user", text: "build me a store" }]);
+  });
+
+  it("leaves a first-turn intent with no history at all", async () => {
+    // Not `[]`. An absent key serializes away, which is what keeps a cassette
+    // recorded before conversations existed still matching.
+    const caller = proposing([{ text: "build me a store", tools: ["make"], expectsNoCall: false }]);
+    const intents = await seedIntents({ anchor, caller, cacheDir: dir });
+    expect(intents[0]).not.toHaveProperty("history");
+  });
+
+  it("ignores a prior turn with nothing said on it", async () => {
+    const caller = proposing([
+      {
+        text: "carry on",
+        tools: ["make"],
+        expectsNoCall: false,
+        history: [{ user: "   " }, { tool: "make", result: "done" }, { user: "real turn" }],
+      },
+    ]);
+
+    const intents = await seedIntents({ anchor, caller, cacheDir: dir });
+    expect(intents[0]?.history).toEqual([{ role: "user", text: "real turn" }]);
+  });
+
   it("asks about the anchor's tools and shows their descriptions", async () => {
     const caller = proposing([]);
     await seedIntents({ anchor, caller, cacheDir: dir });

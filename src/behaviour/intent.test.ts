@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EXTRACTOR_VERSION, type Contract, type Param, type Tool } from "../contract/types.js";
-import { breakingBump, changedTools, modeForBump, selectIntents, type Intent } from "./intent.js";
+import { breakingBump, changedTools, intentHash, modeForBump, selectIntents, type Intent } from "./intent.js";
 
 function param(name: string, extra: Partial<Param> = {}): Param {
   return { name, type: "string", required: false, description: null, constraints: {}, ...extra };
@@ -108,5 +108,24 @@ describe("breakingBump", () => {
   it("drives the selection mode", () => {
     expect(modeForBump("0.7.0", "0.24.0")).toBe("full");
     expect(modeForBump("1.4.0", "1.4.1")).toBe("affected");
+  });
+});
+
+describe("intentHash", () => {
+  const base: Intent = { id: "i1", text: "add a checkout page", slice: [], expectsNoCall: false };
+
+  it("ignores the id, so reordering a corpus does not move a key", () => {
+    expect(intentHash({ ...base, id: "i9" })).toBe(intentHash(base));
+  });
+
+  it("separates two intents that end the same way after different conversations", () => {
+    const a = intentHash({ ...base, history: [{ role: "user", text: "build me a store" }] });
+    const b = intentHash({ ...base, history: [{ role: "user", text: "build me a blog" }] });
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(intentHash(base));
+  });
+
+  it("treats an empty history as no history", () => {
+    expect(intentHash({ ...base, history: [] })).toBe(intentHash(base));
   });
 });
