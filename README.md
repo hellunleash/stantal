@@ -1,8 +1,7 @@
 <h1 align="center">Stantal</h1>
 
 <p align="center">
-  Know whether an upgrade changes how a model uses your dependency —<br/>
-  before you take the upgrade.
+  <b>A type checker for the half of an API contract that has no types.</b>
 </p>
 
 <p align="center">
@@ -26,8 +25,6 @@ signature. Nothing in your toolchain is looking at it.
 Most of the time the answer is *"this one is fine, take it."* That is the point.
 Everyone already tells stranded users to upgrade. They don't, because nobody can
 tell them whether the new version breaks something else.
-
-**Stantal is a type checker for the half of an API contract that has no types.**
 
 ## Install
 
