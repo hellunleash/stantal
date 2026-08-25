@@ -129,14 +129,14 @@ describe("judgeFromEnv", () => {
   });
 
   test("picks up whichever key is present", () => {
-    expect(judgeFromEnv({ OPENAI_API_KEY: "k" })?.id).toBe("openai:gpt-4o");
+    expect(judgeFromEnv({ OPENAI_API_KEY: "k" })?.id).toBe("openai:gpt-5.4-mini");
     expect(judgeFromEnv({ GEMINI_API_KEY: "k" })?.id).toBe("gemini:gemini-3.6-flash");
     expect(judgeFromEnv({ GOOGLE_API_KEY: "k" })?.id).toBe("gemini:gemini-3.6-flash");
   });
 
   test("an explicit provider choice wins over key order", () => {
     const env = { ANTHROPIC_API_KEY: "a", OPENAI_API_KEY: "o", STANTAL_JUDGE: "openai" };
-    expect(judgeFromEnv(env)?.id).toBe("openai:gpt-4o");
+    expect(judgeFromEnv(env)?.id).toBe("openai:gpt-5.4-mini");
   });
 
   test("the model is overridable, because a backfill should not run on the priciest model", () => {
@@ -147,6 +147,15 @@ describe("judgeFromEnv", () => {
 
   test("can be switched off even with a key in the environment", () => {
     expect(judgeFromEnv({ ANTHROPIC_API_KEY: "k", STANTAL_JUDGE: "none" })).toBeNull();
+  });
+
+  test("the gemini default stays pinned to gemini-3.6-flash", () => {
+    // Every recorded judge cassette is keyed on this exact id (the cache key
+    // includes the judge id). A silent bump here would strand all of them and
+    // make the backfill numbers unreplayable, so this default gets its own
+    // assertion rather than relying on the general "picks up whichever key"
+    // test to catch a regression.
+    expect(judgeFromEnv({ GEMINI_API_KEY: "k" })?.id).toBe("gemini:gemini-3.6-flash");
   });
 });
 

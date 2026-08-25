@@ -55,8 +55,10 @@ describe("questionHash", () => {
   });
 
   it("differs per judge, so one model answer is never served as another", () => {
+    // The two ids here just need to be distinct judges — any two would prove
+    // the point. Using the real defaults keeps the test honest as they move.
     const q = documented("q", "app", "Create a thing.");
-    expect(questionHash("openai:gpt-4o", q)).not.toBe(questionHash("gemini:gemini-3.6-flash", q));
+    expect(questionHash("openai:gpt-5.4-mini", q)).not.toBe(questionHash("gemini:gemini-3.6-flash", q));
   });
 });
 
@@ -239,7 +241,7 @@ describe("cacheModeFromEnv", () => {
 describe("judgeFromEnv with the cache wired in", () => {
   it("keeps the inner judge id, so a report names the model and not the cache", () => {
     expect(judgeFromEnv({ OPENAI_API_KEY: "k", STANTAL_JUDGE_CACHE_DIR: dir })?.id).toBe(
-      "openai:gpt-4o",
+      "openai:gpt-5.4-mini",
     );
   });
 

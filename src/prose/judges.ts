@@ -71,7 +71,19 @@ export class JudgeError extends Error {
 
 const DEFAULT_MODEL: Record<JudgeProvider, string> = {
   anthropic: "claude-opus-5",
-  openai: "gpt-4o",
+  // Cheap by design, not by neglect. The judge only ever answers one closed
+  // yes/no/unclear question and must quote its source; `verifyAnswer` then
+  // checks that quote against the real text and fails closed on a fabrication.
+  // With that guard rail doing the real work, a mini-tier model is exactly as
+  // trustworthy as a flagship one here, so there is no reason to pay for more.
+  openai: "gpt-5.4-mini",
+  // PINNED — do not bump without reading this. Every one of the project's 141
+  // recorded judge cassettes (docs, backfill numbers) is keyed on
+  // "gemini:gemini-3.6-flash", because the cache key includes the judge id.
+  // Moving this id, even to a strictly newer model like gemini-3.7-flash,
+  // would silently strand all of them and make the headline backfill number
+  // unreplayable from disk. If this ever needs to move, it has to come with a
+  // re-record of the affected cassettes, not just a version bump.
   gemini: "gemini-3.6-flash",
 };
 
