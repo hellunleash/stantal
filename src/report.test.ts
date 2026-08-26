@@ -238,6 +238,18 @@ describe("Layer 2 in the verdict", () => {
     expect(result.verdict).toBe("clean");
   });
 
+  test("does not name a caller when no door actually ran Layer 2", async () => {
+    // A configured caller is not a consulted one. Reporting the id here would
+    // say a model looked and found nothing, when nothing was measured at all —
+    // opposite claims, and the distinction the nullable field exists to keep.
+    const caller = fieldFillingCaller();
+    const result = await report(packFiles(DESCRIBED), packFiles(DESCRIBED), {
+      behaviour: { caller, intents: INTENTS },
+    });
+
+    expect(result.caller).toBe("none");
+  });
+
   test("seeds its corpus from the older side when none is supplied", async () => {
     const caller = fieldFillingCaller();
     const result = await report(packFiles(DESCRIBED), packFiles(REWORDED), {

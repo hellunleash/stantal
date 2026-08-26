@@ -239,7 +239,13 @@ async function behaviourFor(
   // — and showing it an empty contract would manufacture `call_abandoned` on
   // every intent.
   if (!isPresent(from) || !isPresent(to)) return null;
-  if (from.contract.tools.length === 0) return null;
+  // Either side being empty, not just the older one. A newer version with no
+  // tools left leaves the model nothing to call, so `call_abandoned` fires on
+  // every intent and the verdict becomes behaviour-breaking — when the real
+  // event is that every tool was removed, which Layer 0 already reports as a
+  // structural break. Paying k calls per intent per side to rediscover that is
+  // the expensive way to be told something the contract says on its face.
+  if (from.contract.tools.length === 0 || to.contract.tools.length === 0) return null;
 
   // A contract that did not change is skipped rather than measured, and this is
   // a correctness guard before it is a cost one. Model output is stochastic, so
@@ -345,10 +351,15 @@ export async function buildReport(options: ReportOptions): Promise<Report> {
     surfaces,
     missingDependencies: [...new Set([...from.missing, ...to.missing])],
     judge: judge?.id ?? "none",
-    // "none" covers both "not asked for" and "asked for, no key" on purpose:
-    // from the reader's side they are the same fact, which is that no model was
-    // consulted and so no behavioural claim in here rests on one.
-    caller: options.behaviour?.caller?.id ?? "none",
+    // Named only when Layer 2 actually ran on at least one door. Reporting the
+    // configured caller would claim a model was consulted on runs where every
+    // door was skipped — unchanged contract, unreadable side, empty corpus —
+    // and "a model looked and found nothing" is the opposite claim to "nothing
+    // was measured". "none" therefore covers not asked for, asked for with no
+    // key, and asked for but nothing to ask about.
+    caller: surfaces.some((s) => s.behaviour !== null)
+      ? (options.behaviour?.caller?.id ?? "none")
+      : "none",
     generatedAt: new Date().toISOString(),
   };
   report.headline = headlineFor(report);

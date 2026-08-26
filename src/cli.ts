@@ -121,6 +121,7 @@ function renderSurface(surface: SurfaceReport): string[] {
     changes.length === 0 &&
     findings.length === 0 &&
     (surface.behaviour?.findings.length ?? 0) === 0 &&
+    (surface.behaviour?.skipped.length ?? 0) === 0 &&
     surface.comparison.suppressed.length === 0 &&
     surface.comparison.kind === "compared";
   if (quiet) return lines;
@@ -167,6 +168,13 @@ function renderSurface(surface: SurfaceReport): string[] {
   }
   for (const skipped of surface.prose.skipped) {
     lines.push(`    ${dim(`withheld  ${skipped.target} — ${skipped.reason}`)}`);
+  }
+  // Layer 2's skips belong here for the same reason as the two loops above. An
+  // intent that could not be compared — a replay miss, one side with no runs —
+  // leaves no finding, and printing nothing would let an empty behaviour
+  // section read as a model having looked and found nothing.
+  for (const skipped of surface.behaviour?.skipped ?? []) {
+    lines.push(`    ${dim(`withheld  behaviour ${skipped.intentId} — ${skipped.reason}`)}`);
   }
 
   lines.push("");
@@ -376,6 +384,27 @@ every release in the range. Run it on a single pair instead.
     return runHistory(positionals[1], values, judge);
   }
 
+  // Checked before the work starts, and before anything branches on it, so
+  // `--k` means the same thing on every path. Validating it inside the caller
+  // branch let the same bad value exit 2 with a key present and pass silently
+  // without one — and validating it after the fetch would spend a download
+  // before rejecting an argument that was wrong from the start.
+  //
+  // Strict digits rather than `parseInt`, which stops at the first non-digit:
+  // `--k 1e3` would become 1, quietly handing back the weakest possible sample
+  // to someone who asked for the strongest, and `--k 8x` would be accepted.
+  let k: number | undefined;
+  if (values.k !== undefined) {
+    if (!/^\d+$/.test(values.k) || Number.parseInt(values.k, 10) < 1) {
+      process.stderr.write(`stantal: --k must be a positive whole number, got "${values.k}"\n`);
+      return 2;
+    }
+    k = Number.parseInt(values.k, 10);
+    if (values.behaviour !== true) {
+      process.stderr.write("stantal: --k only applies with --behaviour, and was ignored.\n");
+    }
+  }
+
   const [pkg, from, to] = positionals;
   if (pkg === undefined || from === undefined || to === undefined) {
     process.stderr.write(`${USAGE}\n`);
@@ -396,12 +425,6 @@ GEMINI_API_KEY). Continuing without Layer 2.
 `,
       );
     } else {
-      const k = values.k === undefined ? undefined : Number.parseInt(values.k, 10);
-      if (k !== undefined && (!Number.isFinite(k) || k < 1)) {
-        process.stderr.write(`stantal: --k must be a positive whole number, got "${values.k}"
-`);
-        return 2;
-      }
       behaviour = {
         caller,
         cache: behaviourCacheFromEnv(),

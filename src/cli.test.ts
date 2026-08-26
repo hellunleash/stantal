@@ -71,3 +71,24 @@ describe("--k", () => {
     expect(stderr).toContain("--k must be a positive whole number");
   });
 });
+
+describe("--k validation", () => {
+  it("warns rather than silently dropping it when --behaviour is absent", async () => {
+    // Parsed on every path, so the same argument means the same thing whether
+    // or not a key happens to be present.
+    // No positionals, so this stops at usage without touching the network. The
+    // warning still has to have been printed by then, which is the point: an
+    // argument is judged before any work is done on its behalf.
+    const code = await main(["--k", "8"]);
+    expect(code).toBe(2);
+    expect(stderr).toContain("--k only applies with --behaviour");
+  });
+
+  it("rejects a value parseInt would silently truncate", async () => {
+    // `parseInt("1e3")` is 1, which would hand the weakest possible sample to
+    // someone asking for the strongest.
+    const code = await main(["--k", "1e3"]);
+    expect(code).toBe(2);
+    expect(stderr).toContain("--k must be a positive whole number");
+  });
+});
