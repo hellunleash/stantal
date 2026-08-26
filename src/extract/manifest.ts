@@ -27,9 +27,35 @@ import { EXTRACTOR_VERSION, type Ecosystem, type Surface, type Tool } from "../c
  * appeared.
  */
 
-export type ManifestExtractOptions = {
-  /** The JSON text. Passed as text, not a path, so the caller owns all IO. */
+/** One document. Text, not a path, so the caller owns all IO. */
+export type ManifestSource = {
   text: string;
+  /** Filename used in evidence, so a note points at something openable. */
+  origin?: string;
+};
+
+export type ManifestExtractOptions = {
+  /** A single document. Shorthand for a one-entry `sources`. */
+  text?: string;
+  /**
+   * The documents that together make up one contract, catalog first.
+   *
+   * A contract is not always one file. A host commonly generates the schemas
+   * from its own routes and keeps the prose somewhere editable, because the two
+   * have different authors: one is regenerated on every build, the other is
+   * written once by a person. What a model receives is the merge, so reading
+   * only the file that happens to be named `tools` reports the schemas of the
+   * real contract next to the descriptions of neither.
+   *
+   * **The first source defines the tool set; later ones refine it.** Order is
+   * the only signal available for which document is the catalog, and it is the
+   * right one — an annotation file cannot introduce a tool the host does not
+   * serve. An entry in a later source naming a tool no earlier source declared
+   * therefore describes nothing and is ignored. That is deliberately not a
+   * note: notes exist for gaps that suppress claims, and here the contract is
+   * fully known.
+   */
+  sources?: readonly ManifestSource[];
   /** What to call this contract. A file has no registry identity of its own. */
   package: string;
   /** Caller-supplied: a commit, a tag, a date — whatever makes the pair ordered. */
@@ -38,6 +64,27 @@ export type ManifestExtractOptions = {
   surface?: Surface;
   /** Filename used in evidence, so a note points at something openable. */
   origin?: string;
+  /**
+   * Where a descriptor's fields live, when a document nests them.
+   *
+   * A producer that separates generated fields from editable ones puts the
+   * editable half under a wrapper. Named by the caller rather than guessed:
+   * picking a nesting key by sniffing would silently read the wrong object the
+   * first time a producer chose a different name, and a description read off
+   * the wrong object is exactly the false finding this tool exists to catch.
+   */
+  fieldsKey?: string;
+  /**
+   * Tools the runtime withholds from the model, as a predicate over the
+   * merged descriptor.
+   *
+   * Some of what decides the tool set is policy the documents state but do not
+   * apply — a grade meaning "operators only" is in the file, while the rule
+   * that such tools are hidden lives in the host. Stantal cannot infer that
+   * rule and must not guess it, so the caller states it. Left unset, nothing is
+   * excluded and the contract is every tool declared.
+   */
+  excludeWhen?: readonly { key: string; value: string }[];
 };
 
 const ABSENCE_DETAIL: Record<SurfaceAbsenceReason, string> = {
@@ -63,6 +110,17 @@ function isObject(value: unknown): value is Record<string, unknown> {
 function toolList(root: unknown): unknown[] | null {
   if (isObject(root)) {
     if (Array.isArray(root["tools"])) return root["tools"];
+    // A map of name -> descriptor. Common wherever a document is meant to be
+    // looked up by tool rather than iterated, which is how annotation files are
+    // usually written. The key is the identity, so it wins over any `name`
+    // inside the value: in a map the two disagreeing means the value is stale,
+    // and the entry still describes whatever the key names.
+    if (isObject(root["tools"])) {
+      return Object.entries(root["tools"]).map(([name, value]) => ({
+        ...(isObject(value) ? value : {}),
+        name,
+      }));
+    }
     // JSON-RPC envelope: a captured `tools/list` reply, saved whole.
     const result = root["result"];
     if (isObject(result) && Array.isArray(result["tools"])) return result["tools"];
@@ -72,6 +130,26 @@ function toolList(root: unknown): unknown[] | null {
   }
   return null;
 }
+
+/** The schema, under any of the spellings producers use for it. */
+function schemaOf(record: Record<string, unknown>): unknown {
+  return record["inputSchema"] ?? record["input_schema"] ?? record["parameters"];
+}
+
+/**
+ * One descriptor, read but not yet turned into a tool.
+ *
+ * Kept as a record rather than a `Tool` because merging happens across
+ * documents: a later source may supply only the description, and building a
+ * tool per source would mean rebuilding one from a fragment that never had a
+ * schema and calling the missing parameters a fact.
+ */
+type Descriptor = {
+  name: string;
+  record: Record<string, unknown>;
+  /** A schema is present and could not be read, so its parameters are unknown. */
+  schemaUnreadable: boolean;
+};
 
 /**
  * Read one descriptor.
@@ -85,7 +163,8 @@ function toolList(root: unknown): unknown[] | null {
 function readDescriptor(
   entry: unknown,
   pointer: string,
-): { tool: Tool | null; notes: ExtractionNote[] } {
+  fieldsKey: string | undefined,
+): { descriptor: Descriptor | null; notes: ExtractionNote[] } {
   const notes: ExtractionNote[] = [];
 
   if (!isObject(entry)) {
@@ -96,7 +175,7 @@ function readDescriptor(
       evidence: pointer,
       detail: "manifest entry is not an object",
     });
-    return { tool: null, notes };
+    return { descriptor: null, notes };
   }
 
   const rawName = entry["name"];
@@ -108,59 +187,70 @@ function readDescriptor(
       evidence: pointer,
       detail: "manifest entry has no readable `name`",
     });
-    return { tool: null, notes };
+    return { descriptor: null, notes };
   }
   const name = rawName.trim();
 
-  // An absent `inputSchema` is the ordinary way to serialize a tool that takes
-  // no arguments, so it is a fact and not a gap. A present one that is not an
+  // Nested fields are folded up so everything downstream reads one flat record.
+  // The wrapper wins over the top level: it is where a producer puts the value
+  // a person edited, and the outer copy is the generated one it supersedes.
+  const nested = fieldsKey === undefined ? undefined : entry[fieldsKey];
+  const record: Record<string, unknown> = { ...entry, ...(isObject(nested) ? nested : {}) };
+
+  // An absent schema is the ordinary way to serialize a tool that takes no
+  // arguments, so it is a fact and not a gap. A present one that is not an
   // object is a gap: something is there and we cannot read it. Reporting the
   // second as a zero-parameter tool would invent the exact kind of false
   // finding this product exists to catch.
-  const schema = entry["inputSchema"] ?? entry["input_schema"] ?? entry["parameters"];
-  if (schema !== undefined && !isObject(schema)) {
+  const schema = schemaOf(record);
+  const unreadable =
+    (schema !== undefined && !isObject(schema)) ||
+    (isObject(schema) && schema["properties"] !== undefined && !isObject(schema["properties"]));
+
+  if (unreadable) {
     notes.push({
       code: "descriptor_schema_unresolved",
       scope: "schema",
       target: name,
       evidence: pointer,
-      detail: `\`${name}\` has an \`inputSchema\` that is not an object`,
+      detail: `\`${name}\` has an \`inputSchema\` that could not be read`,
     });
-    return { tool: toolFrom(name, entry["description"], undefined), notes };
   }
 
-  // `properties` present and unreadable is the same gap one level down: the
-  // schema declares members and none of them can be listed.
-  if (isObject(schema) && schema["properties"] !== undefined && !isObject(schema["properties"])) {
-    notes.push({
-      code: "descriptor_schema_unresolved",
-      scope: "schema",
-      target: name,
-      evidence: pointer,
-      detail: `\`${name}\` has \`inputSchema.properties\` that is not an object`,
-    });
-    return { tool: toolFrom(name, entry["description"], undefined), notes };
-  }
+  return { descriptor: { name, record, schemaUnreadable: unreadable }, notes };
+}
 
-  return { tool: toolFrom(name, entry["description"], schema), notes };
+/** Does this tool match a rule saying the runtime withholds it? */
+function withheld(
+  record: Record<string, unknown>,
+  rules: readonly { key: string; value: string }[],
+): boolean {
+  return rules.some((rule) => {
+    const actual = record[rule.key];
+    return actual !== undefined && String(actual) === rule.value;
+  });
 }
 
 /**
  * A serialized tool manifest -> a surface result.
  *
- * Never throws on bad input. A file we cannot read is an *unevidenced* absence,
- * which `diffSurfaces` refuses to compare, rather than an empty contract, which
- * would diff as "every tool removed".
+ * Never throws on bad input. A document we cannot read is an *unevidenced*
+ * absence, which `diffSurfaces` refuses to compare, rather than an empty
+ * contract, which would diff as "every tool removed".
  */
 export function extractFromManifest(options: ManifestExtractOptions): SurfaceResult {
   const {
-    text,
     package: pkg,
     version,
     ecosystem = "http",
     surface = "host-pack",
     origin = "manifest.json",
+    fieldsKey,
+    excludeWhen = [],
   } = options;
+
+  const sources: readonly ManifestSource[] =
+    options.sources ?? (options.text === undefined ? [] : [{ text: options.text, origin }]);
 
   const absent = (reason: SurfaceAbsenceReason, checked: string[]): SurfaceResult => ({
     present: false,
@@ -175,50 +265,93 @@ export function extractFromManifest(options: ManifestExtractOptions): SurfaceRes
     },
   });
 
-  let root: unknown;
-  try {
-    root = JSON.parse(text);
-  } catch {
-    return absent("unparseable", [origin]);
-  }
-
-  const entries = toolList(root);
-  // No recognizable list is *not* the same as an empty one. This file may not be
-  // a tool manifest at all, and "it lists no tools" would be a claim about a
-  // producer we have no evidence about.
-  if (entries === null) return absent("unparseable", [`${origin}#/tools`]);
-  if (entries.length === 0) return absent("no_descriptors", [`${origin}#/tools`]);
+  if (sources.length === 0) return absent("file_missing", [origin]);
 
   const notes: ExtractionNote[] = [];
-  const byName = new Map<string, Tool>();
+  const merged = new Map<string, Descriptor>();
+  let firstSource = true;
 
-  entries.forEach((entry, index) => {
-    const read = readDescriptor(entry, `${origin}#/tools/${index}`);
-    notes.push(...read.notes);
-    if (read.tool === null) return;
+  for (const source of sources) {
+    const where = source.origin ?? origin;
 
-    const existing = byName.get(read.tool.name);
-    if (existing === undefined) {
-      byName.set(read.tool.name, read.tool);
-      return;
+    let root: unknown;
+    try {
+      root = JSON.parse(source.text);
+    } catch {
+      return absent("unparseable", [where]);
     }
-    // Two descriptors for one name. The first wins so the read stays
-    // deterministic, but which one a consumer actually gets is the producer's
-    // business and not knowable from here, so the tool is no longer trusted.
-    notes.push({
-      code: "duplicate_descriptor",
-      scope: "surface",
-      target: read.tool.name,
-      evidence: `${origin}#/tools/${index}`,
-      detail: `\`${read.tool.name}\` is declared more than once`,
+
+    const entries = toolList(root);
+    // No recognizable list is *not* the same as an empty one. This document may
+    // not be a tool manifest at all, and "it lists no tools" would be a claim
+    // about a producer we have no evidence about.
+    if (entries === null) return absent("unparseable", [`${where}#/tools`]);
+    if (entries.length === 0 && firstSource) return absent("no_descriptors", [`${where}#/tools`]);
+
+    const seenHere = new Set<string>();
+
+    entries.forEach((entry, index) => {
+      const pointer = `${where}#/tools/${index}`;
+      const read = readDescriptor(entry, pointer, fieldsKey);
+      notes.push(...read.notes);
+      if (read.descriptor === null) return;
+
+      const { name, record, schemaUnreadable } = read.descriptor;
+
+      // Two descriptors for one name *within one document*. The first wins so
+      // the read stays deterministic, but which one a consumer actually gets is
+      // the producer's business and not knowable from here, so it is noted.
+      // Across documents the same name is the point, not a conflict.
+      if (seenHere.has(name)) {
+        notes.push({
+          code: "duplicate_descriptor",
+          scope: "surface",
+          target: name,
+          evidence: pointer,
+          detail: `\`${name}\` is declared more than once in ${where}`,
+        });
+        return;
+      }
+      seenHere.add(name);
+
+      const existing = merged.get(name);
+      if (existing === undefined) {
+        // Only the catalog may introduce a tool. A later document naming one
+        // nothing declares describes nothing, and is dropped rather than
+        // turned into a tool with prose and no schema.
+        if (firstSource) merged.set(name, { name, record, schemaUnreadable });
+        return;
+      }
+
+      merged.set(name, {
+        name,
+        record: { ...existing.record, ...record },
+        // Unreadable anywhere is unreadable: a later document that carries no
+        // schema must not clear a gap an earlier one reported.
+        schemaUnreadable: existing.schemaUnreadable || schemaUnreadable,
+      });
     });
-  });
 
-  // Every entry was unreadable. The surface is there — the file says so — but
-  // nothing in it could be named, so this is our limit and not their absence.
-  if (byName.size === 0) return absent("descriptors_unreadable", [`${origin}#/tools`]);
+    firstSource = false;
+  }
 
-  const tools = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  // Every entry was unreadable. The surface is there — the documents say so —
+  // but nothing in them could be named, so this is our limit and not their
+  // absence.
+  if (merged.size === 0) return absent("descriptors_unreadable", [`${origin}#/tools`]);
+
+  const tools: Tool[] = [];
+  for (const { name, record, schemaUnreadable } of merged.values()) {
+    if (withheld(record, excludeWhen)) continue;
+    tools.push(toolFrom(name, record["description"], schemaUnreadable ? undefined : schemaOf(record)));
+  }
+
+  // Excluding every tool is a fact about the rules the caller supplied, not a
+  // reading gap — but it is still not a contract, and comparing it as one would
+  // read as every tool removed.
+  if (tools.length === 0) return absent("no_descriptors", [`${origin}#/tools`]);
+
+  tools.sort((a, b) => a.name.localeCompare(b.name));
 
   return {
     present: true,

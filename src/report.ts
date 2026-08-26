@@ -6,7 +6,7 @@ import { compareFindings as compareBehaviourFindings } from "./behaviour/taxonom
 import { isPresent, type SurfaceResult } from "./contract/surface.js";
 import type { Ecosystem, Surface } from "./contract/types.js";
 import { diffSurfaces, type SurfaceComparison } from "./diff/surface.js";
-import { extractFromManifest } from "./extract/manifest.js";
+import { extractFromManifest, type ManifestSource } from "./extract/manifest.js";
 import { extractFromModule } from "./extract/module.js";
 import { exportedSubpaths } from "./extract/package-source.js";
 import { classifyProse, type ProseResult } from "./prose/classify.js";
@@ -435,14 +435,29 @@ function foldReport(input: {
  * The layers are the same objects, not a parallel implementation. Only the two
  * lines that produce the sides differ.
  */
+/**
+ * One side of a manifest comparison.
+ *
+ * `sources` rather than one text, because a contract is not always one file: a
+ * host that generates schemas from its routes and keeps the prose somewhere
+ * editable ships two, and what a model receives is the merge. Catalog first.
+ */
+export type ManifestSide = {
+  version: string;
+  sources: readonly ManifestSource[];
+};
+
 export type ManifestReportOptions = {
-  /** The two manifests, already read. The caller owns all IO. */
-  from: { version: string; text: string; origin?: string };
-  to: { version: string; text: string; origin?: string };
+  from: ManifestSide;
+  to: ManifestSide;
   /** What to call the subject. A file carries no registry identity of its own. */
   package: string;
   ecosystem?: Ecosystem;
   surface?: Surface;
+  /** Where a descriptor's fields live when a document nests them. */
+  fieldsKey?: string;
+  /** Tools the runtime withholds, as a predicate the caller states. */
+  excludeWhen?: readonly { key: string; value: string }[];
   /** Null runs Layer 1 with no judge: findings stand, marked unconfirmed. */
   judge?: Judge | null;
   /** Left unset, Layer 2 does not run and no model is ever called. */
@@ -453,20 +468,22 @@ export async function buildManifestReport(options: ManifestReportOptions): Promi
   const { package: pkg, ecosystem = "http" } = options;
   const judge = options.judge ?? undefined;
 
-  const side = (s: ManifestReportOptions["from"]) =>
+  const side = (s: ManifestSide) =>
     extractFromManifest({
-      text: s.text,
+      sources: s.sources,
       package: pkg,
       version: s.version,
       ecosystem,
       ...(options.surface ? { surface: options.surface } : {}),
-      ...(s.origin !== undefined ? { origin: s.origin } : {}),
+      ...(s.sources[0]?.origin !== undefined ? { origin: s.sources[0].origin } : {}),
+      ...(options.fieldsKey !== undefined ? { fieldsKey: options.fieldsKey } : {}),
+      ...(options.excludeWhen !== undefined ? { excludeWhen: options.excludeWhen } : {}),
     });
 
-  // One manifest is one surface, so the subpath is the file itself rather than
-  // an exports subpath. Naming it after the door it came through keeps the
-  // rendered report readable next to a package report.
-  const subpath = options.to.origin ?? "manifest";
+  // One contract is one surface, so the subpath is the document it came from
+  // rather than an exports subpath. Named after the catalog, since that is the
+  // document that defines the tool set.
+  const subpath = options.to.sources[0]?.origin ?? "manifest";
 
   const surface = await compareSurfaces(
     subpath,

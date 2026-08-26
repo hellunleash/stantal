@@ -34,7 +34,7 @@ stantal — know whether an upgrade changes how a model uses your dependency
 
   stantal <package> <from> <to> [options]
   stantal history <package> [options]
-  stantal manifest <before.json> <after.json> [options]
+  stantal manifest <before...> <after...> [options]
 
 Comparing two versions tells you whether to take an upgrade.
 Walking the history tells you which release broke it, and the last one that
@@ -44,11 +44,19 @@ this — what will it do to the models already calling me. Nothing is fetched an
 no version is resolved, so it works on a release that is not published, and on
 a contract that never goes to a registry at all. It reads a serialized tool
 list: an MCP tools/list reply, or whatever a host writes out for its own tools.
+Each side takes a comma-separated list of documents, catalog first, because a
+contract is often split - schemas generated from routes, prose kept where a
+person edits it. What a model receives is the merge.
 
 Options
   --surface <subpath>   Read one door only, e.g. "." or "./ai-sdk".
                         Repeatable. Default: every subpath the package exports.
   --name <label>        manifest: what to call the subject. Default: the filename.
+  --fields-at <key>     manifest: where a descriptor's fields live, when a
+                        document nests them under a wrapper.
+  --exclude-when <k=v>  manifest: drop tools whose merged descriptor carries
+                        this field, for policy the host applies but the
+                        document only states. Repeatable.
   --json                Print the full report as JSON.
   --no-judge            Skip the model judge even if a key is set.
   --behaviour           Also run Layer 2: put the contract in front of a model
@@ -301,7 +309,13 @@ function renderHistory(result: HistoryResult): string {
 async function runManifest(
   beforePath: string | undefined,
   afterPath: string | undefined,
-  values: { json?: boolean | undefined; name?: string | undefined; surface?: string[] | undefined },
+  values: {
+    json?: boolean | undefined;
+    name?: string | undefined;
+    surface?: string[] | undefined;
+    "fields-at"?: string | undefined;
+    "exclude-when"?: string[] | undefined;
+  },
   judge: Judge | null,
   behaviour: BehaviourOptions | undefined,
 ): Promise<number> {
@@ -318,25 +332,53 @@ async function runManifest(
     process.stderr.write("stantal: --surface does not apply to a manifest, and was ignored.\n");
   }
 
-  const sides: Array<{ version: string; text: string; origin: string }> = [];
-  for (const path of [beforePath, afterPath]) {
-    try {
-      sides.push({ version: path, text: readFileSync(path, "utf8"), origin: basename(path) });
-    } catch (error) {
-      // Exit 2, never a verdict. A file we could not open is a gap in the
-      // reading, and "clean" would be a claim we have no basis for.
-      process.stderr.write(`stantal: cannot read ${path}: ${error instanceof Error ? error.message : String(error)}\n`);
+  // Each side may name several documents, catalog first. A contract split
+  // across files is ordinary — schemas generated from routes, prose kept where
+  // a person edits it — and reading only the first would report real schemas
+  // beside descriptions that were never shipped.
+  const sides: Array<{ version: string; sources: Array<{ text: string; origin: string }> }> = [];
+  for (const spec of [beforePath, afterPath]) {
+    const paths = spec.split(",").map((p) => p.trim()).filter((p) => p.length > 0);
+    if (paths.length === 0) {
+      process.stderr.write(`stantal: "${spec}" names no file.\n`);
       return 2;
     }
+
+    const sources: Array<{ text: string; origin: string }> = [];
+    for (const path of paths) {
+      try {
+        sources.push({ text: readFileSync(path, "utf8"), origin: basename(path) });
+      } catch (error) {
+        // Exit 2, never a verdict. A file we could not open is a gap in the
+        // reading, and "clean" would be a claim we have no basis for.
+        process.stderr.write(
+          `stantal: cannot read ${path}: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+        return 2;
+      }
+    }
+    sides.push({ version: spec, sources });
   }
   const [from, to] = sides as [(typeof sides)[number], (typeof sides)[number]];
+
+  const excludeWhen: Array<{ key: string; value: string }> = [];
+  for (const rule of values["exclude-when"] ?? []) {
+    const at = rule.indexOf("=");
+    if (at <= 0) {
+      process.stderr.write(`stantal: --exclude-when wants key=value, got "${rule}"\n`);
+      return 2;
+    }
+    excludeWhen.push({ key: rule.slice(0, at), value: rule.slice(at + 1) });
+  }
 
   try {
     const report = await buildManifestReport({
       from,
       to,
-      package: values.name ?? basename(afterPath),
+      package: values.name ?? basename(afterPath.split(",")[0] ?? afterPath),
       judge,
+      ...(values["fields-at"] !== undefined ? { fieldsKey: values["fields-at"] } : {}),
+      ...(excludeWhen.length > 0 ? { excludeWhen } : {}),
       ...(behaviour === undefined ? {} : { behaviour }),
     });
 
@@ -448,6 +490,8 @@ export async function main(argv: readonly string[]): Promise<number> {
         replay: { type: "boolean" },
         cache: { type: "string" },
         name: { type: "string" },
+        "fields-at": { type: "string" },
+        "exclude-when": { type: "string", multiple: true },
         since: { type: "string" },
         until: { type: "string" },
         concurrency: { type: "string" },

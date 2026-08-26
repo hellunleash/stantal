@@ -262,3 +262,94 @@ describe("warnIfGeminiBillsACard", () => {
     expect(warn(undefined, {})).toBe("");
   });
 });
+
+describe("manifest with a split contract", () => {
+  let dir: string;
+  let stdout: string;
+
+  const CATALOG = {
+    tools: [
+      { name: "remove_member", description: "DELETE /api/member/{id}",
+        inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
+      { name: "internal_hook", description: "POST /api/hook" },
+    ],
+  };
+
+  // Keyed by name, fields nested, and carrying policy the host applies but the
+  // document only states. All three shapes appear together in a real host dump.
+  const PROSE = {
+    tools: {
+      remove_member: { fields: { description: "Removes one member. Owner-only.", audience: "end-user" } },
+      internal_hook: { fields: { description: "Webhook receiver.", audience: "internal" } },
+    },
+  };
+
+  function write(name: string, body: unknown): string {
+    const path = join(dir, name);
+    writeFileSync(path, JSON.stringify(body));
+    return path;
+  }
+
+  beforeEach(() => {
+    stdout = "";
+    dir = mkdtempSync(join(tmpdir(), "stantal-split-"));
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      stdout += String(chunk);
+      return true;
+    });
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("merges the documents a side names, and applies the caller's policy", async () => {
+    const before = write("before.json", CATALOG);
+    const code = await main([
+      "manifest",
+      before,
+      `${write("after.json", CATALOG)},${write("prose.json", PROSE)}`,
+      "--fields-at",
+      "fields",
+      "--exclude-when",
+      "audience=internal",
+      "--no-judge",
+      "--json",
+    ]);
+
+    expect(code).toBe(1);
+    const report = JSON.parse(stdout) as {
+      surfaces: Array<{ to: { contract: { tools: Array<{ name: string; description: string }> } } }>;
+    };
+    const tools = report.surfaces[0]!.to.contract.tools;
+
+    // The prose reached the contract, the schema survived it, and the tool the
+    // host withholds is not in what a model would receive.
+    expect(tools.map((t) => t.name)).toEqual(["remove_member"]);
+    expect(tools[0]!.description).toBe("Removes one member. Owner-only.");
+  });
+
+  it("refuses a malformed --exclude-when rather than ignoring it", async () => {
+    const code = await main([
+      "manifest",
+      write("a.json", CATALOG),
+      write("b.json", CATALOG),
+      "--exclude-when",
+      "audience",
+      "--no-judge",
+    ]);
+    expect(code).toBe(2);
+    expect(stderr).toContain("wants key=value");
+  });
+
+  it("names the missing document when one side lists a file that is not there", async () => {
+    const code = await main([
+      "manifest",
+      write("a.json", CATALOG),
+      `${write("b.json", CATALOG)},${join(dir, "absent.json")}`,
+      "--no-judge",
+    ]);
+    expect(code).toBe(2);
+    expect(stderr).toContain("absent.json");
+  });
+});
