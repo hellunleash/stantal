@@ -286,6 +286,14 @@ function render(report: Report): string {
       ? "no judge configured — semantic findings are unconfirmed leads. Set an API key to confirm them."
       : `judged by ${report.judge}`;
   out.push(`  ${dim(judgeNote)}`);
+  // A judge that could not answer is not the same as one that answered
+  // nothing. Findings below are unconfirmed leads for a reason the reader
+  // cannot otherwise see, and would otherwise read as rule-only by choice.
+  const judgeFailed = report.surfaces.map((s) => s.prose.judgeError).find((e) => e !== undefined);
+  if (judgeFailed !== undefined) {
+    out.push(`  ${yellow("the judge could not answer")}  ${dim(truncate(judgeFailed, 100))}`);
+    out.push(`  ${dim("findings stand, unconfirmed — the run was not filtered by a model")}`);
+  }
   // Named only once Layer 2 has actually run. Reporting "no caller" on every
   // default run would advertise a layer most people did not ask for.
   if (report.caller !== "none") out.push(`  ${dim(`behaviour replayed on ${report.caller}`)}`);

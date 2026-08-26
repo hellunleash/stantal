@@ -1,6 +1,6 @@
 import type { ExtractionNote, SurfaceResult } from "../contract/surface.js";
 import type { Contract, Tool } from "../contract/types.js";
-import { noJudge, reconcile, type Judge, type JudgeQuestion } from "./judge.js";
+import { noJudge, reconcile, type Judge, type JudgeAnswer, type JudgeQuestion } from "./judge.js";
 import {
   compareFindings,
   severityOf,
@@ -42,6 +42,21 @@ export type ProseResult = {
   skipped: Array<{ target: string; reason: string }>;
   /** Which judge answered, so a cached result can be invalidated by a better one. */
   judge: string;
+  /**
+   * Why the judge could not answer, when it was asked and failed.
+   *
+   * Set rather than thrown. The judge is optional everywhere in this tool — a
+   * key upgrades an answer and is never required to get one — and a rate limit
+   * or an expired key must therefore degrade the result, not destroy it. Every
+   * finding still stands, marked `unconfirmed`, exactly as it would with no key
+   * at all.
+   *
+   * Recorded rather than swallowed, because the two are not the same result: a
+   * run where the judge retired nothing and a run where the judge never
+   * answered produce the same findings for opposite reasons, and only one of
+   * them has been filtered.
+   */
+  judgeError?: string;
 };
 
 type Candidate = {
@@ -379,13 +394,24 @@ export async function classifyProse(
     .map((c) => c.question)
     .filter((q): q is JudgeQuestion => q !== undefined);
 
-  const answers =
-    questions.length === 0 ? new Map() : reconcile(questions, await judge.ask(questions));
+  // A judge that cannot answer degrades the result to what it would have been
+  // with no key at all. Letting this throw turned a rate-limited key into no
+  // report and exit 2 — the run had already produced a complete structural
+  // verdict, and threw it away over an optional upgrade that failed.
+  let answers = new Map<string, JudgeAnswer>();
+  let judgeError: string | undefined;
+  if (questions.length > 0) {
+    try {
+      answers = reconcile(questions, await judge.ask(questions));
+    } catch (error) {
+      judgeError = error instanceof Error ? error.message : String(error);
+    }
+  }
 
   const findings = usable
     .map((candidate) => applyAnswer(candidate, answers))
     .filter((f): f is ProseFinding => f !== null)
     .sort(compareFindings);
 
-  return { findings, skipped, judge: judge.id };
+  return { findings, skipped, judge: judge.id, ...(judgeError === undefined ? {} : { judgeError }) };
 }

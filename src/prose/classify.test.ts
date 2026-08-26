@@ -288,3 +288,50 @@ describe("extraction gaps, scoped", () => {
     expect(result.skipped[0]?.target).toBe("search.depth");
   });
 });
+
+describe("a judge that cannot answer", () => {
+  /**
+   * The judge is optional everywhere in this tool: a key upgrades an answer and
+   * is never required to get one. A rate-limited or expired key therefore has
+   * to degrade the result to what it would have been with no key at all.
+   *
+   * Before this, the throw escaped `classifyProse` and took the whole run with
+   * it — a complete structural verdict, already computed, discarded because an
+   * optional upgrade failed. Measured live against a spent OpenAI key: exit 2
+   * and no report at all.
+   */
+  const failing = (message: string): Judge => ({
+    id: "test:unreachable",
+    async ask() {
+      throw new Error(message);
+    },
+  });
+
+  test("the findings survive, unconfirmed", async () => {
+    const result = await classifyProse(null, surface([BUILD]), failing("429 no credits remaining"));
+
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({ confidence: "unconfirmed" });
+  });
+
+  test("says why, because a failure and a clean pass are not the same result", async () => {
+    // Both produce findings a model did not filter. Only one of them was asked.
+    const result = await classifyProse(null, surface([BUILD]), failing("429 no credits remaining"));
+    expect(result.judgeError).toContain("429");
+    expect(result.judge).toBe("test:unreachable");
+  });
+
+  test("no error is recorded when the judge worked", async () => {
+    const judge = scriptedJudge({ "documented:build.target": { verdict: "no" } });
+    const result = await classifyProse(null, surface([BUILD]), judge);
+    expect(result.judgeError).toBeUndefined();
+  });
+
+  test("a judge that is never asked cannot fail", async () => {
+    // No candidate raises a question, so nothing reaches the judge and a broken
+    // one is not a problem worth reporting.
+    const noParams: Tool = { name: "ping", description: "Check liveness.", params: [] };
+    const result = await classifyProse(null, surface([noParams]), failing("would have thrown"));
+    expect(result.judgeError).toBeUndefined();
+  });
+});
