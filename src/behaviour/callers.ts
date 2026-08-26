@@ -1,3 +1,4 @@
+import { vertexFromEnv, vertexToken, vertexUrl, type VertexConfig } from "../vertex.js";
 import type { CallRequest, ToolCaller, ToolChoice, WireTool } from "./caller.js";
 
 /**
@@ -43,6 +44,14 @@ export type CallerConfig = {
    * recording cassettes, where latency does not matter and cost does.
    */
   serviceTier?: string;
+  /**
+   * Route gemini through Vertex AI rather than AI Studio.
+   *
+   * A transport, not an identity: `id` stays `gemini:<model>` either way, so a
+   * cassette recorded through one route still answers a question asked through
+   * the other. The two differ in who is billed, not in what the model says.
+   */
+  vertex?: VertexConfig;
 };
 
 export class CallerError extends Error {
@@ -339,11 +348,18 @@ function wireFor(config: CallerConfig, request: CallRequest): Wire {
 
     case "gemini":
       return {
-        url: `${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-        headers: {
-          "content-type": "application/json",
-          "x-goog-api-key": config.apiKey,
-        },
+        // Same model, same body, same response — only the address and the way
+        // the request is signed change. That is why Vertex is a transport here
+        // and not a provider: the id stays `gemini:<model>`, so recordings made
+        // through either route answer for each other.
+        url:
+          config.vertex === undefined
+            ? `${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`
+            : vertexUrl(config.vertex, model),
+        headers:
+          config.vertex === undefined
+            ? { "content-type": "application/json", "x-goog-api-key": config.apiKey }
+            : { "content-type": "application/json", authorization: `Bearer ${vertexToken()}` },
         body: {
           systemInstruction: { parts: [{ text: CALLER_SYSTEM_PROMPT }] },
           tools: geminiTools(request.tools),
@@ -420,30 +436,45 @@ export function callerFromEnv(env: NodeJS.ProcessEnv = process.env): ToolCaller 
   const requested = env["STANTAL_CALLER"]?.toLowerCase();
   if (requested === "none") return null;
 
+  // Vertex authenticates with an OAuth token rather than an API key, so gemini
+  // is reachable there with no `GEMINI_API_KEY` at all. Treating a configured
+  // Vertex project as a credential is what stops the availability check from
+  // rejecting a provider that is, in fact, available.
+  const vertexConfig = vertexFromEnv(env);
+  const geminiKey = env["GEMINI_API_KEY"] ?? env["GOOGLE_API_KEY"];
+
   const candidates: Array<{ provider: CallerProvider; key: string | undefined }> = [
     { provider: "anthropic", key: env["ANTHROPIC_API_KEY"] },
     { provider: "openai", key: env["OPENAI_API_KEY"] },
-    { provider: "gemini", key: env["GEMINI_API_KEY"] ?? env["GOOGLE_API_KEY"] },
+    { provider: "gemini", key: geminiKey ?? (vertexConfig === null ? undefined : "") },
   ];
+
+  const usable = (c: { key: string | undefined; provider: CallerProvider }): boolean =>
+    c.key !== undefined && (c.key.length > 0 || (c.provider === "gemini" && vertexConfig !== null));
 
   const chosen =
     requested === undefined
-      ? candidates.find((c) => c.key !== undefined && c.key.length > 0)
+      ? candidates.find(usable)
       : candidates.find((c) => c.provider === requested);
 
-  if (chosen === undefined || chosen.key === undefined || chosen.key.length === 0) return null;
+  if (chosen === undefined || !usable(chosen)) return null;
 
   const model = env["STANTAL_CALLER_MODEL"];
   const baseUrl = env["STANTAL_CALLER_BASE_URL"];
+  // Only meaningful for gemini; the other providers ignore it.
+  const vertex = chosen.provider === "gemini" ? vertexConfig : null;
   // Unverified against the live API — read from OpenAI's docs, not measured —
   // so it stays behind an explicit env var rather than becoming a default every
   // run would pick up.
   const serviceTier = env["STANTAL_SERVICE_TIER"];
   return createCaller({
     provider: chosen.provider,
-    apiKey: chosen.key,
+    // Empty on the Vertex path, where the token in the header is the credential
+    // and this field is never read.
+    apiKey: chosen.key ?? "",
     ...(model ? { model } : {}),
     ...(baseUrl ? { baseUrl } : {}),
     ...(serviceTier ? { serviceTier } : {}),
+    ...(vertex === null ? {} : { vertex }),
   });
 }

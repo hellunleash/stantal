@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallRequest, Turn, WireTool } from "./caller.js";
-import { createCaller, type CallerProvider } from "./callers.js";
+import { callerFromEnv, createCaller, type CallerProvider } from "./callers.js";
 
 /**
  * Offline throughout: `fetch` is replaced, so no request ever leaves the
@@ -212,5 +212,72 @@ describe("call ids", () => {
     expect(first).toBe(second);
     expect(first).toContain('"id":"stantal_0"');
     expect(first).toContain('"id":"stantal_2"');
+  });
+});
+
+describe("vertex as a transport", () => {
+  const VERTEX = { STANTAL_VERTEX_PROJECT: "example-project" };
+
+  // Supplied so the token path never shells out to `gcloud`. Without it this
+  // suite would pass on a developer machine, spend a real token doing it, and
+  // fail in CI — the exact environment-dependence the offline rule exists to
+  // prevent.
+  beforeEach(() => {
+    process.env["GOOGLE_ACCESS_TOKEN"] = "test-token-never-sent";
+  });
+  afterEach(() => {
+    delete process.env["GOOGLE_ACCESS_TOKEN"];
+  });
+
+  it("keeps the id as gemini, so recordings survive the route change", async () => {
+    // The whole reason this is a transport and not a provider. `vertex:` would
+    // strand every cassette recorded under `gemini:` — same model, same prompt,
+    // same answer, a different id only because of who is billed.
+    const caller = createCaller({
+      provider: "gemini",
+      apiKey: "",
+      vertex: { project: "example-project" },
+    });
+    expect(caller.id).toBe("gemini:gemini-3.6-flash");
+  });
+
+  it("addresses the global endpoint and signs with a bearer token", async () => {
+    const bodies = stubFetch(NO_CALL.gemini);
+    const urls: string[] = [];
+    const headers: Array<Record<string, string>> = [];
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      urls.push(url);
+      headers.push(init.headers as Record<string, string>);
+      bodies.push(JSON.parse(String(init.body)));
+      return { ok: true, status: 200, async json() { return NO_CALL.gemini; }, async text() { return ""; } } as unknown as Response;
+    });
+
+    await createCaller({
+      provider: "gemini",
+      apiKey: "",
+      vertex: { project: "example-project" },
+    }).call({ intent: "build me a store", tools: TOOLS });
+
+    // Measured: only the global endpoint serves the current flash models, so a
+    // regional default would look like a broken integration.
+    expect(urls[0]).toBe(
+      "https://aiplatform.googleapis.com/v1/projects/example-project/locations/global" +
+        "/publishers/google/models/gemini-3.6-flash:generateContent",
+    );
+    expect(headers[0]?.["authorization"]).toMatch(/^Bearer /);
+    expect(headers[0]?.["x-goog-api-key"]).toBeUndefined();
+  });
+
+  it("is available with no GEMINI_API_KEY at all", () => {
+    // Vertex authenticates with a token, so requiring an API key would reject a
+    // provider that is in fact reachable.
+    expect(callerFromEnv({ ...VERTEX, STANTAL_CALLER: "gemini" })?.id).toBe("gemini:gemini-3.6-flash");
+  });
+
+  it("leaves AI Studio alone when no project is configured", async () => {
+    const bodies = stubFetch(NO_CALL.gemini);
+    await createCaller({ provider: "gemini", apiKey: "k" }).call({ intent: "hi", tools: TOOLS });
+    expect(bodies).toHaveLength(1);
+    expect(callerFromEnv({ GEMINI_API_KEY: "k" })?.id).toBe("gemini:gemini-3.6-flash");
   });
 });

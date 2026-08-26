@@ -1,3 +1,4 @@
+import { vertexFromEnv, vertexToken, vertexUrl, type VertexConfig } from "../vertex.js";
 import {
   cacheModeFromEnv,
   cachingJudge,
@@ -57,6 +58,16 @@ export type JudgeConfig = {
   transport?: JudgeTransport;
   /** Injected in tests so the SDK path runs without installing anything. */
   loadModule?: ModuleLoader;
+  /**
+   * Route gemini through Vertex AI rather than AI Studio.
+   *
+   * A transport, exactly like `transport` above, and for the same reason: `id`
+   * stays `gemini:<model>`, so the recorded cassettes keep answering. Every one
+   * of them was made through AI Studio, and they are what the reported findings
+   * replay from — changing the id to route the invoice elsewhere would throw
+   * away the reproducibility that makes those numbers checkable offline.
+   */
+  vertex?: VertexConfig;
 };
 
 export class JudgeError extends Error {
@@ -223,11 +234,18 @@ function wireFor(config: JudgeConfig, prompt: string): Wire {
 
     case "gemini":
       return {
-        // The key rides a header, not the query string, so it stays out of logs.
-        url: `${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+        // The credential rides a header, not the query string, so it stays out
+        // of logs either way — an API key for AI Studio, a bearer token for
+        // Vertex. Same model and same body; only the address differs.
+        url:
+          config.vertex === undefined
+            ? `${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`
+            : vertexUrl(config.vertex, model),
         headers: {
           "content-type": "application/json",
-          "x-goog-api-key": config.apiKey,
+          ...(config.vertex === undefined
+            ? { "x-goog-api-key": config.apiKey }
+            : { authorization: `Bearer ${vertexToken()}` }),
         },
         body: {
           systemInstruction: { parts: [{ text: JUDGE_SYSTEM_PROMPT }] },
@@ -326,25 +344,33 @@ export function judgeFromEnv(env: NodeJS.ProcessEnv = process.env): Judge | null
   const requested = env["STANTAL_JUDGE"]?.toLowerCase();
   if (requested === "none") return null;
 
+  // A configured Vertex project is a credential for gemini, which authenticates
+  // with an OAuth token rather than an API key there.
+  const vertexConfig = vertexFromEnv(env);
+  const geminiKey = env["GEMINI_API_KEY"] ?? env["GOOGLE_API_KEY"];
+
   const candidates: Array<{ provider: JudgeProvider; key: string | undefined }> = [
     { provider: "anthropic", key: env["ANTHROPIC_API_KEY"] },
     { provider: "openai", key: env["OPENAI_API_KEY"] },
-    { provider: "gemini", key: env["GEMINI_API_KEY"] ?? env["GOOGLE_API_KEY"] },
+    { provider: "gemini", key: geminiKey ?? (vertexConfig === null ? undefined : "") },
   ];
 
-  const chosen =
-    requested === undefined
-      ? candidates.find((c) => c.key !== undefined && c.key.length > 0)
-      : candidates.find((c) => c.provider === requested);
+  const usable = (c: { key: string | undefined; provider: JudgeProvider }): boolean =>
+    c.key !== undefined && (c.key.length > 0 || (c.provider === "gemini" && vertexConfig !== null));
 
-  if (chosen === undefined || chosen.key === undefined || chosen.key.length === 0) return null;
+  const chosen =
+    requested === undefined ? candidates.find(usable) : candidates.find((c) => c.provider === requested);
+
+  if (chosen === undefined || !usable(chosen)) return null;
 
   const model = env["STANTAL_JUDGE_MODEL"];
   const baseUrl = env["STANTAL_JUDGE_BASE_URL"];
   const transport = env["STANTAL_JUDGE_TRANSPORT"]?.toLowerCase();
   const judge = createJudge({
     provider: chosen.provider,
-    apiKey: chosen.key,
+    // Empty on the Vertex path, where the bearer token is the credential.
+    apiKey: chosen.key ?? "",
+    ...(chosen.provider === "gemini" && vertexConfig !== null ? { vertex: vertexConfig } : {}),
     ...(model ? { model } : {}),
     ...(baseUrl ? { baseUrl } : {}),
     ...(transport === "http" || transport === "sdk" || transport === "auto" ? { transport } : {}),

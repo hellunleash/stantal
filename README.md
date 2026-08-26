@@ -115,6 +115,15 @@ CLI's `--replay` flag is shorthand for `STANTAL_JUDGE_CACHE=replay`).
 is how the `gemini-3.6-flash` recordings above stay reproducible with no key
 at all.
 
+**Gemini through Vertex AI.** AI Studio and Vertex serve the same models and
+bill separately; only Vertex draws on Google Cloud credits. Set
+`STANTAL_VERTEX_PROJECT` and both layers route there. It is a transport, not a
+provider — the id stays `gemini:<model>`, so recordings made through one route
+still answer questions asked through the other. Auth is an OAuth token rather
+than an API key: `GOOGLE_ACCESS_TOKEN` if you have one, otherwise the `gcloud`
+CLI is asked. `STANTAL_VERTEX_LOCATION` defaults to `global`, which is where the
+current flash models actually live.
+
 `STANTAL_SERVICE_TIER` (OpenAI only) requests cheaper, slower processing from
 the API. It is opt-in and **unverified**: nobody has confirmed against the
 live API that it changes anything, so it stays off unless you set it
