@@ -28,12 +28,44 @@ upgrade needs a full re-run.
   - Native tool-calling adapters for Anthropic, OpenAI and Gemini. Temperature is
     left at the provider default on purpose — pinning it to zero makes the `k`
     runs identical, which is a sample of size one wearing a `k`-shaped label.
+- `STANTAL_SERVICE_TIER` (OpenAI only), to request cheaper, slower processing
+  from the API. Opt-in and **unverified**: nobody has confirmed against the
+  live API that it changes anything, so it stays off unless you set it
+  yourself.
+
+### Changed
+
+- **OpenAI's default model moves off `gpt-4o`** — it was two generations
+  stale. Layer 2's caller now defaults to `gpt-5.4`; Layer 1's judge now
+  defaults to `gpt-5.4-mini`. A live probe against the OpenAI API confirmed
+  both call tools normally, alongside `gpt-5.5`; `gpt-5-mini` declined to
+  call a tool at all, and the `gpt-5.6` family rejects function tools on the
+  chat-completions endpoint outright, so neither was a candidate. Override
+  either default independently with `STANTAL_CALLER_MODEL` /
+  `STANTAL_JUDGE_MODEL`.
+- **The judge's gemini model stays at `gemini-3.6-flash`, deliberately.**
+  Every judge cassette recorded so far — including the ones behind this
+  project's reported findings — is keyed to it, and they replay offline with
+  no key and no network call. A newer `gemini-3.7-flash` exists and works,
+  but moving the pin would strand every recording on disk for no benefit, so
+  it did not move.
+
+- **Prior turns in Layer 2.** A request may carry the conversation it
+  continues, so failures that only appear mid-session are reachable. They are
+  invisible to a first-turn-only harness: on turn one there is nothing to fill
+  an optional field with, so leaving it out is correct and the run comes back
+  clean. History is held identical on both sides, exactly like the request
+  text, so it cannot be what moved the result.
+- **`new_field_used`.** Reports a field the older version never declared and
+  the model now fills. A field nothing declares cannot be passed, so the older
+  side is not a sample that could have gone the other way — one observation is
+  proof it can happen, which is also its limit, so it reports `underpowered`
+  unless the two rates separate.
 
 ### Known limitations
 
-- **Layer 2 is single-turn.** A request is one user message with no history, so
-  only first-turn failures are visible. Failures that depend on what the
-  conversation already contains cannot be reproduced yet.
+- **A Layer 2 finding describes one model on one pair.** It is not a claim
+  about models in general, and the report names the model that produced it.
 
 ## [0.0.1] - 2026-08-26
 

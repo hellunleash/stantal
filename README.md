@@ -75,6 +75,51 @@ The judge answers a closed question about one finding at a time, and must quote
 the text it relied on. Quotes are verified against the source, so an invented
 justification is discarded rather than reported.
 
+### Models
+
+The judge (Layer 1) and the behavioural caller (Layer 2) each default to one
+model per provider:
+
+| provider | Layer 1 judge | Layer 2 caller |
+|---|---|---|
+| anthropic | `claude-opus-5` | `claude-sonnet-5` |
+| openai | `gpt-5.4-mini` | `gpt-5.4` |
+| gemini | `gemini-3.6-flash` | `gemini-3.6-flash` |
+
+Pick a provider with `STANTAL_JUDGE` / `STANTAL_CALLER` (either also accepts
+`none`, which turns that layer off regardless of which keys are set), and a
+model with `STANTAL_JUDGE_MODEL` / `STANTAL_CALLER_MODEL`. Both read the same
+three keys — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` (or
+`GOOGLE_API_KEY`) — to decide which providers are even available.
+
+**Gemini is pinned on purpose.** Every judge cassette on disk was recorded
+against `gemini:gemini-3.6-flash`, and the findings this project reports
+replay from those recordings with no key and no network call at all. A newer
+`gemini-3.7-flash` exists and works, but that is not a reason to move the pin.
+Repinning would strand every recording on disk and force the whole judged
+history to be answered again for no benefit. OpenAI's default moved because
+`gpt-4o` was two generations stale, not because gemini needed to catch up to
+it.
+
+**Tested live against the OpenAI API on 2026-08-26**, not exhaustively:
+`gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.5` call tools normally. `gpt-5-mini`
+declined to call a tool at all. The `gpt-5.6` family rejects function tools
+on the chat-completions endpoint outright. That is a spot check on one date,
+not a compatibility matrix — it is more honest, and it will still be correct
+after the next model release, which a matrix would not be.
+
+Each layer caches what it calls out for: `STANTAL_JUDGE_CACHE` and
+`STANTAL_BEHAVIOUR_CACHE` (`record` by default, or `replay`, or `off`; the
+CLI's `--replay` flag is shorthand for `STANTAL_JUDGE_CACHE=replay`).
+`replay` never reaches the network, so a recorded run repeats for free — that
+is how the `gemini-3.6-flash` recordings above stay reproducible with no key
+at all.
+
+`STANTAL_SERVICE_TIER` (OpenAI only) requests cheaper, slower processing from
+the API. It is opt-in and **unverified**: nobody has confirmed against the
+live API that it changes anything, so it stays off unless you set it
+yourself.
+
 ## For API providers
 
 Run it against a release you have not published yet. Nothing has shipped, so
@@ -103,12 +148,15 @@ about the CLI's interface is stable yet. See [CHANGELOG.md](CHANGELOG.md).
 | ✅ | Layer 0 — structural comparison |
 | ✅ | Layer 1 — prose comparison, with an optional model judge |
 | ✅ | CLI, and the release-history walk |
-| ✅ | Layer 2 — behavioural comparison (single-turn only, see below) |
+| ✅ | Layer 2 — behavioural comparison, single and multi-turn |
 | ⬜ | Verdict URLs, CI check, blast radius |
 
-**Layer 2's known limit:** a request is one user message with no history, so
-only first-turn failures are visible. A failure that depends on what the
-conversation already contains cannot be reproduced yet.
+**What Layer 2 can and cannot say.** A request may carry prior turns, so a
+failure that only appears once a conversation is under way is reachable — some
+are, and they are invisible to a first-turn-only harness, because on turn one
+leaving a field out is the correct answer. What it reports is what *this* model
+did on *this* pair, at the confidence the sample supports. A finding whose two
+rates do not separate is labelled `underpowered` rather than promoted.
 
 ## Development
 
