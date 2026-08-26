@@ -34,6 +34,15 @@ export type CallerConfig = {
    * collapse to zero width. The variance is the measurement.
    */
   temperature?: number;
+  /**
+   * OpenAI's `service_tier: "flex"` — roughly half price, higher latency.
+   *
+   * Opt-in and openai-only. It has not been verified against the live API, only
+   * read from OpenAI's docs, so it stays off by default rather than folded into
+   * `DEFAULT_MODEL`-style behaviour that every run would inherit. A good fit for
+   * recording cassettes, where latency does not matter and cost does.
+   */
+  serviceTier?: string;
 };
 
 export class CallerError extends Error {
@@ -48,7 +57,11 @@ export class CallerError extends Error {
 
 const DEFAULT_MODEL: Record<CallerProvider, string> = {
   anthropic: "claude-sonnet-5",
-  openai: "gpt-4o",
+  openai: "gpt-5.4",
+  // Pinned, for the behaviour cassettes recorded against this id. Note this is
+  // the *caller* table: the judge keeps its own defaults in `prose/judges.ts`
+  // and its own cache, and the two are pinned for separate reasons. Bumping
+  // either strands only its own recordings.
   gemini: "gemini-3.6-flash",
 };
 
@@ -238,6 +251,23 @@ function geminiContents(request: CallRequest): unknown[] {
   return out;
 }
 
+/**
+ * Does this error body say the model won't take function tools at all?
+ *
+ * Deliberately read off the provider's own wording rather than a list of
+ * known-bad model ids. A model catalogue goes stale the moment a provider
+ * ships or retires an id — which is precisely the class of silent breakage
+ * this whole product exists to catch, so hardcoding one here would be that
+ * failure happening to us. The message on the wire is asked instead of
+ * memorised, and it is the provider that has to keep it honest.
+ */
+function toolsUnsupported(detail: string): boolean {
+  const text = detail.toLowerCase();
+  const mentionsTools = /\b(tools?|function[ -]?calling)\b/.test(text);
+  const mentionsUnsupported = /(not supported|unsupported|does(?:n't| not) support)/.test(text);
+  return mentionsTools && mentionsUnsupported;
+}
+
 function wireFor(config: CallerConfig, request: CallRequest): Wire {
   const model = config.model ?? DEFAULT_MODEL[config.provider];
   const base = (config.baseUrl ?? DEFAULT_BASE[config.provider]).replace(/\/+$/, "");
@@ -290,6 +320,7 @@ function wireFor(config: CallerConfig, request: CallRequest): Wire {
           tools: openaiTools(request.tools),
           messages: openaiMessages(request),
           ...(temperature === undefined ? {} : { temperature }),
+          ...(config.serviceTier === undefined ? {} : { service_tier: config.serviceTier }),
         },
         read: (payload) => {
           const choice = (payload as { choices?: unknown[] }).choices?.[0];
@@ -358,6 +389,13 @@ export function createCaller(config: CallerConfig): ToolCaller {
 
         if (!response.ok) {
           const detail = await response.text().catch(() => "");
+          if (toolsUnsupported(detail)) {
+            throw new CallerError(
+              `${config.provider} model "${model}" rejected the request because it does not support ` +
+                `function tools — its own words: ${detail.slice(0, 300)}. Set STANTAL_CALLER_MODEL to a ` +
+                `model that does.`,
+            );
+          }
           throw new CallerError(`${config.provider} returned ${response.status}: ${detail.slice(0, 300)}`);
         }
 
@@ -397,10 +435,15 @@ export function callerFromEnv(env: NodeJS.ProcessEnv = process.env): ToolCaller 
 
   const model = env["STANTAL_CALLER_MODEL"];
   const baseUrl = env["STANTAL_CALLER_BASE_URL"];
+  // Unverified against the live API — read from OpenAI's docs, not measured —
+  // so it stays behind an explicit env var rather than becoming a default every
+  // run would pick up.
+  const serviceTier = env["STANTAL_SERVICE_TIER"];
   return createCaller({
     provider: chosen.provider,
     apiKey: chosen.key,
     ...(model ? { model } : {}),
     ...(baseUrl ? { baseUrl } : {}),
+    ...(serviceTier ? { serviceTier } : {}),
   });
 }

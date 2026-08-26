@@ -1,10 +1,10 @@
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EXTRACTOR_VERSION, type Contract, type Tool } from "../contract/types.js";
-import { scriptedCaller, type ToolChoice } from "./caller.js";
-import { callerFromEnv } from "./callers.js";
+import { scriptedCaller, type ToolChoice, type WireTool } from "./caller.js";
+import { CallerError, callerFromEnv, createCaller } from "./callers.js";
 import { seedIntents } from "./seed.js";
 
 let dir: string;
@@ -197,7 +197,7 @@ describe("callerFromEnv", () => {
   });
 
   it("picks the first provider with a key", () => {
-    expect(callerFromEnv({ OPENAI_API_KEY: "k" })?.id).toBe("openai:gpt-4o");
+    expect(callerFromEnv({ OPENAI_API_KEY: "k" })?.id).toBe("openai:gpt-5.4");
     expect(callerFromEnv({ GEMINI_API_KEY: "k" })?.id).toBe("gemini:gemini-3.6-flash");
   });
 
@@ -213,5 +213,108 @@ describe("callerFromEnv", () => {
 
   it("can be switched off even with a key present", () => {
     expect(callerFromEnv({ OPENAI_API_KEY: "k", STANTAL_CALLER: "none" })).toBeNull();
+  });
+});
+
+/**
+ * Offline, same as `callers.test.ts`: `fetch` is replaced, so nothing here
+ * ever leaves the machine. What is asserted is the request body and the error
+ * text, not any live provider behaviour.
+ */
+function stubFetch(payload: unknown) {
+  const bodies: unknown[] = [];
+  vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+    bodies.push(JSON.parse(String(init.body)));
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return payload;
+      },
+      async text() {
+        return JSON.stringify(payload);
+      },
+    } as unknown as Response;
+  });
+  return bodies;
+}
+
+function stubFetchError(status: number, detail: string) {
+  vi.stubGlobal("fetch", async () => {
+    return {
+      ok: false,
+      status,
+      async text() {
+        return detail;
+      },
+    } as unknown as Response;
+  });
+}
+
+const CALLER_TOOLS: WireTool[] = [
+  {
+    name: "make",
+    description: "Build a thing.",
+    inputSchema: { type: "object", properties: { request: { type: "string" } }, required: ["request"] },
+  },
+];
+
+const OPENAI_NO_CALL = { choices: [{ message: { content: "ok" } }] };
+
+describe("service tier", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("is included in the request body when set", async () => {
+    const bodies = stubFetch(OPENAI_NO_CALL);
+    const caller = createCaller({ provider: "openai", apiKey: "k", serviceTier: "flex" });
+    await caller.call({ intent: "hello", tools: CALLER_TOOLS });
+    expect((bodies[0] as Record<string, unknown>)["service_tier"]).toBe("flex");
+  });
+
+  it("omits the key entirely when unset", async () => {
+    const bodies = stubFetch(OPENAI_NO_CALL);
+    const caller = createCaller({ provider: "openai", apiKey: "k" });
+    await caller.call({ intent: "hello", tools: CALLER_TOOLS });
+    expect(bodies[0]).not.toHaveProperty("service_tier");
+  });
+
+  it("is picked up from STANTAL_SERVICE_TIER via callerFromEnv", async () => {
+    const bodies = stubFetch(OPENAI_NO_CALL);
+    const caller = callerFromEnv({ OPENAI_API_KEY: "k", STANTAL_SERVICE_TIER: "flex" });
+    await caller?.call({ intent: "hello", tools: CALLER_TOOLS });
+    expect((bodies[0] as Record<string, unknown>)["service_tier"]).toBe("flex");
+  });
+});
+
+describe("a tools-unsupported response", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("quotes the provider's own message and names STANTAL_CALLER_MODEL", async () => {
+    // Real wording measured against the live API for a model that returns 400
+    // on any request carrying tools. The rule reads this text, not the model id
+    // in `caller.call`'s config — a hardcoded list of bad ids would go stale the
+    // moment a provider ships or retires one.
+    const detail = "Function tools with reasoning_effort are not supported for this model in /v1/chat/completions";
+    stubFetchError(400, detail);
+    const caller = createCaller({ provider: "openai", apiKey: "k" });
+
+    const error = await caller.call({ intent: "hello", tools: CALLER_TOOLS }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(CallerError);
+    expect((error as Error).message).toContain("STANTAL_CALLER_MODEL");
+    expect((error as Error).message).toContain(detail);
+  });
+
+  it("falls back to the generic error when the body says nothing about tools", async () => {
+    stubFetchError(500, "internal server error");
+    const caller = createCaller({ provider: "openai", apiKey: "k" });
+
+    const error = await caller.call({ intent: "hello", tools: CALLER_TOOLS }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(CallerError);
+    expect((error as Error).message).toContain("returned 500");
+    expect((error as Error).message).not.toContain("STANTAL_CALLER_MODEL");
   });
 });

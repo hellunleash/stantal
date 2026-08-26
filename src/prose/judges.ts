@@ -71,7 +71,27 @@ export class JudgeError extends Error {
 
 const DEFAULT_MODEL: Record<JudgeProvider, string> = {
   anthropic: "claude-opus-5",
-  openai: "gpt-4o",
+  // Cheap by design, not by neglect. The judge only ever answers one closed
+  // yes/no/unclear question and must quote its source; `verifyAnswer` then
+  // checks that quote against the real text and fails closed on a fabrication.
+  // So the failure mode of a weaker model here is a finding left `unconfirmed`,
+  // never a wrong finding reported as confirmed — the guard rail bounds the
+  // damage, which is what makes the cheap default defensible.
+  //
+  // What is *not* claimed: that this model agrees with a flagship one as often.
+  // Nobody has measured that. If it turns out to answer `unclear` more, the
+  // cost shows up as findings that stay unconfirmed, and the fix is to raise
+  // this default — not to loosen the quote check.
+  openai: "gpt-5.4-mini",
+  // PINNED — do not bump without reading this. Every one of the project's 141
+  // recorded judge cassettes is keyed on "gemini:gemini-3.6-flash", because
+  // the cache key includes the judge id. That is true of every entry in this
+  // map, not just this one; gemini is the only id that currently has
+  // recordings behind it, which is the only reason it alone is pinned.
+  // Moving this id, even to a strictly newer model like gemini-3.7-flash,
+  // would silently strand all of them and make the headline backfill number
+  // unreplayable from disk. If this ever needs to move, it has to come with a
+  // re-record of the affected cassettes, not just a version bump.
   gemini: "gemini-3.6-flash",
 };
 

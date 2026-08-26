@@ -129,14 +129,14 @@ describe("judgeFromEnv", () => {
   });
 
   test("picks up whichever key is present", () => {
-    expect(judgeFromEnv({ OPENAI_API_KEY: "k" })?.id).toBe("openai:gpt-4o");
+    expect(judgeFromEnv({ OPENAI_API_KEY: "k" })?.id).toBe("openai:gpt-5.4-mini");
     expect(judgeFromEnv({ GEMINI_API_KEY: "k" })?.id).toBe("gemini:gemini-3.6-flash");
     expect(judgeFromEnv({ GOOGLE_API_KEY: "k" })?.id).toBe("gemini:gemini-3.6-flash");
   });
 
   test("an explicit provider choice wins over key order", () => {
     const env = { ANTHROPIC_API_KEY: "a", OPENAI_API_KEY: "o", STANTAL_JUDGE: "openai" };
-    expect(judgeFromEnv(env)?.id).toBe("openai:gpt-4o");
+    expect(judgeFromEnv(env)?.id).toBe("openai:gpt-5.4-mini");
   });
 
   test("the model is overridable, because a backfill should not run on the priciest model", () => {
@@ -147,6 +147,17 @@ describe("judgeFromEnv", () => {
 
   test("can be switched off even with a key in the environment", () => {
     expect(judgeFromEnv({ ANTHROPIC_API_KEY: "k", STANTAL_JUDGE: "none" })).toBeNull();
+  });
+
+  test("every default is pinned, because the cache key is the judge id", () => {
+    // Not a duplicate of the assertions above, which happen to use these ids
+    // while testing provider *selection*. This one is about the ids themselves:
+    // the judge id is the cache key, so any change here strands whatever was
+    // recorded under the old id. Covering all three means a future bump to any
+    // provider fails loudly, rather than only the one that has recordings today.
+    expect(judgeFromEnv({ ANTHROPIC_API_KEY: "k" })?.id).toBe("anthropic:claude-opus-5");
+    expect(judgeFromEnv({ OPENAI_API_KEY: "k" })?.id).toBe("openai:gpt-5.4-mini");
+    expect(judgeFromEnv({ GEMINI_API_KEY: "k" })?.id).toBe("gemini:gemini-3.6-flash");
   });
 });
 
