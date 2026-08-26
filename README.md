@@ -185,7 +185,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: stantal/stantal@v0
+      - uses: hellunleash/stantal@v0
         with:
           package: "@modelcontextprotocol/server-filesystem"
           from: "2025.7.1"
