@@ -2,10 +2,12 @@
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { isPresent } from "./contract/surface.js";
+import { callerFromEnv } from "./behaviour/callers.js";
+import { behaviourCacheFromEnv } from "./behaviour/run.js";
 import { judgeFromEnv } from "./prose/judges.js";
 import { pacoteRegistry } from "./registry/npm.js";
 import { walkHistory, type HistoryResult } from "./history.js";
-import { buildReport, exitCodeFor, type Report, type SurfaceReport } from "./report.js";
+import { buildReport, exitCodeFor, type BehaviourOptions, type Report, type SurfaceReport } from "./report.js";
 
 /**
  * Rung 1 — the whole product in one command, with nothing installed.
@@ -31,8 +33,13 @@ Options
                         Repeatable. Default: every subpath the package exports.
   --json                Print the full report as JSON.
   --no-judge            Skip the model judge even if a key is set.
-  --replay              Answer only from recorded judge replies. Never calls
-                        out, so the run is free and repeats identically.
+  --behaviour           Also run Layer 2: put the contract in front of a model
+                        and compare what it does. Off by default because it
+                        costs k calls per request per side.
+  --k <n>               Runs per request per side. Default 5. Raise it to
+                        separate a partial change; 8 is the measured floor.
+  --replay              Answer only from recordings. Never calls out, so the
+                        run is free and repeats identically.
   --cache <dir>         Where unpacked versions live. Default .stantal/npm
   --since <version>     history: start here instead of the first release.
   --until <version>     history: stop here instead of the latest.
@@ -48,10 +55,16 @@ The judge is optional and off unless a key is present. It reads
 ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY / GOOGLE_API_KEY.
 STANTAL_JUDGE forces a provider or "none"; STANTAL_JUDGE_MODEL picks a model.
 
-Every judge reply is recorded to .stantal/judge and keyed on the text of the
-question, so a walk over 40 releases asks about an unchanged parameter once.
-STANTAL_JUDGE_CACHE=replay (or --replay) refuses to call out at all;
-"off" disables the cache. STANTAL_JUDGE_CACHE_DIR moves it.
+Layer 2 is separate and off unless --behaviour is passed. It reads the same
+keys; STANTAL_CALLER forces a provider or "none", STANTAL_CALLER_MODEL picks a
+model. It is not offered on a history walk, where its cost is multiplied by
+every release in the range.
+
+Every reply is recorded — .stantal/judge and .stantal/behaviour — and keyed on
+the text of the question or request, so a walk over 40 releases asks about an
+unchanged parameter once. --replay serves both from disk only and refuses to
+call out at all, which is what makes a CI run free. STANTAL_JUDGE_CACHE and
+STANTAL_BEHAVIOUR_CACHE do the same per layer; "off" disables a cache.
 `.trim();
 
 /**
@@ -107,6 +120,7 @@ function renderSurface(surface: SurfaceReport): string[] {
   const quiet =
     changes.length === 0 &&
     findings.length === 0 &&
+    (surface.behaviour?.findings.length ?? 0) === 0 &&
     surface.comparison.suppressed.length === 0 &&
     surface.comparison.kind === "compared";
   if (quiet) return lines;
@@ -131,6 +145,19 @@ function renderSurface(surface: SurfaceReport): string[] {
     if (finding.evidence.quote !== null) {
       lines.push(`      ${dim(`evidence: ${truncate(finding.evidence.quote, 90)}`)}`);
     }
+  }
+
+  for (const finding of surface.behaviour?.findings ?? []) {
+    const severity = finding.severity === "high" ? red(finding.severity) : yellow(finding.severity);
+    // The basis rides next to every one of these. `underpowered` means the runs
+    // saw it happen but cannot say how often, and a reader who cannot tell that
+    // from a measured rate will over-read the finding.
+    lines.push(`    ${severity}  ${finding.rule}  ${finding.target}  ${dim(finding.basis)}`);
+    lines.push(`      ${finding.headline}`);
+    const ev = finding.evidence;
+    lines.push(
+      `      ${dim(`before ${ev.before.hits}/${ev.before.runs}  after ${ev.after.hits}/${ev.after.runs}  — "${truncate(ev.intent, 55)}"`)}`,
+    );
   }
 
   // Withheld claims are printed, never dropped. A silent omission would read as
@@ -177,7 +204,11 @@ function render(report: Report): string {
     report.judge === "none"
       ? "no judge configured — semantic findings are unconfirmed leads. Set an API key to confirm them."
       : `judged by ${report.judge}`;
-  out.push(`  ${dim(judgeNote)}`, `  ${dim("run with --json for the full report")}`, "");
+  out.push(`  ${dim(judgeNote)}`);
+  // Named only once Layer 2 has actually run. Reporting "no caller" on every
+  // default run would advertise a layer most people did not ask for.
+  if (report.caller !== "none") out.push(`  ${dim(`behaviour replayed on ${report.caller}`)}`);
+  out.push(`  ${dim("run with --json for the full report")}`, "");
 
   return out.join("\n");
 }
@@ -273,6 +304,19 @@ async function runHistory(
   }
 }
 
+/**
+ * What `--replay` has to mean, in one place.
+ *
+ * The flag promises the run cannot spend, and that promise has to cover every
+ * layer that calls out — not only the one that existed when the flag was
+ * written. Setting the judge's cache alone would leave Layer 2 free to spend on
+ * a run the user was told was free, which is worse than not offering the flag.
+ */
+export function applyReplay(env: NodeJS.ProcessEnv): void {
+  env["STANTAL_JUDGE_CACHE"] = "replay";
+  env["STANTAL_BEHAVIOUR_CACHE"] = "replay";
+}
+
 // --- Entry point -------------------------------------------------------------
 
 export async function main(argv: readonly string[]): Promise<number> {
@@ -285,6 +329,8 @@ export async function main(argv: readonly string[]): Promise<number> {
         surface: { type: "string", multiple: true },
         json: { type: "boolean" },
         "no-judge": { type: "boolean" },
+        behaviour: { type: "boolean" },
+        k: { type: "string" },
         replay: { type: "boolean" },
         cache: { type: "string" },
         since: { type: "string" },
@@ -311,12 +357,22 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
 
   loadDotEnv();
-  // --replay is a shorthand for the env var, so a CI job can be free by flag
-  // rather than by remembering to set something.
-  if (values.replay === true) process.env["STANTAL_JUDGE_CACHE"] = "replay";
+  if (values.replay === true) applyReplay(process.env);
   const judge = values["no-judge"] === true ? null : judgeFromEnv();
 
   if (positionals[0] === "history") {
+    // Refused rather than quietly ignored. A walk runs the pair logic once per
+    // release, so Layer 2 here is k calls per request per side times every
+    // version in the range — the one place in this CLI where a single flag can
+    // turn a cheap command into a very expensive one by accident.
+    if (values.behaviour === true) {
+      process.stderr.write(
+        `stantal: --behaviour is not available on a history walk — its cost multiplies by
+every release in the range. Run it on a single pair instead.
+`,
+      );
+      return 2;
+    }
     return runHistory(positionals[1], values, judge);
   }
 
@@ -326,6 +382,34 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 2;
   }
 
+  let behaviour: BehaviourOptions | undefined;
+  if (values.behaviour === true) {
+    const caller = callerFromEnv();
+    if (caller === null) {
+      // Warned, not fatal. The report is still worth producing, and the rule
+      // everywhere else in this tool is that a missing key degrades an answer
+      // rather than withholding one. But the user asked for this by name, so
+      // silence would be the wrong kind of quiet.
+      process.stderr.write(
+        `stantal: --behaviour needs a model key (ANTHROPIC_API_KEY, OPENAI_API_KEY or
+GEMINI_API_KEY). Continuing without Layer 2.
+`,
+      );
+    } else {
+      const k = values.k === undefined ? undefined : Number.parseInt(values.k, 10);
+      if (k !== undefined && (!Number.isFinite(k) || k < 1)) {
+        process.stderr.write(`stantal: --k must be a positive whole number, got "${values.k}"
+`);
+        return 2;
+      }
+      behaviour = {
+        caller,
+        cache: behaviourCacheFromEnv(),
+        ...(k === undefined ? {} : { k }),
+      };
+    }
+  }
+
   try {
     const report = await buildReport({
       package: pkg,
@@ -333,6 +417,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       to,
       registry: pacoteRegistry(),
       judge,
+      ...(behaviour === undefined ? {} : { behaviour }),
       ...(values.cache !== undefined ? { cacheRoot: values.cache } : {}),
       ...(values.surface !== undefined ? { subpaths: values.surface } : {}),
     });
