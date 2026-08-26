@@ -65,6 +65,48 @@ shim — and they do not always agree. Each is read and compared separately.
 npx stantal @scope/example-sdk 1.4.0 1.5.0 --surface ./pack
 ```
 
+### Which of your own files it touches
+
+A finding is a fact about the package and the same fact for everyone. Whether it
+reaches *you* is a different question, and usually a much shorter answer.
+
+```bash
+npx stantal @scope/example-sdk 1.4.0 1.5.0 --repo .
+```
+
+```
+  reaches your code in 2 place(s)  118 file(s) scanned
+    dependency       @scope/example-sdk
+      package.json (dependencies) — "^1.5.0" admits 1 affected version(s)
+    param_reference  build.target
+      src/agent.ts:42 — names `target` in a file that uses `build`
+```
+
+It reads that directory and nothing else, never writes, and never calls out. A
+finding on a door you do not import is filtered out with the reason, and a
+directory it could not read properly says so rather than reporting nothing.
+
+### Which release to move to
+
+Walking the history says when a defect entered. Passing the version you are on
+says what to do about it.
+
+```bash
+npx stantal history @scope/example-sdk --current 1.4.0
+```
+
+```
+  WHAT TO DO  upgrade
+     1.9.0 is the nearest release clean of 2 findings (latest is 2.3.0)
+
+    move to  1.9.0
+    latest   2.3.0  — more change than you asked for
+```
+
+The nearest clean release, never simply the latest: twenty releases of drift is
+not one upgrade. If no release is clean it says so instead of naming one, and if
+a release could not be read it is skipped rather than recommended.
+
 ### The judge
 
 Findings that depend on meaning rather than text are marked `unconfirmed` until a
@@ -190,6 +232,73 @@ out at all.
 Run it against a release you have not published yet. Nothing has shipped, so
 there is nothing to defend. You see which of your changes a model will read
 differently, while it still costs minutes to fix.
+
+```
+$ npx stantal check ./ --against 1.4.0 --surface ./pack
+
+  @scope/example-sdk · 1.4.0 → 1.5.0 (local)
+
+  VERDICT  prose-risk
+           `target` is optional, has no description, and the tool
+           description never says when to pass it.
+```
+
+It reads the build in your working tree, fetches the release you name, and
+compares. The package name comes from your own `package.json`, so the two
+cannot disagree.
+
+Put it in CI and it runs on the pull request that proposes the change, which is
+the only moment fixing it is cheap.
+
+### Which of your users you already stranded
+
+If something did ship, the walk says when it entered and who is stuck behind it.
+
+```
+$ npx stantal history @scope/example-sdk --surface ./pack --current 1.4.0
+
+  undocumented_optional  build.target  ./pack
+    introduced in 1.5.0, last clean 1.4.0
+    31 release(s) affected, still present
+
+  WHAT TO DO  stuck
+     1.4.0 is clean, but every release after it carries 1 finding
+     — there is nowhere to upgrade to
+```
+
+That is the support backlog as a number: the release it entered, the last one
+that was safe, and how long anyone on it has had nowhere to go.
+
+## Private code and private registries
+
+Everything here runs on your machine, and the parts that could talk to anything
+are the parts you turn on.
+
+**Private registries work with no configuration.** Fetching is `pacote`, which
+is what npm itself uses, so your `.npmrc`, your auth token and your proxy are
+already handled.
+
+**A contract that never reaches a registry works too.** `stantal manifest` reads
+files you hand it and fetches nothing, so an internal service that writes its
+tool set to disk is a first-class case rather than a workaround.
+
+**`--repo` never calls out.** The scan that finds your call sites is a local
+read. Nothing about your source leaves the machine, ever.
+
+**What the optional model layers send, exactly.** With a key set, the judge is
+asked one closed question per candidate, and a question carries three things: a
+tool name, a parameter name, and that tool's description **as shipped in the
+package**. Layer 2 sends the tool names and descriptions, plus a generated
+request string. Neither one sends your source, your repository, your file names
+or your credentials, because neither one is given them.
+
+**And you can turn both off.** `--no-judge` skips the judge; `--replay` answers
+only from recordings already on disk and cannot make a network call at all. A CI
+job in replay mode is free, deterministic, and offline.
+
+The keyless path is not a degraded mode — it is the default, and it is checked
+in CI on every commit: a job runs the whole tool with every provider variable
+emptied and fails unless a real verdict comes out.
 
 ## What it does not do
 
