@@ -112,6 +112,26 @@ STANTAL_BEHAVIOUR_CACHE do the same per layer; "off" disables a cache.
 `.trim();
 
 /**
+ * The version, read from the manifest that ships beside `dist`.
+ *
+ * Read rather than written in. It was hardcoded, and it was already reporting
+ * `0.0.0` two releases later — a version string nobody can trust is worse than
+ * none, because it is the first thing anyone pastes into a bug report.
+ */
+function ownVersion(): string {
+  try {
+    const manifest = new URL("../package.json", import.meta.url);
+    const parsed: unknown = JSON.parse(readFileSync(manifest, "utf8"));
+    const version = (parsed as { version?: unknown })?.version;
+    return typeof version === "string" ? version : "unknown";
+  } catch {
+    // Running from an unusual layout. A missing version is not worth failing a
+    // command over, and "unknown" is at least honest.
+    return "unknown";
+  }
+}
+
+/**
  * Load a local `.env` if there is one.
  *
  * Best effort and deliberately silent. A key is optional everywhere in this
@@ -726,7 +746,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 0;
   }
   if (values.version) {
-    process.stdout.write("stantal 0.0.0\n");
+    process.stdout.write(`stantal ${ownVersion()}\n`);
     return 0;
   }
 

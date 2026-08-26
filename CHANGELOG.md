@@ -11,6 +11,134 @@ upgrade needs a full re-run.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-26
+
+The first release with a stable interface worth using. `0.0.0` and `0.0.1` were
+name reservations. This completes the five layers, and adds the two entry points
+that make the tool usable by the side of the ecosystem that ships contracts
+rather than consumes them.
+
+### Added
+
+- **Layer 3 — blast radius.** `--repo <dir>` answers the only question a
+  particular consumer has: does any of this reach me. Four kinds of reach, each
+  carrying a `file:line` so the claim can be checked.
+  - `dependency` matches on the declared **range**, not the version installed
+    today. A caret that resolves clean now picks the defect up on the next
+    install, and that is worth knowing before it happens.
+  - `surface_import` is the sharpest filter: one package routinely exposes
+    several doors carrying different contracts, and a finding on a door you never
+    open cannot reach you however true it is.
+  - A parameter only counts inside a file that already names its tool. `app`,
+    `context` and `limit` are ordinary words; matched across a repository they
+    return every file and mean nothing.
+  - Findings that cannot reach you are reported **with the reason**, never
+    dropped. "We looked and it does not touch you" and "we never looked" are
+    opposite claims.
+  - Reads the directory you name and nothing else. It never writes, and it never
+    calls out.
+- **Layer 4 — remedy.** `stantal history <pkg> --current <version>` says what to
+  do, not just what changed.
+  - The **nearest** clean release, never simply the latest, printed beside the
+    latest so the gap is visible. Someone twenty releases back is not taking one
+    change, they are taking the accumulated delta of twenty.
+  - "There is no clean version" is a real answer. A search that cannot come back
+    empty invents a version number, and a fabricated one is checkable, fails, and
+    takes the rest of the report with it.
+  - A release that could not be read is not a clean release. Those are skipped
+    and reported as `unverifiable`, because a hop declined for that reason is a
+    different answer from one that was never seen.
+  - A pin is a hold, not a remedy. The reason is recorded as a predicate rather
+    than a comment, so a later walk re-checks it and the hold lifts itself.
+- **`stantal check <dir> --against <version>`** — the provider's gate. Reads the
+  build in your working tree, fetches the release you name, and compares. Neither
+  other entry point could serve this: comparing two published versions is too
+  late, and the manifest form needs a contract already serialized to JSON. The
+  package name comes from the build's own manifest, so the two cannot disagree.
+- **`stantal manifest <before...> <after...>`** — a contract that never reached a
+  registry. Nothing is fetched and no version is resolved, so it reads an
+  unpublished release, or a host that writes its own tool set to disk.
+  - Format-agnostic: an MCP `tools/list` reply, that reply inside a JSON-RPC
+    envelope, a bare array, and a map keyed by tool name all read the same way.
+  - Each side takes several documents, catalog first, because a contract is
+    often split — schemas generated from routes, prose kept where a person edits
+    it. What a model receives is the merge, and reading only the first document
+    is wrong in both directions.
+  - `--fields-at` names the wrapper a producer nests editable fields under, and
+    `--exclude-when` states which tools the runtime withholds. Both are supplied
+    rather than guessed: a description read off the wrong object is exactly the
+    false finding this tool exists to catch.
+- **A GitHub Action**, so the check runs on the pull request that proposes the
+  upgrade rather than after someone takes it. Writes a summary and exposes
+  `verdict`, `findings`, `reaches` and `report` as outputs. `fail-on: unreadable`
+  is the setting to adopt with — a check that blocks every pull request on day
+  one gets switched off by the end of the week.
+
+### Changed
+
+- **Layer 2 runs calls concurrently.** They were awaited one at a time, both
+  sides included, which made a 55-intent corpus at `k=3` take most of an hour.
+  Nobody waits that long for a verdict. The calls were always independent — a
+  recording is keyed on the caller, the request and the run index, and no call
+  reads another's result. Measured on 330 live calls: 1m3s where the same work
+  serial was about fifty minutes. `--concurrency` sets the ceiling, and now means
+  the same thing on a history walk and on Layer 2.
+- **Results are indexed rather than collected on completion**, so the samples a
+  Wilson interval is computed over do not depend on which call returned first.
+
+### Fixed
+
+- **A rate limit no longer ends a run.** Concurrency made a 429 likely rather
+  than rare, and one used to leave every remaining intent unmeasured. Retried
+  with exponential backoff and jitter, honouring `Retry-After`. A 4xx that is not
+  429 is not retried: the request is wrong, and asking again spends the budget
+  for the same answer.
+- **A judge that cannot answer no longer destroys the verdict.** A rate-limited
+  or expired key produced exit 2 and no report, discarding a complete structural
+  verdict that had already been computed. The judge is optional everywhere in
+  this tool, so the failure now degrades the result to what it would have been
+  with no key at all, and the reason is recorded — a run the judge filtered
+  nothing out of and a run the judge never answered give the same findings for
+  opposite reasons.
+- **A withheld structural claim no longer reports as `clean`.** If extraction
+  could not read the whole contract and a `tool_removed` claim was suppressed,
+  the tool may well be gone; the only reason nothing was said is that reading
+  stopped short. Prose gaps already blocked `clean` and structural gaps did not,
+  so the two kinds of silence meant different things. Now `unreadable`, exit 2.
+- **Vertex AI resolves its token on Windows.** `execFileSync("gcloud")` cannot
+  work there in either spelling — the extensionless name is not resolved through
+  `PATHEXT`, and Node refuses to spawn `gcloud.cmd` directly as its fix for
+  CVE-2024-27980. Both surfaced as "install the gcloud CLI" on a machine where it
+  was installed, authenticated and on `PATH`.
+- **`--k` and `--concurrency` are validated before anything branches on them**,
+  so an argument means the same thing on every path, and neither accepts a value
+  `parseInt` would silently truncate.
+
+### Contract guarantees
+
+Added to the list in `0.0.0`; breaking one is a bug:
+
+- **"We did not find it" is not "it is not there."** A repository that could not
+  be read properly never presents as one nothing reaches, and
+  `canClaimUnaffected()` is the single function that decides it.
+- **A release nobody could read is not a clean release.** Recommending an upgrade
+  into a version whose contract could not be read would be the worst output this
+  tool could produce, so the search skips it and says so.
+- **The first run works with no account and no key**, and that is enforced in CI
+  rather than asserted here: a job runs the whole tool with every provider
+  variable emptied and fails unless a real verdict comes out.
+
+### Privacy
+
+- With no key set, nothing leaves the machine. Extraction, Layers 0, 3 and 4 are
+  entirely local, and `--replay` cannot make a network call at all.
+- With a key set, a judge question carries a tool name, a parameter name, and
+  that tool's description **as shipped in the package** — not your source, your
+  file names or your credentials, because it is never given them.
+- Private registries need no configuration. Fetching is `pacote`, which is what
+  npm itself uses, so `.npmrc`, auth tokens and proxies already work.
+### Also in this release (previously unreleased)
+
 ### Added
 
 - **Layer 2 — behavioural comparison.** A model is shown each version's contract
@@ -146,6 +274,7 @@ These are properties of the tool, not features, and breaking one is a bug:
   `.omit()`, `.partial()` and `.extend()` produce a note carrying a path instead
   of a contract nobody can trust.
 
-[Unreleased]: https://github.com/hellunleash/stantal/compare/v0.0.1...HEAD
+[Unreleased]: https://github.com/hellunleash/stantal/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/hellunleash/stantal/compare/v0.0.1...v0.1.0
 [0.0.1]: https://github.com/hellunleash/stantal/compare/v0.0.0...v0.0.1
 [0.0.0]: https://github.com/hellunleash/stantal/releases/tag/v0.0.0

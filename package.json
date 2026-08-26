@@ -1,6 +1,6 @@
 {
   "name": "stantal",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Tells you whether a model will behave differently after you upgrade a package, before you take the upgrade.",
   "type": "module",
   "license": "MIT",
