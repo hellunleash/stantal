@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 
 /**
  * Gemini through Vertex AI instead of AI Studio.
@@ -79,12 +79,31 @@ export function vertexToken(env: NodeJS.ProcessEnv = process.env): string {
   if (supplied !== undefined && supplied.length > 0) return supplied;
   if (cachedToken !== null) return cachedToken;
 
+  const options: { encoding: "utf8"; stdio: ["ignore", "pipe", "ignore"]; timeout: number } = {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: 30_000,
+  };
+
   try {
-    const token = execFileSync("gcloud", ["auth", "print-access-token"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 30_000,
-    }).trim();
+    // Windows needs the shell, and neither obvious spelling works without it.
+    // `gcloud` is extensionless and `execFileSync` does not apply PATHEXT, so
+    // it raises ENOENT; `gcloud.cmd` resolves but Node refuses to spawn a
+    // `.cmd` directly (EINVAL) as its fix for CVE-2024-27980. Both read as
+    // "gcloud is not installed" on a machine where it is installed and
+    // authenticated, which sends the user to repair something that is not
+    // broken.
+    //
+    // `execSync` takes one command string, so no argument is ever concatenated
+    // into a shell line — the command is this literal and nothing else reaches
+    // it. That is what keeps the shell safe here, and it is why the arguments
+    // are not passed separately with `shell: true`, which would be the same
+    // call with an injection surface and a deprecation warning attached.
+    const token = (
+      process.platform === "win32"
+        ? execSync("gcloud auth print-access-token", options)
+        : execFileSync("gcloud", ["auth", "print-access-token"], options)
+    ).trim();
     if (token.length === 0) throw new Error("gcloud returned an empty token");
     cachedToken = token;
     return token;
