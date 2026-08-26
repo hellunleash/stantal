@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applyReplay, main } from "./cli.js";
+import { applyReplay, main, warnIfGeminiBillsACard } from "./cli.js";
 
 /**
  * The CLI's flag plumbing, tested where it can be tested without a network.
@@ -229,5 +229,36 @@ describe("manifest", () => {
     ]);
     expect(code).toBe(2);
     expect((JSON.parse(stdout) as { verdict: string }).verdict).toBe("unreadable");
+  });
+});
+
+describe("warnIfGeminiBillsACard", () => {
+  /**
+   * The two gemini endpoints serve the same models and bill to different
+   * places, and only one of them draws on cloud credits. Nothing in a run's
+   * output says which door it went through, so an unset project spends real
+   * money while credits sit unused.
+   */
+  function warn(id: string | undefined, env: NodeJS.ProcessEnv): string {
+    let out = "";
+    warnIfGeminiBillsACard(id, env, (s) => { out += s; });
+    return out;
+  }
+
+  it("warns when gemini runs without a Vertex project", () => {
+    expect(warn("gemini:gemini-3.6-flash", {})).toContain("STANTAL_VERTEX_PROJECT");
+  });
+
+  it("stays quiet once the run is routed through Vertex", () => {
+    expect(warn("gemini:gemini-3.6-flash", { STANTAL_VERTEX_PROJECT: "proj" })).toBe("");
+  });
+
+  it("says nothing about the other providers, whose billing this does not touch", () => {
+    expect(warn("openai:gpt-5.4", {})).toBe("");
+    expect(warn("anthropic:claude-opus-5", {})).toBe("");
+  });
+
+  it("says nothing when no model is configured at all", () => {
+    expect(warn(undefined, {})).toBe("");
   });
 });

@@ -9,6 +9,7 @@ import { behaviourCacheFromEnv } from "./behaviour/run.js";
 import type { Judge } from "./prose/judge.js";
 import { judgeFromEnv } from "./prose/judges.js";
 import { pacoteRegistry } from "./registry/npm.js";
+import { vertexFromEnv } from "./vertex.js";
 import { walkHistory, type HistoryResult } from "./history.js";
 import {
   buildManifestReport,
@@ -394,6 +395,36 @@ async function runHistory(
  * written. Setting the judge's cache alone would leave Layer 2 free to spend on
  * a run the user was told was free, which is worse than not offering the flag.
  */
+/**
+ * Say which door a gemini run is going through, because they bill differently.
+ *
+ * The two endpoints serve the same models. AI Studio
+ * (`generativelanguage.googleapis.com`, an API key) is billed on its own and is
+ * **not** covered by Google Cloud credits; Vertex
+ * (`aiplatform.googleapis.com`, an OAuth token) is billed to a cloud project
+ * and is. So an unset `STANTAL_VERTEX_PROJECT` is not a smaller or slower run —
+ * it is the same run charged to a card instead of to credits that are sitting
+ * unused, and nothing in the output would otherwise say so.
+ *
+ * A warning rather than a refusal: plenty of people have no cloud project and
+ * an API key is the supported way to run. The failure worth preventing is
+ * silent, not deliberate.
+ */
+export function warnIfGeminiBillsACard(
+  id: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+  write: (s: string) => void = (s) => void process.stderr.write(s),
+): void {
+  if (id === undefined || !id.startsWith("gemini:")) return;
+  if (vertexFromEnv(env) !== null) return;
+  write(
+    `stantal: ${id} is going through AI Studio, which is billed separately from
+Google Cloud credits. Set STANTAL_VERTEX_PROJECT=<project> to route the same
+model through Vertex AI and draw on those credits instead.
+`,
+  );
+}
+
 export function applyReplay(env: NodeJS.ProcessEnv): void {
   env["STANTAL_JUDGE_CACHE"] = "replay";
   env["STANTAL_BEHAVIOUR_CACHE"] = "replay";
@@ -442,6 +473,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   loadDotEnv();
   if (values.replay === true) applyReplay(process.env);
   const judge = values["no-judge"] === true ? null : judgeFromEnv();
+  warnIfGeminiBillsACard(judge?.id);
 
   if (positionals[0] === "history") {
     // Refused rather than quietly ignored. A walk runs the pair logic once per
@@ -483,6 +515,7 @@ every release in the range. Run it on a single pair instead.
   let behaviour: BehaviourOptions | undefined;
   if (values.behaviour === true) {
     const caller = callerFromEnv();
+    warnIfGeminiBillsACard(caller?.id);
     if (caller === null) {
       // Warned, not fatal. The report is still worth producing, and the rule
       // everywhere else in this tool is that a missing key degrades an answer
