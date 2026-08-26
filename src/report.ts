@@ -1,3 +1,8 @@
+import { present as wireTools, type ToolCaller } from "./behaviour/caller.js";
+import type { Intent } from "./behaviour/intent.js";
+import { runBehaviour, type BehaviourCache, type RunResult } from "./behaviour/run.js";
+import { seedIntents } from "./behaviour/seed.js";
+import { compareFindings as compareBehaviourFindings } from "./behaviour/taxonomy.js";
 import { isPresent, type SurfaceResult } from "./contract/surface.js";
 import type { Surface } from "./contract/types.js";
 import { diffSurfaces, type SurfaceComparison } from "./diff/surface.js";
@@ -31,9 +36,12 @@ export type VerdictLevel =
   /** The shape changed in a way that breaks a caller written against the old contract. */
   | "structurally-breaking"
   /**
-   * A model demonstrably behaves differently. Requires Layer 2, which is not
-   * built — so nothing in this file may return it yet. It is in the enum because
-   * a CI job branching on the field should not have to change when it arrives.
+   * A model demonstrably behaves differently across the pair.
+   *
+   * Ranked worst not because the consequence is worse but because the claim is
+   * stronger. The other three levels are predictions — what a caller *would*
+   * read, what *would* fail to compile. This one is an observation: a model was
+   * shown both contracts and did something else on the newer one.
    */
   | "behaviour-breaking"
   /**
@@ -50,6 +58,17 @@ export type SurfaceReport = {
   to: SurfaceResult;
   comparison: SurfaceComparison;
   prose: ProseResult;
+  /**
+   * Layer 2's result, or null when it did not run.
+   *
+   * Null rather than an empty `RunResult`, which is the same invariant the
+   * extractor is built around: absent is not empty. A stub would have to invent
+   * a caller id, a `k` and a mode for runs that never happened, and "no model
+   * was ever asked" would then be indistinguishable from "a model was asked k
+   * times per side and behaved identically". Those are opposite claims, and
+   * only one of them is evidence.
+   */
+  behaviour: RunResult | null;
 };
 
 export type Report = {
@@ -67,7 +86,35 @@ export type Report = {
   missingDependencies: string[];
   /** Which judge answered, or "none". */
   judge: string;
+  /** Which model Layer 2 replayed, or "none" when it did not run. */
+  caller: string;
   generatedAt: string;
+};
+
+/**
+ * Layer 2's settings, and the switch that turns it on.
+ *
+ * **Opt-in by the presence of this object**, never by a key happening to be in
+ * the environment. That is the one place Layer 2 deliberately differs from the
+ * judge. A judge question costs one call and answers a question the rules
+ * already raised, so running it whenever a key exists is free-ish and strictly
+ * better. Layer 2 costs `k` calls per intent per side, plus a corpus, so an
+ * available key must not be enough to start spending — the caller has to ask.
+ */
+export type BehaviourOptions = {
+  /**
+   * Null runs the report with no Layer 2 at all, exactly as a null judge runs
+   * Layer 1 with no judge. A user with no key gets the same document minus the
+   * section a model would have filled in, and a clean exit — never an error.
+   */
+  caller?: ToolCaller | null;
+  /** A corpus supplied by the caller. Left unset, one is seeded per surface. */
+  intents?: readonly Intent[];
+  /** Runs per intent per side. Left unset, Layer 2's own default applies. */
+  k?: number;
+  cache?: BehaviourCache;
+  /** Where a seeded corpus is cached, so a history walk pays to generate once. */
+  seedCacheDir?: string;
 };
 
 export type ReportOptions = {
@@ -82,6 +129,8 @@ export type ReportOptions = {
   subpaths?: readonly string[];
   surface?: Surface;
   dependencyDepth?: number;
+  /** Left unset, Layer 2 does not run and no model is ever called. */
+  behaviour?: BehaviourOptions;
 };
 
 /**
@@ -99,6 +148,13 @@ const RANK: Record<VerdictLevel, number> = {
 };
 
 function verdictForSurface(report: SurfaceReport): VerdictLevel {
+  // Every behavioural finding counts, `underpowered` ones included. Gating on
+  // `measured` would look like caution and would in fact be a hole:
+  // `new_field_used` is underpowered by construction whenever the two rates do
+  // not separate, and it is both the highest-severity rule in the layer and the
+  // exact shape Layer 2 was built to catch. The basis travels on the finding,
+  // so a reader still sees how much it rests on.
+  if ((report.behaviour?.findings.length ?? 0) > 0) return "behaviour-breaking";
   if (report.comparison.breaking) return "structurally-breaking";
   if (report.prose.findings.length > 0) return "prose-risk";
 
@@ -115,6 +171,21 @@ function headlineFor(report: Report): string {
   const surfaces = report.surfaces;
   const findings = surfaces.flatMap((s) => s.prose.findings);
   const structural = surfaces.flatMap((s) => s.comparison.diff?.changes ?? []).filter((c) => c.breaking);
+  const behavioural = surfaces
+    .flatMap((s) => s.behaviour?.findings ?? [])
+    // Each run result is sorted on its own, so a flat list of several is not.
+    // The headline names the worst finding in the report, not the worst one on
+    // whichever door happened to be read first.
+    .sort(compareBehaviourFindings);
+
+  // Ahead of the structural branch to match `RANK`: what a model was seen doing
+  // is the headline, even when the shape also moved.
+  if (behavioural.length > 0) {
+    const worst = behavioural[0];
+    const others = behavioural.length - 1;
+    const tail = others > 0 ? ` (and ${others} more)` : "";
+    return `${worst?.headline}${tail}.`;
+  }
 
   if (structural.length > 0) {
     const first = structural[0];
@@ -145,6 +216,65 @@ function headlineFor(report: Report): string {
 }
 
 /**
+ * Layer 2 for one door, or null when there is nothing to run it on.
+ *
+ * Every return of null below is a *normal* outcome, not a failure: the report
+ * is produced either way and the door simply carries no behavioural section.
+ * That is the same contract the judge holds, and it is what keeps the promise
+ * that a first `npx` run works with no account and no key.
+ */
+async function behaviourFor(
+  from: SurfaceResult,
+  to: SurfaceResult,
+  options: ReportOptions,
+): Promise<RunResult | null> {
+  const settings = options.behaviour;
+  if (settings === undefined) return null;
+
+  const caller = settings.caller;
+  if (caller === undefined || caller === null) return null;
+
+  // Both sides have to be readable. A side we could not read is not a model
+  // behaving differently, it is us having nothing to put in front of the model
+  // — and showing it an empty contract would manufacture `call_abandoned` on
+  // every intent.
+  if (!isPresent(from) || !isPresent(to)) return null;
+  if (from.contract.tools.length === 0) return null;
+
+  // A contract that did not change is skipped rather than measured, and this is
+  // a correctness guard before it is a cost one. Model output is stochastic, so
+  // the same tools shown to the same model twice can produce two different
+  // rates by chance — and a difference in rates is the only thing this layer
+  // looks at. Comparing a contract against itself can manufacture a finding and
+  // can never earn one. Compared on the wire form because that is exactly what
+  // the model sees; anything the model is not shown cannot move what it does.
+  if (JSON.stringify(wireTools(from.contract)) === JSON.stringify(wireTools(to.contract))) {
+    return null;
+  }
+
+  const intents =
+    settings.intents ??
+    (await seedIntents({
+      // The anchor is the older side, never the newer one. Seeding from the
+      // contract under test writes the request to match the prose being
+      // evaluated, and the measurement becomes circular.
+      anchor: from.contract,
+      caller,
+      ...(settings.seedCacheDir !== undefined ? { cacheDir: settings.seedCacheDir } : {}),
+    }));
+  if (intents.length === 0) return null;
+
+  return runBehaviour({
+    from: { version: options.from, contract: from.contract },
+    to: { version: options.to, contract: to.contract },
+    intents,
+    caller,
+    ...(settings.k !== undefined ? { k: settings.k } : {}),
+    ...(settings.cache !== undefined ? { cache: settings.cache } : {}),
+  });
+}
+
+/**
  * Read one door at both versions and compare it.
  *
  * Extraction is per surface and never shared between them. Two doors of one
@@ -169,7 +299,9 @@ async function reportSurface(
     ? await classifyProse(isPresent(from) ? from : null, to, judge)
     : { findings: [], skipped: [], judge: judge?.id ?? "none" };
 
-  return { subpath, from, to, comparison, prose };
+  const behaviour = await behaviourFor(from, to, options);
+
+  return { subpath, from, to, comparison, prose, behaviour };
 }
 
 export async function buildReport(options: ReportOptions): Promise<Report> {
@@ -213,6 +345,10 @@ export async function buildReport(options: ReportOptions): Promise<Report> {
     surfaces,
     missingDependencies: [...new Set([...from.missing, ...to.missing])],
     judge: judge?.id ?? "none",
+    // "none" covers both "not asked for" and "asked for, no key" on purpose:
+    // from the reader's side they are the same fact, which is that no model was
+    // consulted and so no behavioural claim in here rests on one.
+    caller: options.behaviour?.caller?.id ?? "none",
     generatedAt: new Date().toISOString(),
   };
   report.headline = headlineFor(report);
