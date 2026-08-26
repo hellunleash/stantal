@@ -5,7 +5,7 @@ import { describe, expect, test } from "vitest";
 import { scriptedCaller, type CallRequest, type ToolChoice } from "./behaviour/caller.js";
 import type { Intent } from "./behaviour/intent.js";
 import { RegistryError, type Registry } from "./registry/npm.js";
-import { buildReport, exitCodeFor, type BehaviourOptions } from "./report.js";
+import { buildManifestReport, buildReport, exitCodeFor, type BehaviourOptions } from "./report.js";
 
 /** Offline: the fake registry writes the files a real unpack would. */
 function registryOf(packages: Record<string, Record<string, string>>): Registry {
@@ -289,5 +289,46 @@ describe("exitCodeFor", () => {
     expect(exitCodeFor("structurally-breaking")).toBe(1);
     expect(exitCodeFor("behaviour-breaking")).toBe(1);
     expect(exitCodeFor("unreadable")).toBe(2);
+  });
+});
+
+describe("a withheld claim is not a clean bill", () => {
+  const side = (tools: unknown[]) => ({ text: JSON.stringify({ tools }), origin: "t.json" });
+
+  test("a suppressed structural claim blocks `clean`", async () => {
+    // The failure this guards: a run withheld `tool_removed` because it could
+    // not read the whole contract, then reported `clean`. The tool may well be
+    // gone; the only reason nothing was said is that reading stopped short, and
+    // a consumer acting on `clean` there has been actively misled.
+    //
+    // Prose gaps already blocked `clean` through `skipped`. Structural gaps did
+    // not, so the two kinds of silence meant different things.
+    const report = await buildManifestReport({
+      package: "example",
+      from: { version: "1", sources: [side([{ name: "alpha" }, { name: "beta" }])] },
+      // `beta` is gone and one entry has no readable name, so the tool set is
+      // unknown and the removal cannot be claimed.
+      to: { version: "2", sources: [side([{ name: "alpha" }, { description: "nameless" }])] },
+      judge: null,
+    });
+
+    const surface = report.surfaces[0]!;
+    expect(surface.comparison.suppressed.length).toBeGreaterThan(0);
+    expect(surface.comparison.diff?.changes ?? []).toEqual([]);
+    expect(report.verdict).toBe("unreadable");
+    expect(exitCodeFor(report.verdict)).toBe(2);
+  });
+
+  test("nothing withheld and nothing found really is clean", async () => {
+    const report = await buildManifestReport({
+      package: "example",
+      from: { version: "1", sources: [side([{ name: "alpha" }])] },
+      to: { version: "2", sources: [side([{ name: "alpha" }])] },
+      judge: null,
+    });
+
+    expect(report.surfaces[0]!.comparison.suppressed).toEqual([]);
+    expect(report.verdict).toBe("clean");
+    expect(exitCodeFor(report.verdict)).toBe(0);
   });
 });

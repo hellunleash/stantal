@@ -16,6 +16,7 @@ import { pacoteRegistry } from "./registry/npm.js";
 import { vertexFromEnv } from "./vertex.js";
 import { walkHistory, type HistoryResult } from "./history.js";
 import {
+  buildLocalReport,
   buildManifestReport,
   buildReport,
   exitCodeFor,
@@ -39,6 +40,7 @@ stantal — know whether an upgrade changes how a model uses your dependency
   stantal <package> <from> <to> [options]
   stantal history <package> [options]
   stantal manifest <before...> <after...> [options]
+  stantal check <dir> --against <version> [options]
 
 Comparing two versions tells you whether to take an upgrade.
 Walking the history tells you which release broke it, and the last one that
@@ -48,9 +50,14 @@ this — what will it do to the models already calling me. Nothing is fetched an
 no version is resolved, so it works on a release that is not published, and on
 a contract that never goes to a registry at all. It reads a serialized tool
 list: an MCP tools/list reply, or whatever a host writes out for its own tools.
-Each side takes a comma-separated list of documents, catalog first, because a
-contract is often split - schemas generated from routes, prose kept where a
-person edits it. What a model receives is the merge.
+Checking a directory is the provider's gate before publishing: it reads the
+build on disk, fetches the release you name, and tells you what your next
+version does to the models already calling you -- while it still costs
+minutes to fix rather than a deprecation cycle.
+
+Each side of the manifest form takes a comma-separated list of documents, catalog
+first, because a contract is often split - schemas generated from routes, prose
+kept where a person edits it. What a model receives is the merge.
 
 Options
   --surface <subpath>   Read one door only, e.g. "." or "./ai-sdk".
@@ -74,6 +81,7 @@ Options
   --replay              Answer only from recordings. Never calls out, so the
                         run is free and repeats identically.
   --cache <dir>         Where unpacked versions live. Default .stantal/npm
+  --against <version>   check: the published release to compare the build against.
   --current <version>   history: the version you are on now, so the walk can say
                         which release to move to. Default: the oldest walked.
   --since <version>     history: start here instead of the first release.
@@ -359,6 +367,71 @@ function renderHistory(result: HistoryResult): string {
 }
 
 /**
+ * The provider's gate: a build on disk against a release already out there.
+ *
+ * The one question neither other entry point could answer. Comparing two
+ * published versions is too late — the release is already out — and the
+ * manifest path needs a contract serialized to JSON, which a host produces and
+ * an ordinary npm package does not.
+ */
+async function runCheck(
+  directory: string | undefined,
+  values: {
+    json?: boolean | undefined;
+    against?: string | undefined;
+    surface?: string[] | undefined;
+    cache?: string | undefined;
+    name?: string | undefined;
+  },
+  judge: Judge | null,
+  behaviour: BehaviourOptions | undefined,
+  repo: ReturnType<typeof fsRepoSource> | undefined,
+): Promise<number> {
+  if (directory === undefined || values.against === undefined) {
+    process.stderr.write(
+      `stantal: check wants a directory and --against <version>.\n\n  stantal check ./ --against 1.4.0\n\n`,
+    );
+    return 2;
+  }
+
+  // The package name comes from the build's own manifest. Asking for it
+  // separately would let the two disagree, and a report labelled with the wrong
+  // package is worse than no report.
+  let pkg = values.name;
+  if (pkg === undefined) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(`${directory}/package.json`, "utf8"));
+      const name = (parsed as { name?: unknown })?.name;
+      if (typeof name !== "string") throw new Error("package.json has no name");
+      pkg = name;
+    } catch (error) {
+      process.stderr.write(
+        `stantal: cannot read ${directory}/package.json: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      return 2;
+    }
+  }
+
+  try {
+    const report = await buildLocalReport({
+      directory,
+      against: { package: pkg, version: values.against, registry: pacoteRegistry() },
+      judge,
+      ...(behaviour === undefined ? {} : { behaviour }),
+      ...(values.cache !== undefined ? { cacheRoot: values.cache } : {}),
+      ...(values.surface !== undefined ? { subpaths: values.surface } : {}),
+      ...(repo === undefined ? {} : { repo }),
+    });
+
+    process.stdout.write(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : render(report));
+    return exitCodeFor(report.verdict);
+  } catch (error) {
+    process.stderr.write(`stantal: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
+}
+
+/**
  * Compare two serialized tool manifests.
  *
  * The provider's side of the product. Nothing is fetched, so this is the only
@@ -633,6 +706,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         "exclude-when": { type: "string", multiple: true },
         repo: { type: "string" },
         current: { type: "string" },
+        against: { type: "string" },
         since: { type: "string" },
         until: { type: "string" },
         concurrency: { type: "string" },
@@ -741,6 +815,10 @@ GEMINI_API_KEY). Continuing without Layer 2.
   // runs only when a directory was named -- never because one happened to be
   // the working directory.
   const repo = values.repo === undefined ? undefined : fsRepoSource(values.repo);
+
+  if (positionals[0] === "check") {
+    return runCheck(positionals[1], values, judge, behaviour, repo);
+  }
 
   if (positionals[0] === "manifest") {
     return runManifest(positionals[1], positionals[2], values, judge, behaviour);

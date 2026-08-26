@@ -11,7 +11,7 @@ import type { Ecosystem, Surface } from "./contract/types.js";
 import { diffSurfaces, type SurfaceComparison } from "./diff/surface.js";
 import { extractFromManifest, type ManifestSource } from "./extract/manifest.js";
 import { extractFromModule } from "./extract/module.js";
-import { exportedSubpaths } from "./extract/package-source.js";
+import { exportedSubpaths, fsPackageSource } from "./extract/package-source.js";
 import { classifyProse, type ProseResult } from "./prose/classify.js";
 import type { Judge } from "./prose/judge.js";
 import { installPackage } from "./registry/install.js";
@@ -187,6 +187,12 @@ function verdictForSurface(report: SurfaceReport): VerdictLevel {
   if (report.comparison.kind === "not_comparable") return "unreadable";
   if (report.comparison.kind === "surface_absent") return "clean";
   if (report.prose.skipped.length > 0) return "unreadable";
+  // A withheld structural claim is the same kind of silence as a skipped prose
+  // one, and was the one place it did not count. A run that withheld
+  // `tool_removed` and then reported `clean` is the exact false reassurance
+  // this product exists to prevent — the tool may well be gone, and the only
+  // reason nothing was said is that we could not finish reading.
+  if (report.comparison.suppressed.length > 0) return "unreadable";
   return "clean";
 }
 
@@ -595,4 +601,98 @@ export function exitCodeFor(verdict: VerdictLevel): 0 | 1 | 2 {
   if (verdict === "clean") return 0;
   if (verdict === "unreadable") return 2;
   return 1;
+}
+
+/**
+ * A build that has not been published yet, against a release that has.
+ *
+ * The provider's own gate, and the one case neither other entry point serves.
+ * `buildReport` needs both sides on a registry, and by the time a release is
+ * there it is too late for this question. `buildManifestReport` works on a
+ * contract already serialized to JSON, which a host produces and an ordinary
+ * npm package does not.
+ *
+ * So a provider whose descriptors live in shipped JavaScript — most of them —
+ * had no way to ask "what will this release do to the models already calling
+ * me" while the answer still cost minutes to act on. This is that path: read
+ * `dist/` off the disk, fetch the last release, compare.
+ */
+export type LocalReportOptions = {
+  /** The unpublished build: a package directory with a manifest and its `dist`. */
+  directory: string;
+  /** What to call the local side in the report. */
+  label?: string;
+  /** The published release to compare against. */
+  against: { package: string; version: string; registry: Registry };
+  cacheRoot?: string;
+  dependencyDepth?: number;
+  subpaths?: readonly string[];
+  surface?: Surface;
+  judge?: Judge | null;
+  behaviour?: BehaviourOptions;
+  repo?: RepoSource;
+};
+
+export async function buildLocalReport(options: LocalReportOptions): Promise<Report> {
+  const { directory, against } = options;
+  const judge = options.judge ?? undefined;
+  const local = fsPackageSource(directory);
+
+  const manifest = local.packageJson();
+  // The directory has to look like a package. Failing here with the path is
+  // better than reporting every tool as removed because `dist/` was one level
+  // further down than the caller thought.
+  if (manifest === null) {
+    throw new Error(`${directory} has no readable package.json — point this at the package root, not its dist`);
+  }
+
+  const pkg = against.package;
+  const declaredName = typeof manifest["name"] === "string" ? manifest["name"] : null;
+  if (declaredName !== null && declaredName !== pkg) {
+    throw new Error(`${directory} is ${declaredName}, but --against names ${pkg}`);
+  }
+
+  const published = await installPackage(pkg, against.version, {
+    registry: against.registry,
+    ...(options.cacheRoot ? { root: options.cacheRoot } : {}),
+    ...(options.dependencyDepth !== undefined ? { depth: options.dependencyDepth } : {}),
+  });
+
+  const label = options.label ?? (typeof manifest["version"] === "string" ? `${manifest["version"]} (local)` : "local");
+
+  // Every door either side declares. A subpath added by the unpublished build
+  // is exactly the kind of change worth seeing, so the local manifest is read
+  // for doors too rather than trusting the published one to list them all.
+  const declared =
+    options.subpaths ??
+    [
+      ...new Set([
+        ...exportedSubpaths(published.source.packageJson() ?? {}),
+        ...exportedSubpaths(manifest),
+      ]),
+    ].sort();
+
+  const common = { package: pkg, ...(options.surface ? { surface: options.surface } : {}) };
+
+  const surfaces = await Promise.all(
+    declared.map((subpath) =>
+      compareSurfaces(
+        subpath,
+        extractFromModule({ ...common, subpath, version: against.version, source: published.source }),
+        extractFromModule({ ...common, subpath, version: label, source: local }),
+        { from: against.version, to: label },
+        judge,
+        options.behaviour,
+      ),
+    ),
+  );
+
+  return foldReport({
+    subject: { ecosystem: "npm", package: pkg, from: against.version, to: label },
+    surfaces,
+    missingDependencies: published.missing,
+    judge,
+    caller: options.behaviour?.caller ?? null,
+    ...(options.repo === undefined ? {} : { repo: options.repo }),
+  });
 }
