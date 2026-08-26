@@ -26,6 +26,16 @@ export type CallerConfig = {
   model?: string;
   baseUrl?: string;
   timeoutMs?: number;
+  /** Attempts per call, including the first. See `DEFAULT_ATTEMPTS`. 1 disables retry. */
+  attempts?: number;
+  /**
+   * First backoff step, doubling per attempt. See `DEFAULT_RETRY_BASE_MS`.
+   *
+   * Configurable because the right wait is a property of the quota, not of this
+   * code: a per-minute window and a per-second one want very different numbers.
+   * 0 makes a retry immediate, which is what a test wants.
+   */
+  retryBaseMs?: number;
   /**
    * Sampling temperature.
    *
@@ -383,6 +393,42 @@ function wireFor(config: CallerConfig, request: CallRequest): Wire {
   }
 }
 
+/**
+ * Attempts per call, including the first.
+ *
+ * Five gives roughly half a minute of backoff before giving up, which clears
+ * the per-minute windows providers usually rate-limit on without letting a
+ * genuinely broken run hang around forever.
+ */
+export const DEFAULT_ATTEMPTS = 5;
+
+/** First backoff step in ms, doubling per attempt and capped at 8s. */
+export const DEFAULT_RETRY_BASE_MS = 500;
+
+/** Transient: the provider is asking for later, or is briefly unwell. */
+function retryable(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+/**
+ * How long to wait before trying again.
+ *
+ * `Retry-After` wins when the provider sends one — it knows when its window
+ * reopens and we do not. Otherwise exponential with jitter: without jitter
+ * every call in a saturated pool backs off by the same amount and they all
+ * return together, which reproduces the burst that caused the rate limit.
+ */
+function backoffMs(attempt: number, retryAfter: string | null, baseMs: number): number {
+  const seconds = retryAfter === null ? Number.NaN : Number(retryAfter);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 30_000);
+  const base = Math.min(2 ** (attempt - 1) * baseMs, 8_000);
+  return base + Math.random() * base;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export function createCaller(config: CallerConfig): ToolCaller {
   const model = config.model ?? DEFAULT_MODEL[config.provider];
   const timeoutMs = config.timeoutMs ?? 120_000;
@@ -392,35 +438,61 @@ export function createCaller(config: CallerConfig): ToolCaller {
 
     async call(request) {
       const wire = wireFor(config, request);
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const attempts = config.attempts ?? DEFAULT_ATTEMPTS;
+      const retryBase = config.retryBaseMs ?? DEFAULT_RETRY_BASE_MS;
 
-      try {
-        const response = await fetch(wire.url, {
-          method: "POST",
-          headers: wire.headers,
-          body: JSON.stringify(wire.body),
-          signal: controller.signal,
-        });
+      for (let attempt = 1; ; attempt += 1) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-        if (!response.ok) {
-          const detail = await response.text().catch(() => "");
-          if (toolsUnsupported(detail)) {
-            throw new CallerError(
-              `${config.provider} model "${model}" rejected the request because it does not support ` +
-                `function tools — its own words: ${detail.slice(0, 300)}. Set STANTAL_CALLER_MODEL to a ` +
-                `model that does.`,
-            );
+        try {
+          const response = await fetch(wire.url, {
+            method: "POST",
+            headers: wire.headers,
+            body: JSON.stringify(wire.body),
+            signal: controller.signal,
+          });
+
+          if (!response.ok) {
+            const detail = await response.text().catch(() => "");
+            if (toolsUnsupported(detail)) {
+              throw new CallerError(
+                `${config.provider} model "${model}" rejected the request because it does not support ` +
+                  `function tools — its own words: ${detail.slice(0, 300)}. Set STANTAL_CALLER_MODEL to a ` +
+                  `model that does.`,
+              );
+            }
+            // A rate limit is the provider saying "later", not "no". Running k
+            // calls per intent per side several at a time makes one near
+            // certain on a long corpus, and without this the whole run dies on
+            // it — every remaining intent unmeasured because one call arrived
+            // too early. Retried rather than skipped, because a skipped call is
+            // a missing sample and quietly narrows what the run can claim.
+            if (retryable(response.status) && attempt < attempts) {
+              // Read defensively. Not every Response-shaped thing carries
+              // headers, and throwing here would be caught by the transient
+              // handler below — turning a missing header into a retry loop and
+              // then into an error naming the wrong cause.
+              const after = response.headers?.get?.("retry-after") ?? null;
+              await sleep(backoffMs(attempt, after, retryBase));
+              continue;
+            }
+            throw new CallerError(`${config.provider} returned ${response.status}: ${detail.slice(0, 300)}`);
           }
-          throw new CallerError(`${config.provider} returned ${response.status}: ${detail.slice(0, 300)}`);
-        }
 
-        return wire.read(await response.json());
-      } catch (error) {
-        if (error instanceof CallerError) throw error;
-        throw new CallerError(`${config.provider} tool call failed`, error);
-      } finally {
-        clearTimeout(timer);
+          return wire.read(await response.json());
+        } catch (error) {
+          if (error instanceof CallerError) throw error;
+          // A dropped connection or a timeout is the same kind of transient as
+          // a 429, and gets the same treatment.
+          if (attempt < attempts) {
+            await sleep(backoffMs(attempt, null, retryBase));
+            continue;
+          }
+          throw new CallerError(`${config.provider} tool call failed`, error);
+        } finally {
+          clearTimeout(timer);
+        }
       }
     },
   };

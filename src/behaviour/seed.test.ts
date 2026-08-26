@@ -310,7 +310,9 @@ describe("a tools-unsupported response", () => {
 
   it("falls back to the generic error when the body says nothing about tools", async () => {
     stubFetchError(500, "internal server error");
-    const caller = createCaller({ provider: "openai", apiKey: "k" });
+    // A 500 is retried, so the backoff is zeroed rather than waited through.
+    // The run still exhausts its attempts and reports the real status.
+    const caller = createCaller({ provider: "openai", apiKey: "k", retryBaseMs: 0 });
 
     const error = await caller.call({ intent: "hello", tools: CALLER_TOOLS }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(CallerError);

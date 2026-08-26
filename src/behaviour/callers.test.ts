@@ -281,3 +281,65 @@ describe("vertex as a transport", () => {
     expect(callerFromEnv({ GEMINI_API_KEY: "k" })?.id).toBe("gemini:gemini-3.6-flash");
   });
 });
+
+describe("transient failures", () => {
+  /**
+   * Layer 2 fires k calls per intent per side, several at a time. A rate limit
+   * on a long corpus is close to certain, and one of them killing the run
+   * leaves every remaining intent unmeasured because a single call arrived too
+   * early.
+   */
+  function flakyFetch(statuses: number[], payload: unknown) {
+    const seen: number[] = [];
+    let n = 0;
+    vi.stubGlobal("fetch", async () => {
+      const status = statuses[n] ?? 200;
+      n += 1;
+      seen.push(status);
+      const ok = status === 200;
+      return {
+        ok,
+        status,
+        headers: { get: () => null },
+        async json() { return payload; },
+        async text() { return ok ? "" : `{"error":{"code":${status}}}`; },
+      } as unknown as Response;
+    });
+    return seen;
+  }
+
+  const CALL = { candidates: [{ content: { parts: [{ functionCall: { name: "make", args: { request: "x" } } }] } }] };
+  const req: CallRequest = { intent: "make a thing", tools: TOOLS };
+
+  const caller = () =>
+    createCaller({ provider: "gemini" as CallerProvider, apiKey: "k", model: "m", timeoutMs: 5_000, retryBaseMs: 0 });
+
+  it("retries a rate limit instead of losing the run", async () => {
+    const seen = flakyFetch([429, 429], CALL);
+    const choice = await caller().call(req);
+    expect(seen).toEqual([429, 429, 200]);
+    expect(choice.kind).toBe("tool_call");
+  });
+
+  it("retries a server error", async () => {
+    const seen = flakyFetch([503], CALL);
+    expect((await caller().call(req)).kind).toBe("tool_call");
+    expect(seen).toEqual([503, 200]);
+  });
+
+  it("gives up on a request that will never succeed", async () => {
+    // A 400 is the provider saying the request is wrong, not "later". Retrying
+    // it burns the backoff budget to arrive at the same answer.
+    const seen = flakyFetch([400, 400, 400, 400, 400], CALL);
+    await expect(caller().call(req)).rejects.toThrow("returned 400");
+    expect(seen).toEqual([400]);
+  });
+
+  it("stops after the last attempt and reports the real status", async () => {
+    const seen = flakyFetch([429, 429, 429, 429, 429, 429, 429], CALL);
+    await expect(
+      createCaller({ provider: "gemini" as CallerProvider, apiKey: "k", model: "m", attempts: 3, retryBaseMs: 0 }).call(req),
+    ).rejects.toThrow("returned 429");
+    expect(seen).toHaveLength(3);
+  });
+});
