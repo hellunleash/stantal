@@ -1,13 +1,23 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { isPresent } from "./contract/surface.js";
 import { callerFromEnv } from "./behaviour/callers.js";
 import { behaviourCacheFromEnv } from "./behaviour/run.js";
+import type { Judge } from "./prose/judge.js";
 import { judgeFromEnv } from "./prose/judges.js";
 import { pacoteRegistry } from "./registry/npm.js";
 import { walkHistory, type HistoryResult } from "./history.js";
-import { buildReport, exitCodeFor, type BehaviourOptions, type Report, type SurfaceReport } from "./report.js";
+import {
+  buildManifestReport,
+  buildReport,
+  exitCodeFor,
+  type BehaviourOptions,
+  type Report,
+  type SurfaceReport,
+} from "./report.js";
 
 /**
  * Rung 1 — the whole product in one command, with nothing installed.
@@ -23,14 +33,21 @@ stantal — know whether an upgrade changes how a model uses your dependency
 
   stantal <package> <from> <to> [options]
   stantal history <package> [options]
+  stantal manifest <before.json> <after.json> [options]
 
 Comparing two versions tells you whether to take an upgrade.
 Walking the history tells you which release broke it, and the last one that
 was fine — which is what a stranded consumer actually needs.
+Comparing two manifests answers the other side's question: I am about to ship
+this — what will it do to the models already calling me. Nothing is fetched and
+no version is resolved, so it works on a release that is not published, and on
+a contract that never goes to a registry at all. It reads a serialized tool
+list: an MCP tools/list reply, or whatever a host writes out for its own tools.
 
 Options
   --surface <subpath>   Read one door only, e.g. "." or "./ai-sdk".
                         Repeatable. Default: every subpath the package exports.
+  --name <label>        manifest: what to call the subject. Default: the filename.
   --json                Print the full report as JSON.
   --no-judge            Skip the model judge even if a key is set.
   --behaviour           Also run Layer 2: put the contract in front of a model
@@ -272,6 +289,63 @@ function renderHistory(result: HistoryResult): string {
   return out.join("\n");
 }
 
+/**
+ * Compare two serialized tool manifests.
+ *
+ * The provider's side of the product. Nothing is fetched, so this is the only
+ * path that works on a release that does not exist publicly — which is the
+ * normal case for the person deciding whether to ship it.
+ */
+async function runManifest(
+  beforePath: string | undefined,
+  afterPath: string | undefined,
+  values: { json?: boolean | undefined; name?: string | undefined; surface?: string[] | undefined },
+  judge: Judge | null,
+  behaviour: BehaviourOptions | undefined,
+): Promise<number> {
+  if (beforePath === undefined || afterPath === undefined) {
+    process.stderr.write(`stantal: manifest needs two files — a before and an after.\n\n${USAGE}\n`);
+    return 2;
+  }
+
+  // Said out loud rather than dropped. A manifest is one door — the file — so
+  // there is no subpath to select, and a user who passed `--surface` expecting
+  // it to narrow the read should not have to infer from the output that it did
+  // nothing.
+  if (values.surface !== undefined) {
+    process.stderr.write("stantal: --surface does not apply to a manifest, and was ignored.\n");
+  }
+
+  const sides: Array<{ version: string; text: string; origin: string }> = [];
+  for (const path of [beforePath, afterPath]) {
+    try {
+      sides.push({ version: path, text: readFileSync(path, "utf8"), origin: basename(path) });
+    } catch (error) {
+      // Exit 2, never a verdict. A file we could not open is a gap in the
+      // reading, and "clean" would be a claim we have no basis for.
+      process.stderr.write(`stantal: cannot read ${path}: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 2;
+    }
+  }
+  const [from, to] = sides as [(typeof sides)[number], (typeof sides)[number]];
+
+  try {
+    const report = await buildManifestReport({
+      from,
+      to,
+      package: values.name ?? basename(afterPath),
+      judge,
+      ...(behaviour === undefined ? {} : { behaviour }),
+    });
+
+    process.stdout.write(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : render(report));
+    return exitCodeFor(report.verdict);
+  } catch (error) {
+    process.stderr.write(`stantal: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
+}
+
 async function runHistory(
   pkg: string | undefined,
   values: { json?: boolean | undefined; cache?: string | undefined; since?: string | undefined; until?: string | undefined; concurrency?: string | undefined; surface?: string[] | undefined },
@@ -341,6 +415,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         k: { type: "string" },
         replay: { type: "boolean" },
         cache: { type: "string" },
+        name: { type: "string" },
         since: { type: "string" },
         until: { type: "string" },
         concurrency: { type: "string" },
@@ -405,12 +480,6 @@ every release in the range. Run it on a single pair instead.
     }
   }
 
-  const [pkg, from, to] = positionals;
-  if (pkg === undefined || from === undefined || to === undefined) {
-    process.stderr.write(`${USAGE}\n`);
-    return 2;
-  }
-
   let behaviour: BehaviourOptions | undefined;
   if (values.behaviour === true) {
     const caller = callerFromEnv();
@@ -431,6 +500,16 @@ GEMINI_API_KEY). Continuing without Layer 2.
         ...(k === undefined ? {} : { k }),
       };
     }
+  }
+
+  if (positionals[0] === "manifest") {
+    return runManifest(positionals[1], positionals[2], values, judge, behaviour);
+  }
+
+  const [pkg, from, to] = positionals;
+  if (pkg === undefined || from === undefined || to === undefined) {
+    process.stderr.write(`${USAGE}\n`);
+    return 2;
   }
 
   try {

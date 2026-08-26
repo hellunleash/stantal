@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyReplay, main } from "./cli.js";
 
@@ -90,5 +93,141 @@ describe("--k validation", () => {
     const code = await main(["--k", "1e3"]);
     expect(code).toBe(2);
     expect(stderr).toContain("--k must be a positive whole number");
+  });
+});
+
+describe("manifest", () => {
+  /**
+   * The one CLI path that can be exercised whole in a unit test.
+   *
+   * Nothing is fetched and no version is resolved, so `buildManifestReport`
+   * runs here for real rather than being stubbed. That is a property of the
+   * feature, not of the test: a provider comparing two files they already have
+   * is offline by construction.
+   */
+  let dir: string;
+  let stdout: string;
+
+  const BEFORE = {
+    tools: [
+      {
+        name: "create_item",
+        description: "POST /api/item",
+        inputSchema: {
+          type: "object",
+          properties: { id: { type: "string", description: "The item id." } },
+          required: ["id"],
+        },
+      },
+    ],
+  };
+
+  const AFTER = {
+    tools: [
+      {
+        name: "create_item",
+        description: "POST /api/item",
+        inputSchema: {
+          type: "object",
+          properties: { title: { type: "string" } },
+        },
+      },
+    ],
+  };
+
+  function write(name: string, body: unknown): string {
+    const path = join(dir, name);
+    writeFileSync(path, typeof body === "string" ? body : JSON.stringify(body));
+    return path;
+  }
+
+  beforeEach(() => {
+    stdout = "";
+    dir = mkdtempSync(join(tmpdir(), "stantal-manifest-"));
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      stdout += String(chunk);
+      return true;
+    });
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("compares two files with no network and no key", async () => {
+    const code = await main([
+      "manifest",
+      write("before.json", BEFORE),
+      write("after.json", AFTER),
+      "--no-judge",
+      "--json",
+    ]);
+
+    expect(code).toBe(1);
+    const report = JSON.parse(stdout) as {
+      verdict: string;
+      subject: { ecosystem: string; package: string };
+      judge: string;
+      caller: string;
+      surfaces: Array<{ comparison: { diff: { changes: Array<{ rule: string; target: string }> } } }>;
+    };
+
+    expect(report.verdict).toBe("structurally-breaking");
+    expect(report.subject.ecosystem).toBe("http");
+    // No model was consulted on either layer, and the report says so rather
+    // than naming one that was configured but never called.
+    expect(report.judge).toBe("none");
+    expect(report.caller).toBe("none");
+
+    const rules = report.surfaces[0]!.comparison.diff.changes.map((c) => `${c.rule} ${c.target}`);
+    expect(rules).toContain("param_removed create_item.id");
+    expect(rules).toContain("param_added_optional create_item.title");
+  });
+
+  it("names the subject after the file unless told otherwise", async () => {
+    await main(["manifest", write("a.json", BEFORE), write("b.json", BEFORE), "--no-judge", "--json"]);
+    expect((JSON.parse(stdout) as { subject: { package: string } }).subject.package).toBe("b.json");
+
+    stdout = "";
+    await main([
+      "manifest",
+      write("a.json", BEFORE),
+      write("b.json", BEFORE),
+      "--no-judge",
+      "--json",
+      "--name",
+      "acme-host",
+    ]);
+    expect((JSON.parse(stdout) as { subject: { package: string } }).subject.package).toBe("acme-host");
+  });
+
+  it("exits 2 on a file it cannot read, never a verdict", async () => {
+    // A file we could not open is a gap in the reading. Reporting "clean"
+    // because nothing was compared is the failure mode the exit codes exist to
+    // prevent.
+    const code = await main(["manifest", write("a.json", BEFORE), join(dir, "missing.json"), "--no-judge"]);
+    expect(code).toBe(2);
+    expect(stderr).toContain("cannot read");
+  });
+
+  it("exits 2 when only one side is given", async () => {
+    const code = await main(["manifest", write("a.json", BEFORE), "--no-judge"]);
+    expect(code).toBe(2);
+    expect(stderr).toContain("needs two files");
+  });
+
+  it("reports an unreadable file as unreadable, not as an empty contract", async () => {
+    // The invariant the extractor is built around, checked at the surface a
+    // user actually touches: a file we cannot parse must not compare as a
+    // contract with no tools, which would read as "every tool was removed".
+    const code = await main([
+      "manifest",
+      write("a.json", BEFORE),
+      write("b.json", "{ not json"),
+      "--no-judge",
+      "--json",
+    ]);
+    expect(code).toBe(2);
+    expect((JSON.parse(stdout) as { verdict: string }).verdict).toBe("unreadable");
   });
 });

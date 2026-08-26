@@ -4,8 +4,9 @@ import { runBehaviour, type BehaviourCache, type RunResult } from "./behaviour/r
 import { seedIntents } from "./behaviour/seed.js";
 import { compareFindings as compareBehaviourFindings } from "./behaviour/taxonomy.js";
 import { isPresent, type SurfaceResult } from "./contract/surface.js";
-import type { Surface } from "./contract/types.js";
+import type { Ecosystem, Surface } from "./contract/types.js";
 import { diffSurfaces, type SurfaceComparison } from "./diff/surface.js";
+import { extractFromManifest } from "./extract/manifest.js";
 import { extractFromModule } from "./extract/module.js";
 import { exportedSubpaths } from "./extract/package-source.js";
 import { classifyProse, type ProseResult } from "./prose/classify.js";
@@ -73,7 +74,7 @@ export type SurfaceReport = {
 
 export type Report = {
   subject: {
-    ecosystem: "npm";
+    ecosystem: Ecosystem;
     package: string;
     from: string;
     to: string;
@@ -226,9 +227,9 @@ function headlineFor(report: Report): string {
 async function behaviourFor(
   from: SurfaceResult,
   to: SurfaceResult,
-  options: ReportOptions,
+  versions: { from: string; to: string },
+  settings: BehaviourOptions | undefined,
 ): Promise<RunResult | null> {
-  const settings = options.behaviour;
   if (settings === undefined) return null;
 
   const caller = settings.caller;
@@ -271,13 +272,47 @@ async function behaviourFor(
   if (intents.length === 0) return null;
 
   return runBehaviour({
-    from: { version: options.from, contract: from.contract },
-    to: { version: options.to, contract: to.contract },
+    from: { version: versions.from, contract: from.contract },
+    to: { version: versions.to, contract: to.contract },
     intents,
     caller,
     ...(settings.k !== undefined ? { k: settings.k } : {}),
     ...(settings.cache !== undefined ? { cache: settings.cache } : {}),
   });
+}
+
+/**
+ * Compare one door, given both sides already extracted.
+ *
+ * Everything a layer does after extraction — diff, classify, put it in front of
+ * a model — is written against `SurfaceResult` and knows nothing about where
+ * the contract came from. Keeping that seam explicit is what lets a contract
+ * that never reached a registry go through the same pipeline as a published
+ * one, with no second implementation of the layers to keep in step.
+ */
+async function compareSurfaces(
+  subpath: string,
+  from: SurfaceResult,
+  to: SurfaceResult,
+  versions: { from: string; to: string },
+  judge: Judge | undefined,
+  behaviour: BehaviourOptions | undefined,
+): Promise<SurfaceReport> {
+  const comparison = diffSurfaces(from, to);
+  // Prose is only compared where both sides are readable. A missing side would
+  // make every sentence look deleted.
+  const prose = isPresent(to)
+    ? await classifyProse(isPresent(from) ? from : null, to, judge)
+    : { findings: [], skipped: [], judge: judge?.id ?? "none" };
+
+  return {
+    subpath,
+    from,
+    to,
+    comparison,
+    prose,
+    behaviour: await behaviourFor(from, to, versions, behaviour),
+  };
 }
 
 /**
@@ -295,19 +330,14 @@ async function reportSurface(
 ): Promise<SurfaceReport> {
   const common = { package: options.package, subpath, ...(options.surface ? { surface: options.surface } : {}) };
 
-  const from = extractFromModule({ ...common, version: options.from, source: sources.from.source });
-  const to = extractFromModule({ ...common, version: options.to, source: sources.to.source });
-
-  const comparison = diffSurfaces(from, to);
-  // Prose is only compared where both sides are readable. A missing side would
-  // make every sentence look deleted.
-  const prose = isPresent(to)
-    ? await classifyProse(isPresent(from) ? from : null, to, judge)
-    : { findings: [], skipped: [], judge: judge?.id ?? "none" };
-
-  const behaviour = await behaviourFor(from, to, options);
-
-  return { subpath, from, to, comparison, prose, behaviour };
+  return compareSurfaces(
+    subpath,
+    extractFromModule({ ...common, version: options.from, source: sources.from.source }),
+    extractFromModule({ ...common, version: options.to, source: sources.to.source }),
+    { from: options.from, to: options.to },
+    judge,
+    options.behaviour,
+  );
 }
 
 export async function buildReport(options: ReportOptions): Promise<Report> {
@@ -338,6 +368,32 @@ export async function buildReport(options: ReportOptions): Promise<Report> {
     declared.map((subpath) => reportSurface(subpath, options, { from, to }, judge)),
   );
 
+  return foldReport({
+    subject: { ecosystem: "npm", package: options.package, from: options.from, to: options.to },
+    surfaces,
+    missingDependencies: [...new Set([...from.missing, ...to.missing])],
+    judge,
+    caller: options.behaviour?.caller ?? null,
+  });
+}
+
+/**
+ * Many doors -> one answer.
+ *
+ * Split out from `buildReport` so every producer of surfaces folds them the
+ * same way. The verdict is what a CI job branches on, and two entry points
+ * ranking it differently would be a silent disagreement about what "clean"
+ * means.
+ */
+function foldReport(input: {
+  subject: Report["subject"];
+  surfaces: SurfaceReport[];
+  missingDependencies: string[];
+  judge: Judge | undefined;
+  caller: ToolCaller | null;
+}): Report {
+  const { subject, surfaces, missingDependencies, judge } = input;
+
   // The worst surface sets the verdict, but a surface that simply is not there
   // at either version says nothing and must not drag the answer to `clean`.
   const meaningful = surfaces.filter((s) => s.comparison.kind !== "surface_absent");
@@ -345,11 +401,11 @@ export async function buildReport(options: ReportOptions): Promise<Report> {
   const verdict = levels.sort((a, b) => RANK[a] - RANK[b])[0] ?? "unreadable";
 
   const report: Report = {
-    subject: { ecosystem: "npm", package: options.package, from: options.from, to: options.to },
+    subject,
     verdict,
     headline: "",
     surfaces,
-    missingDependencies: [...new Set([...from.missing, ...to.missing])],
+    missingDependencies,
     judge: judge?.id ?? "none",
     // Named only when Layer 2 actually ran on at least one door. Reporting the
     // configured caller would claim a model was consulted on runs where every
@@ -357,13 +413,76 @@ export async function buildReport(options: ReportOptions): Promise<Report> {
     // and "a model looked and found nothing" is the opposite claim to "nothing
     // was measured". "none" therefore covers not asked for, asked for with no
     // key, and asked for but nothing to ask about.
-    caller: surfaces.some((s) => s.behaviour !== null)
-      ? (options.behaviour?.caller?.id ?? "none")
-      : "none",
+    caller: surfaces.some((s) => s.behaviour !== null) ? (input.caller?.id ?? "none") : "none",
     generatedAt: new Date().toISOString(),
   };
   report.headline = headlineFor(report);
   return report;
+}
+
+/**
+ * A contract that never went to a registry.
+ *
+ * The registry path answers "should I take this upgrade" for a consumer. This
+ * one answers the provider's question instead: *I* am about to ship this — what
+ * will it do to the models already calling me. That release does not exist on
+ * npm yet, and often never will, so there is nothing to install and no version
+ * to resolve. What there is, is the tool manifest, on both sides.
+ *
+ * The layers are the same objects, not a parallel implementation. Only the two
+ * lines that produce the sides differ.
+ */
+export type ManifestReportOptions = {
+  /** The two manifests, already read. The caller owns all IO. */
+  from: { version: string; text: string; origin?: string };
+  to: { version: string; text: string; origin?: string };
+  /** What to call the subject. A file carries no registry identity of its own. */
+  package: string;
+  ecosystem?: Ecosystem;
+  surface?: Surface;
+  /** Null runs Layer 1 with no judge: findings stand, marked unconfirmed. */
+  judge?: Judge | null;
+  /** Left unset, Layer 2 does not run and no model is ever called. */
+  behaviour?: BehaviourOptions;
+};
+
+export async function buildManifestReport(options: ManifestReportOptions): Promise<Report> {
+  const { package: pkg, ecosystem = "http" } = options;
+  const judge = options.judge ?? undefined;
+
+  const side = (s: ManifestReportOptions["from"]) =>
+    extractFromManifest({
+      text: s.text,
+      package: pkg,
+      version: s.version,
+      ecosystem,
+      ...(options.surface ? { surface: options.surface } : {}),
+      ...(s.origin !== undefined ? { origin: s.origin } : {}),
+    });
+
+  // One manifest is one surface, so the subpath is the file itself rather than
+  // an exports subpath. Naming it after the door it came through keeps the
+  // rendered report readable next to a package report.
+  const subpath = options.to.origin ?? "manifest";
+
+  const surface = await compareSurfaces(
+    subpath,
+    side(options.from),
+    side(options.to),
+    { from: options.from.version, to: options.to.version },
+    judge,
+    options.behaviour,
+  );
+
+  return foldReport({
+    subject: { ecosystem, package: pkg, from: options.from.version, to: options.to.version },
+    surfaces: [surface],
+    // Nothing was installed, so nothing could be missing. Reporting a dependency
+    // gap here would claim a narrowed read that did not happen.
+    missingDependencies: [],
+    judge,
+    caller: options.behaviour?.caller ?? null,
+  });
 }
 
 /**
