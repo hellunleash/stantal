@@ -49,10 +49,12 @@
     "acorn": "^8.18.0",
     "pacote": "^21.5.1",
     "resolve.exports": "^2.0.3",
+    "semver": "^7.6.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/semver": "^7.8.0",
     "typescript": "^5.7.0",
     "vitest": "^2.1.0"
   }
