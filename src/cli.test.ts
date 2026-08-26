@@ -353,3 +353,72 @@ describe("manifest with a split contract", () => {
     expect(stderr).toContain("absent.json");
   });
 });
+
+describe("--repo (Layer 3)", () => {
+  let dir: string;
+  let stdout: string;
+
+  const CATALOG = {
+    tools: [
+      { name: "remove_member", description: "DELETE /api/member/{id}",
+        inputSchema: { type: "object", properties: { id: { type: "string" }, role: { type: "string" } }, required: ["id"] } },
+    ],
+  };
+  const NARROWED = {
+    tools: [
+      { name: "remove_member", description: "DELETE /api/member/{id}",
+        inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
+    ],
+  };
+
+  function write(name: string, body: unknown): string {
+    const path = join(dir, name);
+    writeFileSync(path, typeof body === "string" ? body : JSON.stringify(body));
+    return path;
+  }
+
+  beforeEach(() => {
+    stdout = "";
+    dir = mkdtempSync(join(tmpdir(), "stantal-repo-"));
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      stdout += String(chunk);
+      return true;
+    });
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not read the repo unless a directory is named", async () => {
+    // The only layer that touches private code must never run because a repo
+    // happened to be the working directory.
+    await main(["manifest", write("a.json", CATALOG), write("b.json", NARROWED), "--no-judge", "--json"]);
+    expect((JSON.parse(stdout) as { blast: unknown }).blast).toBeNull();
+  });
+
+  it("reports which of the consumer's files a finding reaches", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "stantal-consumer-"));
+    writeFileSync(join(repo, "package.json"), JSON.stringify({ dependencies: { "b.json": "^1.0.0" } }));
+    writeFileSync(join(repo, "use.ts"), 'export const x = remove_member({ id: "1", role: "admin" });\n');
+
+    try {
+      await main([
+        "manifest",
+        write("a.json", CATALOG),
+        write("b.json", NARROWED),
+        "--no-judge",
+        "--json",
+        "--repo",
+        repo,
+      ]);
+
+      const blast = (JSON.parse(stdout) as { blast: { reaches: Array<{ kind: string; evidence: string }> } }).blast;
+      // `role` was removed from the schema, and the consumer still passes it.
+      expect(blast.reaches.some((r) => r.kind === "tool_reference" && r.evidence.startsWith("use.ts"))).toBe(true);
+      expect(blast.reaches.some((r) => r.kind === "param_reference")).toBe(true);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});

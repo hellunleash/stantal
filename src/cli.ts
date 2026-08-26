@@ -8,6 +8,8 @@ import { callerFromEnv } from "./behaviour/callers.js";
 import { behaviourCacheFromEnv } from "./behaviour/run.js";
 import type { Judge } from "./prose/judge.js";
 import { judgeFromEnv } from "./prose/judges.js";
+import { fsRepoSource } from "./blast/repo.js";
+import { canClaimUnaffected } from "./blast/taxonomy.js";
 import { pacoteRegistry } from "./registry/npm.js";
 import { vertexFromEnv } from "./vertex.js";
 import { walkHistory, type HistoryResult } from "./history.js";
@@ -57,6 +59,9 @@ Options
   --exclude-when <k=v>  manifest: drop tools whose merged descriptor carries
                         this field, for policy the host applies but the
                         document only states. Repeatable.
+  --repo <dir>          Layer 3: which of YOUR call sites a finding reaches.
+                        Reads that directory only, never writes, never calls
+                        out. Off unless you pass it.
   --json                Print the full report as JSON.
   --no-judge            Skip the model judge even if a key is set.
   --behaviour           Also run Layer 2: put the contract in front of a model
@@ -138,6 +143,47 @@ const CONFIDENCE_MARK: Record<string, string> = {
   likely: "judged",
   unconfirmed: "unconfirmed",
 };
+
+/**
+ * Layer 3, rendered.
+ *
+ * The distinction this has to carry is between "we looked and nothing touches
+ * you" and "we could not look properly". A consumer stops reading on the first
+ * and must not stop reading on the second, so the two never share a line.
+ */
+function renderBlast(blast: Report["blast"]): string[] {
+  if (blast === null) return [];
+
+  const out: string[] = [""];
+  const scanned = dim(`${blast.scanned.files} file(s) scanned`);
+
+  if (blast.reaches.length === 0) {
+    out.push(
+      canClaimUnaffected(blast)
+        ? `  ${green("nothing here reaches your code")}  ${scanned}`
+        : `  ${yellow("no reach found, but the scan was incomplete")}  ${scanned}`,
+    );
+  } else {
+    out.push(`  ${bold(`reaches your code in ${blast.reaches.length} place(s)`)}  ${scanned}`);
+    for (const reach of blast.reaches.slice(0, 12)) {
+      out.push(`    ${reach.kind.padEnd(16)} ${reach.target}`);
+      out.push(`      ${dim(`${reach.evidence} — ${reach.detail}`)}`);
+    }
+    if (blast.reaches.length > 12) {
+      out.push(`    ${dim(`... and ${blast.reaches.length - 12} more`)}`);
+    }
+  }
+
+  // Both of these are claims in their own right, so neither is dropped.
+  for (const f of blast.filtered.slice(0, 6)) {
+    out.push(`    ${dim(`filtered  ${f.target} — ${f.reason}`)}`);
+  }
+  for (const note of blast.notes.slice(0, 6)) {
+    out.push(`    ${yellow("gap")}  ${dim(`${note.where} — ${note.detail}`)}`);
+  }
+
+  return out;
+}
 
 function renderSurface(surface: SurfaceReport): string[] {
   const lines: string[] = [];
@@ -243,6 +289,7 @@ function render(report: Report): string {
   // Named only once Layer 2 has actually run. Reporting "no caller" on every
   // default run would advertise a layer most people did not ask for.
   if (report.caller !== "none") out.push(`  ${dim(`behaviour replayed on ${report.caller}`)}`);
+  out.push(...renderBlast(report.blast));
   out.push(`  ${dim("run with --json for the full report")}`, "");
 
   return out.join("\n");
@@ -315,6 +362,7 @@ async function runManifest(
     surface?: string[] | undefined;
     "fields-at"?: string | undefined;
     "exclude-when"?: string[] | undefined;
+    repo?: string | undefined;
   },
   judge: Judge | null,
   behaviour: BehaviourOptions | undefined,
@@ -379,6 +427,7 @@ async function runManifest(
       judge,
       ...(values["fields-at"] !== undefined ? { fieldsKey: values["fields-at"] } : {}),
       ...(excludeWhen.length > 0 ? { excludeWhen } : {}),
+      ...(values.repo === undefined ? {} : { repo: fsRepoSource(values.repo) }),
       ...(behaviour === undefined ? {} : { behaviour }),
     });
 
@@ -492,6 +541,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         name: { type: "string" },
         "fields-at": { type: "string" },
         "exclude-when": { type: "string", multiple: true },
+        repo: { type: "string" },
         since: { type: "string" },
         until: { type: "string" },
         concurrency: { type: "string" },
@@ -596,6 +646,11 @@ GEMINI_API_KEY). Continuing without Layer 2.
     }
   }
 
+  // Built once, before anything branches. Layer 3 reads private code, so it
+  // runs only when a directory was named -- never because one happened to be
+  // the working directory.
+  const repo = values.repo === undefined ? undefined : fsRepoSource(values.repo);
+
   if (positionals[0] === "manifest") {
     return runManifest(positionals[1], positionals[2], values, judge, behaviour);
   }
@@ -616,6 +671,7 @@ GEMINI_API_KEY). Continuing without Layer 2.
       ...(behaviour === undefined ? {} : { behaviour }),
       ...(values.cache !== undefined ? { cacheRoot: values.cache } : {}),
       ...(values.surface !== undefined ? { subpaths: values.surface } : {}),
+      ...(repo === undefined ? {} : { repo }),
     });
 
     process.stdout.write(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : render(report));

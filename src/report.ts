@@ -1,3 +1,6 @@
+import { blastRadius, type BlastTarget } from "./blast/scan.js";
+import type { RepoSource } from "./blast/repo.js";
+import type { BlastResult } from "./blast/taxonomy.js";
 import { present as wireTools, type ToolCaller } from "./behaviour/caller.js";
 import type { Intent } from "./behaviour/intent.js";
 import { runBehaviour, type BehaviourCache, type RunResult } from "./behaviour/run.js";
@@ -89,6 +92,15 @@ export type Report = {
   judge: string;
   /** Which model Layer 2 replayed, or "none" when it did not run. */
   caller: string;
+  /**
+   * Layer 3's result, or null when no repository was supplied.
+   *
+   * Null rather than an empty result, for the reason absence is never empty
+   * anywhere in this codebase: an empty `reaches` means "we looked and nothing
+   * touches you", and that is the opposite of "nobody looked". Only one of
+   * them lets a consumer stop reading.
+   */
+  blast: BlastResult | null;
   generatedAt: string;
 };
 
@@ -134,6 +146,14 @@ export type ReportOptions = {
   dependencyDepth?: number;
   /** Left unset, Layer 2 does not run and no model is ever called. */
   behaviour?: BehaviourOptions;
+  /**
+   * The consumer's own repository, for Layer 3.
+   *
+   * Opt-in by being supplied, like Layer 2's caller. This is the only layer
+   * that reads private code, so it never runs because something happened to
+   * be on disk.
+   */
+  repo?: RepoSource;
 };
 
 /**
@@ -377,7 +397,45 @@ export async function buildReport(options: ReportOptions): Promise<Report> {
     missingDependencies: [...new Set([...from.missing, ...to.missing])],
     judge,
     caller: options.behaviour?.caller ?? null,
+    ...(options.repo === undefined ? {} : { repo: options.repo }),
   });
+}
+
+/**
+ * Every finding in the report, reduced to what Layer 3 can look for.
+ *
+ * Structural changes and prose findings both reduce to the same three fields,
+ * which is the point: what reaches a consumer does not depend on which rule
+ * raised it. A scanner that switched on rule names would need editing every
+ * time a rule was added.
+ *
+ * De-duplicated, because one parameter can be named by a structural change and
+ * a prose finding at once, and scanning a repo twice for the same word produces
+ * two identical reaches and no extra information.
+ */
+function blastTargetsFor(surfaces: readonly SurfaceReport[]): BlastTarget[] {
+  const seen = new Map<string, BlastTarget>();
+
+  const add = (surface: string, tool: string, target: string): void => {
+    const key = `${surface} ${target}`;
+    if (seen.has(key)) return;
+    // `tool.param` -> the parameter; a bare tool name -> no parameter. Split on
+    // the first dot only, so a nested `tool.opts.retries` keeps its path.
+    const rest = target.startsWith(`${tool}.`) ? target.slice(tool.length + 1) : undefined;
+    seen.set(key, { label: target, surface, tool, ...(rest === undefined ? {} : { param: rest }) });
+  };
+
+  for (const s of surfaces) {
+    for (const c of s.comparison.diff?.changes ?? []) add(s.subpath, c.tool, c.target);
+    for (const f of s.prose.findings) add(s.subpath, f.tool, f.target);
+    for (const f of s.behaviour?.findings ?? []) {
+      // Behavioural targets are `tool` or `tool.field`; the tool is the head.
+      const tool = f.target.split(".")[0] ?? f.target;
+      if (tool.length > 0 && tool !== "(any)") add(s.subpath, tool, f.target);
+    }
+  }
+
+  return [...seen.values()];
 }
 
 /**
@@ -394,6 +452,8 @@ function foldReport(input: {
   missingDependencies: string[];
   judge: Judge | undefined;
   caller: ToolCaller | null;
+  /** The consumer's repo, when Layer 3 was asked for. */
+  repo?: RepoSource | undefined;
 }): Report {
   const { subject, surfaces, missingDependencies, judge } = input;
 
@@ -417,6 +477,23 @@ function foldReport(input: {
     // was measured". "none" therefore covers not asked for, asked for with no
     // key, and asked for but nothing to ask about.
     caller: surfaces.some((s) => s.behaviour !== null) ? (input.caller?.id ?? "none") : "none",
+    // Layer 3 runs last, on the findings the earlier layers produced. It is the
+    // only layer that reads private code, so it runs only when a repo was
+    // handed over — never because one happened to be the working directory.
+    //
+    // The affected version is the newer side, which is where every finding in
+    // this report was measured. A wider window is a property of a history walk,
+    // not of one pair, and claiming one here would assert a range nobody
+    // checked.
+    blast:
+      input.repo === undefined
+        ? null
+        : blastRadius({
+            repo: input.repo,
+            package: subject.package,
+            affectedVersions: [subject.to],
+            targets: blastTargetsFor(surfaces),
+          }),
     generatedAt: new Date().toISOString(),
   };
   report.headline = headlineFor(report);
@@ -462,6 +539,8 @@ export type ManifestReportOptions = {
   judge?: Judge | null;
   /** Left unset, Layer 2 does not run and no model is ever called. */
   behaviour?: BehaviourOptions;
+  /** The consumer's own repository, for Layer 3. Left unset, nothing is read. */
+  repo?: RepoSource;
 };
 
 export async function buildManifestReport(options: ManifestReportOptions): Promise<Report> {
@@ -502,6 +581,7 @@ export async function buildManifestReport(options: ManifestReportOptions): Promi
     missingDependencies: [],
     judge,
     caller: options.behaviour?.caller ?? null,
+    ...(options.repo === undefined ? {} : { repo: options.repo }),
   });
 }
 
