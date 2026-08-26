@@ -9,6 +9,8 @@ import { behaviourCacheFromEnv } from "./behaviour/run.js";
 import type { Judge } from "./prose/judge.js";
 import { judgeFromEnv } from "./prose/judges.js";
 import { fsRepoSource } from "./blast/repo.js";
+import { planRemedy } from "./remedy/plan.js";
+import type { Remedy } from "./remedy/taxonomy.js";
 import { canClaimUnaffected } from "./blast/taxonomy.js";
 import { pacoteRegistry } from "./registry/npm.js";
 import { vertexFromEnv } from "./vertex.js";
@@ -72,6 +74,8 @@ Options
   --replay              Answer only from recordings. Never calls out, so the
                         run is free and repeats identically.
   --cache <dir>         Where unpacked versions live. Default .stantal/npm
+  --current <version>   history: the version you are on now, so the walk can say
+                        which release to move to. Default: the oldest walked.
   --since <version>     history: start here instead of the first release.
   --until <version>     history: stop here instead of the latest.
   --concurrency <n>     Calls or fetches in flight at once. Layer 2 defaults to
@@ -447,9 +451,76 @@ async function runManifest(
   }
 }
 
+/**
+ * Layer 4, rendered.
+ *
+ * The one section a reader acts on, so it says the version to move to and the
+ * one they would otherwise have reached for. "Upgrade to the latest" is the
+ * advice everyone already gives and nobody takes; the useful number is the
+ * smallest hop that clears the reason they are stuck.
+ */
+function renderRemedy(remedy: Remedy): string {
+  const out: string[] = [""];
+
+  const label: Record<Remedy["kind"], (t: string) => string> = {
+    stay: green,
+    upgrade: green,
+    migrate: yellow,
+    stuck: red,
+    patch: red,
+    fix_locally: yellow,
+    unknown: dim,
+  };
+
+  out.push(`  ${bold("WHAT TO DO")}  ${label[remedy.kind](remedy.kind.replace("_", " "))}`);
+  out.push(`           ${remedy.headline}`);
+
+  if (remedy.target !== null) {
+    out.push("", `    move to  ${bold(remedy.target)}`);
+    if (remedy.latest !== null && remedy.latest !== remedy.target) {
+      // Shown side by side on purpose: the gap between the two is the whole
+      // argument for not simply taking the newest release.
+      out.push(`    latest   ${dim(remedy.latest)}  ${dim("— more change than you asked for")}`);
+    }
+  }
+
+  if (remedy.hold !== undefined) {
+    // A pin nobody revisits is how a consumer gets stranded in the first place,
+    // so the reason is printed as something re-checkable rather than a note to
+    // self.
+    out.push("", `    ${dim(`held at ${remedy.hold.heldAt} until these clear (still present at ${remedy.hold.stillPresentAt}):`)}`);
+    for (const u of remedy.hold.until.slice(0, 6)) {
+      out.push(`      ${u.rule}  ${u.target}  ${dim(u.subpath)}`);
+    }
+    if (remedy.hold.until.length > 6) {
+      out.push(`      ${dim(`... and ${remedy.hold.until.length - 6} more`)}`);
+    }
+  }
+
+  if (remedy.unverifiable.length > 0) {
+    // A release skipped because it could not be read is not a release that was
+    // considered and rejected, and the reader may want to look themselves.
+    out.push(
+      "",
+      `    ${yellow("not verifiable")}  ${dim(`${remedy.unverifiable.length} release(s) could not be read well enough to call clean: ${remedy.unverifiable.slice(0, 5).join(", ")}`)}`,
+    );
+  }
+
+  out.push("");
+  return out.join("\n");
+}
+
 async function runHistory(
   pkg: string | undefined,
-  values: { json?: boolean | undefined; cache?: string | undefined; since?: string | undefined; until?: string | undefined; concurrency?: string | undefined; surface?: string[] | undefined },
+  values: {
+    json?: boolean | undefined;
+    cache?: string | undefined;
+    since?: string | undefined;
+    until?: string | undefined;
+    concurrency?: string | undefined;
+    surface?: string[] | undefined;
+    current?: string | undefined;
+  },
   judge: ReturnType<typeof judgeFromEnv>,
 ): Promise<number> {
   if (pkg === undefined) {
@@ -479,7 +550,18 @@ async function runHistory(
           }),
     });
 
-    process.stdout.write(quiet ? `${JSON.stringify(result, null, 2)}\n` : renderHistory(result));
+    // Layer 4 reads the completed walk and decides. Every fact it needs was
+    // already measured, so it costs nothing and never calls out.
+    const remedy = planRemedy({
+      walk: result,
+      ...(values.current === undefined ? {} : { current: values.current }),
+    });
+
+    process.stdout.write(
+      quiet
+        ? `${JSON.stringify({ ...result, remedy }, null, 2)}\n`
+        : renderHistory(result) + renderRemedy(remedy),
+    );
     return result.summary.distinctFindings > 0 ? 1 : 0;
   } catch (error) {
     process.stderr.write(`stantal: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -550,6 +632,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         "fields-at": { type: "string" },
         "exclude-when": { type: "string", multiple: true },
         repo: { type: "string" },
+        current: { type: "string" },
         since: { type: "string" },
         until: { type: "string" },
         concurrency: { type: "string" },
