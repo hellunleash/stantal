@@ -129,6 +129,62 @@ the API. It is opt-in and **unverified**: nobody has confirmed against the
 live API that it changes anything, so it stays off unless you set it
 yourself.
 
+## In CI
+
+There is a GitHub Action, so the check runs on the pull request that proposes
+the upgrade rather than after someone takes it.
+
+```yaml
+name: Contract check
+on: pull_request
+
+jobs:
+  stantal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: stantal/stantal@v0
+        with:
+          package: "@modelcontextprotocol/server-filesystem"
+          from: "2025.7.1"
+          to: "2025.8.21"
+```
+
+It fails the job when a change would be read differently by a model, writes a
+summary to the run, and exposes `verdict`, `findings`, `reaches` and `report`
+as outputs for a later step.
+
+No key is required. The run works with none, and a key only upgrades findings
+from leads to confirmed — see [The judge](#the-judge).
+
+`repo` defaults to the checkout, so the summary also says which of *your* files
+the findings actually touch. That scan is local, read-only, and never calls out.
+Set `repo: none` to skip it.
+
+| input | default | |
+|---|---|---|
+| `package`, `from`, `to` | — | The dependency and the two versions. |
+| `manifest` | — | Two space-separated sides instead, for a contract that never reached a registry. Each side may list several documents, comma-separated, catalog first. |
+| `surface` | every door | Space-separated subpaths, e.g. `. ./ai-sdk`. |
+| `repo` | `.` | Directory to scan for call sites. `none` to skip. |
+| `fail-on` | `found` | `found`, `unreadable`, or `never`. |
+| `replay` | `false` | Answer only from committed recordings. Cannot call out, so it cannot spend. |
+| `behaviour` | `false` | Also put the contract in front of a model. Costs k calls per request per side. |
+| `version` | pinned | Which release of the CLI to run. |
+
+Two things worth knowing before you turn it on:
+
+**Start with `fail-on: unreadable`.** On an existing dependency the first run
+usually finds real things, and a check that blocks every pull request on day one
+gets switched off by the end of the week. `unreadable` fails only when too
+little could be read to say anything, which is the blind spot worth stopping
+for. Move to `found` once the backlog is clear.
+
+**`replay: true` makes the run free and deterministic.** Recordings are keyed on
+the text of the question, so a check that runs on every pull request asks about
+an unchanged parameter once, ever. Commit `.stantal/judge` and CI never calls
+out at all.
+
 ## For API providers
 
 Run it against a release you have not published yet. Nothing has shipped, so

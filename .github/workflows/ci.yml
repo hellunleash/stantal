@@ -94,3 +94,57 @@ jobs:
             exit 1
           fi
           echo "clean — .env.example carries no key material"
+
+  no-key:
+    name: the first run works with no key
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      # C1: a first `npx stantal` works with no account, no config and no key.
+      # That has been true by design and enforced nowhere, so it has been one
+      # careless `judgeFromEnv()` away from being false at any point.
+      #
+      # Every provider variable is explicitly emptied rather than merely left
+      # unset, so the job still proves something on a runner that has one.
+      - name: A real verdict comes out with every key unset
+        env:
+          ANTHROPIC_API_KEY: ""
+          OPENAI_API_KEY: ""
+          GEMINI_API_KEY: ""
+          GOOGLE_API_KEY: ""
+          GOOGLE_ACCESS_TOKEN: ""
+          STANTAL_VERTEX_PROJECT: ""
+        run: |
+          set -o pipefail
+          report=$(mktemp)
+
+          # Two real published versions of a package that ships tool
+          # descriptors. Exit 1 is the product answering "found", which is a
+          # pass here; only a crash or an unreadable run is a failure.
+          set +e
+          node dist/cli.js @modelcontextprotocol/server-filesystem 2025.7.1 2025.8.21 --json > "$report"
+          status=$?
+          set -e
+
+          if [ "$status" -gt 1 ]; then
+            echo "::error::exit $status with no key — a keyless run must still produce a verdict"
+            head -c 2000 "$report"
+            exit 1
+          fi
+
+          node -e '
+            const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+            if (r.verdict === "unreadable") throw new Error("keyless run read nothing");
+            if (r.judge !== "none") throw new Error(`a judge ran without a key: ${r.judge}`);
+            if (r.caller !== "none") throw new Error(`a caller ran without a key: ${r.caller}`);
+            console.log(`keyless verdict: ${r.verdict}, judge: ${r.judge}, caller: ${r.caller}`);
+          ' "$report"

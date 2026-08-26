@@ -1,0 +1,216 @@
+name: Stantal
+description: Fail a pull request when an upgrade changes what a model reads, not just what a type-checker sees.
+author: Stantal
+
+branding:
+  icon: git-pull-request
+  color: purple
+
+inputs:
+  package:
+    description: The dependency to check. Omit when using `manifest`.
+    required: false
+  from:
+    description: The version currently in use.
+    required: false
+  to:
+    description: The version being taken.
+    required: false
+  manifest:
+    description: >
+      Compare two serialized tool manifests instead of two published versions.
+      Two space-separated sides; each side may list several documents separated
+      by commas, catalog first. Nothing is fetched, so this works on a release
+      that is not published.
+    required: false
+  surface:
+    description: Read one door only, e.g. "." or "./ai-sdk". Space-separated for several.
+    required: false
+  repo:
+    description: >
+      Directory to scan for the call sites a finding reaches. Defaults to the
+      checkout, which is free: the scan is local, read-only and never calls out.
+      Set to "none" to skip it.
+    required: false
+    default: "."
+  fail-on:
+    description: >
+      found — fail on any finding, and on a run that could not read enough (default).
+      unreadable — fail only when too little could be read to say anything.
+      never — always succeed, and report through the outputs.
+    required: false
+    default: found
+  replay:
+    description: >
+      Answer only from recordings committed to the repository. The run cannot
+      call out, so it costs nothing and repeats identically.
+    required: false
+    default: "false"
+  behaviour:
+    description: >
+      Also put the contract in front of a model and compare what it does.
+      Off by default because it costs k calls per request per side.
+    required: false
+    default: "false"
+  version:
+    description: Which release of the CLI to run. Pinned by default, so a new one cannot change a verdict under you.
+    required: false
+    default: "0.0.1"
+
+outputs:
+  verdict:
+    description: clean | prose-risk | structurally-breaking | behaviour-breaking | unreadable
+    value: ${{ steps.run.outputs.verdict }}
+  findings:
+    description: How many contract changes a model would read differently.
+    value: ${{ steps.run.outputs.findings }}
+  reaches:
+    description: How many places in this repository those findings touch.
+    value: ${{ steps.run.outputs.reaches }}
+  report:
+    description: Path to the full JSON report.
+    value: ${{ steps.run.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    # No `setup-node`. The consumer's workflow has already chosen a Node
+    # version, and swapping it under them would be a side effect nobody asked
+    # this action for. The manifest says >=20; say so plainly rather than
+    # failing later inside npx.
+    - name: Check Node
+      shell: bash
+      run: |
+        major=$(node -p "process.versions.node.split('.')[0]")
+        if [ "$major" -lt 20 ]; then
+          echo "::error::stantal needs Node 20 or newer; this runner has $(node -v)"
+          exit 1
+        fi
+
+    - name: Run stantal
+      id: run
+      shell: bash
+      # Every input arrives as an environment variable and none is interpolated
+      # into the script. `${{ }}` inside `run:` is textual substitution before
+      # bash ever sees it, so an input containing a quote or a semicolon would
+      # execute — and on a `pull_request_target` workflow that input can come
+      # from a fork.
+      env:
+        IN_PACKAGE: ${{ inputs.package }}
+        IN_FROM: ${{ inputs.from }}
+        IN_TO: ${{ inputs.to }}
+        IN_MANIFEST: ${{ inputs.manifest }}
+        IN_SURFACE: ${{ inputs.surface }}
+        IN_REPO: ${{ inputs.repo }}
+        IN_FAIL_ON: ${{ inputs.fail-on }}
+        IN_REPLAY: ${{ inputs.replay }}
+        IN_BEHAVIOUR: ${{ inputs.behaviour }}
+        IN_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        args=()
+        if [ -n "$IN_MANIFEST" ]; then
+          # Word-split on purpose: two sides, each a comma-separated list.
+          read -r -a sides <<< "$IN_MANIFEST"
+          if [ "${#sides[@]}" -ne 2 ]; then
+            echo "::error::manifest wants two sides, a before and an after"
+            exit 1
+          fi
+          args+=(manifest "${sides[0]}" "${sides[1]}")
+        else
+          if [ -z "$IN_PACKAGE" ] || [ -z "$IN_FROM" ] || [ -z "$IN_TO" ]; then
+            echo "::error::give either package/from/to, or manifest"
+            exit 1
+          fi
+          args+=("$IN_PACKAGE" "$IN_FROM" "$IN_TO")
+        fi
+
+        if [ -n "$IN_SURFACE" ]; then
+          read -r -a surfaces <<< "$IN_SURFACE"
+          for s in "${surfaces[@]}"; do args+=(--surface "$s"); done
+        fi
+        # Written as `if`, not `[ x ] && y`. Under `set -e` a false test makes the
+        # compound return non-zero and kills the step, so the guard for an
+        # optional flag would abort the run whenever the flag was not set.
+        if [ "$IN_REPO" != "none" ]; then args+=(--repo "$IN_REPO"); fi
+        if [ "$IN_REPLAY" = "true" ]; then args+=(--replay); fi
+        if [ "$IN_BEHAVIOUR" = "true" ]; then args+=(--behaviour); fi
+
+        report="${RUNNER_TEMP:-/tmp}/stantal-report.json"
+
+        # Run ONCE. An earlier draft ran the CLI twice — once for readable
+        # output and once for JSON — which doubles the model spend the moment
+        # `behaviour` is on with a key. The JSON is the source of truth and the
+        # human summary is rendered from it.
+        #
+        # The exit code is the product's answer (0 clean / 1 found / 2
+        # unreadable), not a failure, so it is captured rather than allowed to
+        # end the step. The verdict in the report decides what happens.
+        set +e
+        npx --yes "stantal@${IN_VERSION}" "${args[@]}" --json > "$report"
+        cli_status=$?
+        set -e
+
+        if [ ! -s "$report" ]; then
+          echo "::error::stantal produced no report (exit $cli_status)"
+          exit 1
+        fi
+
+        summary=$(node -e '
+          const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+          const findings = r.surfaces.reduce((n, s) =>
+            n + s.prose.findings.length
+              + (s.comparison.diff ? s.comparison.diff.changes.length : 0)
+              + (s.behaviour ? s.behaviour.findings.length : 0), 0);
+          const reaches = r.blast ? r.blast.reaches.length : 0;
+          const lines = [`### Stantal — \`${r.verdict}\``, "", r.headline, ""];
+          for (const s of r.surfaces) {
+            for (const f of s.prose.findings) lines.push(`- **${f.severity}** \`${f.rule}\` ${f.target} — ${f.headline}`);
+            for (const c of (s.comparison.diff ? s.comparison.diff.changes : []).filter((c) => c.breaking)) {
+              lines.push(`- **breaking** \`${c.rule}\` ${c.target}`);
+            }
+            for (const f of (s.behaviour ? s.behaviour.findings : [])) {
+              lines.push(`- **${f.severity}** \`${f.rule}\` ${f.target} (${f.basis})`);
+            }
+          }
+          if (r.blast) {
+            lines.push("", reaches === 0
+              ? (r.blast.notes.length === 0 ? "Nothing here reaches this repository." : "No reach found, but the scan was incomplete.")
+              : `Reaches this repository in ${reaches} place(s):`);
+            for (const x of r.blast.reaches.slice(0, 10)) lines.push(`- \`${x.evidence}\` — ${x.detail}`);
+          }
+          console.log(JSON.stringify({ verdict: r.verdict, findings, reaches, markdown: lines.join("\n") }));
+        ' "$report")
+
+        verdict=$(node -p "JSON.parse(process.argv[1]).verdict" "$summary")
+        findings=$(node -p "JSON.parse(process.argv[1]).findings" "$summary")
+        reaches=$(node -p "JSON.parse(process.argv[1]).reaches" "$summary")
+
+        {
+          echo "verdict=$verdict"
+          echo "findings=$findings"
+          echo "reaches=$reaches"
+          echo "report=$report"
+        } >> "$GITHUB_OUTPUT"
+
+        node -p "JSON.parse(process.argv[1]).markdown" "$summary" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+        case "$IN_FAIL_ON" in
+          never)
+            exit 0 ;;
+          unreadable)
+            # For a team adopting this mid-flight, a finding is information and
+            # a blind spot is the thing worth stopping for.
+            if [ "$verdict" = "unreadable" ]; then
+              echo "::error::stantal could not read enough to say"
+              exit 1
+            fi
+            exit 0 ;;
+          *)
+            case "$verdict" in
+              clean) exit 0 ;;
+              unreadable) echo "::error::stantal could not read enough to say"; exit 1 ;;
+              *) echo "::error::${verdict} — ${findings} change(s) a model would read differently"; exit 1 ;;
+            esac ;;
+        esac
