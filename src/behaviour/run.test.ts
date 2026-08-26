@@ -315,3 +315,92 @@ describe("behaviourCacheFromEnv", () => {
     expect(behaviourCacheFromEnv({ STANTAL_BEHAVIOUR_CACHE: "maybe" }).mode).toBe("record");
   });
 });
+
+describe("concurrency", () => {
+  /**
+   * Every call here is independent — a cassette is keyed on the caller, the
+   * request and the run index, and no call reads another's result. Awaiting
+   * them one at a time was never carrying anything, and at k calls per intent
+   * per side it is the difference between a run someone waits for and one
+   * nobody does.
+   */
+
+  /** A caller that records how many calls overlap, and can finish out of order. */
+  function overlappingCaller(delayFor: (request: CallRequest) => number) {
+    let inFlight = 0;
+    const seen = { max: 0 };
+    const completed: string[] = [];
+    const caller = {
+      id: "test:concurrent",
+      async call(request: CallRequest): Promise<ToolChoice> {
+        inFlight += 1;
+        seen.max = Math.max(seen.max, inFlight);
+        await new Promise((r) => setTimeout(r, delayFor(request)));
+        inFlight -= 1;
+        completed.push(request.intent);
+        return { kind: "tool_call", tool: "make", arguments: { request: request.intent } };
+      },
+    };
+    return { caller, seen, completed };
+  }
+
+  const two: Intent[] = [
+    { id: "slow", text: "slow one", slice: ["make"], expectsNoCall: false },
+    { id: "fast", text: "fast one", slice: ["make"], expectsNoCall: false },
+  ];
+
+  it("keeps no more calls in flight than it was allowed", async () => {
+    const { caller, seen } = overlappingCaller(() => 5);
+    await runBehaviour({
+      from: { version: "0.7.0", contract: OLD },
+      to: { version: "0.24.0", contract: NEW },
+      intents: two,
+      caller,
+      k: 4,
+      concurrency: 3,
+    });
+    // 8 calls per side are available to schedule, so the ceiling is the only
+    // thing that can hold it to 3. A provider rate-limits, and a corpus fired
+    // all at once turns a slow run into a failed one.
+    expect(seen.max).toBeGreaterThan(1);
+    expect(seen.max).toBeLessThanOrEqual(3);
+  });
+
+  it("stays strictly serial when asked for one at a time", async () => {
+    const { caller, seen } = overlappingCaller(() => 1);
+    await runBehaviour({
+      from: { version: "0.7.0", contract: OLD },
+      to: { version: "0.24.0", contract: NEW },
+      intents: two,
+      caller,
+      k: 2,
+      concurrency: 1,
+    });
+    expect(seen.max).toBe(1);
+  });
+
+  it("attributes runs to the right intent when a later call finishes first", async () => {
+    // The hazard the flat task list introduces: results come back in completion
+    // order, and every sample has to land under the intent it was made for. If
+    // the slicing were wrong these two would swap, and the samples a Wilson
+    // interval is computed over would belong to the other request.
+    const { caller, completed } = overlappingCaller((r) => (r.intent === "slow one" ? 20 : 1));
+    const result = await runBehaviour({
+      from: { version: "0.7.0", contract: OLD },
+      to: { version: "0.24.0", contract: NEW },
+      intents: two,
+      caller,
+      k: 2,
+      concurrency: 4,
+    });
+
+    // The fast intent really did finish first, so the ordering is under test
+    // rather than incidental.
+    expect(completed[0]).toBe("fast one");
+
+    // Each side ran k calls per intent and every one carried its own text.
+    expect(completed.filter((t) => t === "slow one")).toHaveLength(4);
+    expect(completed.filter((t) => t === "fast one")).toHaveLength(4);
+    expect(result.replayed).toBe(2);
+  });
+});

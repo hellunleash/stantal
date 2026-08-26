@@ -116,6 +116,8 @@ export type BehaviourOptions = {
   cache?: BehaviourCache;
   /** Where a seeded corpus is cached, so a history walk pays to generate once. */
   seedCacheDir?: string;
+  /** Calls in flight at once. Left unset, Layer 2's own default applies. */
+  concurrency?: number;
 };
 
 export type ReportOptions = {
@@ -278,6 +280,7 @@ async function behaviourFor(
     caller,
     ...(settings.k !== undefined ? { k: settings.k } : {}),
     ...(settings.cache !== undefined ? { cache: settings.cache } : {}),
+    ...(settings.concurrency !== undefined ? { concurrency: settings.concurrency } : {}),
   });
 }
 

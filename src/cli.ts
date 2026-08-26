@@ -61,7 +61,8 @@ Options
   --cache <dir>         Where unpacked versions live. Default .stantal/npm
   --since <version>     history: start here instead of the first release.
   --until <version>     history: stop here instead of the latest.
-  --concurrency <n>     history: parallel version fetches. Default 4.
+  --concurrency <n>     Calls or fetches in flight at once. Layer 2 defaults to
+                        8; a history walk defaults to 4 version fetches.
   --help, --version
 
 Exit codes
@@ -475,6 +476,21 @@ export async function main(argv: readonly string[]): Promise<number> {
   const judge = values["no-judge"] === true ? null : judgeFromEnv();
   warnIfGeminiBillsACard(judge?.id);
 
+  // Validated before anything branches on it, so it means the same thing on
+  // the walk (version fetches) and on Layer 2 (calls in flight). Strict digits
+  // for the same reason as `--k`: `parseInt` stops at the first non-digit, so
+  // `--concurrency 1e3` would quietly become 1.
+  let concurrency: number | undefined;
+  if (values.concurrency !== undefined) {
+    if (!/^\d+$/.test(values.concurrency) || Number.parseInt(values.concurrency, 10) < 1) {
+      process.stderr.write(
+        `stantal: --concurrency must be a positive whole number, got "${values.concurrency}"\n`,
+      );
+      return 2;
+    }
+    concurrency = Number.parseInt(values.concurrency, 10);
+  }
+
   if (positionals[0] === "history") {
     // Refused rather than quietly ignored. A walk runs the pair logic once per
     // release, so Layer 2 here is k calls per request per side times every
@@ -531,6 +547,7 @@ GEMINI_API_KEY). Continuing without Layer 2.
         caller,
         cache: behaviourCacheFromEnv(),
         ...(k === undefined ? {} : { k }),
+        ...(concurrency === undefined ? {} : { concurrency }),
       };
     }
   }

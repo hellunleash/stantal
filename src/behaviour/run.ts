@@ -35,6 +35,13 @@ export type RunOptions = {
   /** Override the bump-derived choice. Mostly for tests. */
   mode?: SelectionMode;
   cache?: BehaviourCache;
+  /**
+   * How many calls may be in flight at once. See `DEFAULT_CONCURRENCY`.
+   *
+   * 1 restores the original strictly-serial order, which is what a test that
+   * asserts on call sequence wants.
+   */
+  concurrency?: number;
 };
 
 export type RunResult = ComparisonResult & {
@@ -145,6 +152,68 @@ async function runOnce(
   return choice;
 }
 
+/**
+ * How many calls are allowed in flight at once.
+ *
+ * This layer's cost is `k` calls per intent per side, and every one of them was
+ * awaited in turn. A 55-intent corpus at k=3 is 330 calls, which at a few
+ * seconds each is most of an hour — long enough that nobody waits for the
+ * answer, which makes the layer useless whatever it finds.
+ *
+ * They are independent by construction. A cassette is keyed on the caller, the
+ * request and the run index, none of which depend on what any other call did,
+ * and no call reads another's result. So the serial order was never carrying
+ * anything — it was just the shape the loop happened to have.
+ *
+ * 8 rather than unbounded: providers rate-limit, and a corpus fired all at once
+ * turns a slow run into a failed one.
+ */
+export const DEFAULT_CONCURRENCY = 8;
+
+/**
+ * Run tasks with a bounded number in flight, results in the order given.
+ *
+ * Indexed rather than pushed on completion, so the output does not depend on
+ * which call happened to return first. That matters beyond tidiness: these
+ * become the samples a Wilson interval is computed over, and a comparison whose
+ * input order shifted between runs would not be reproducible.
+ */
+async function pooled<T>(tasks: readonly (() => Promise<T>)[], limit: number): Promise<T[]> {
+  const out = new Array<T>(tasks.length) as T[];
+  let next = 0;
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = next;
+      next += 1;
+      if (index >= tasks.length) return;
+      out[index] = await tasks[index]!();
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, tasks.length)) }, worker));
+  return out;
+}
+
+/**
+ * The request for one intent against one contract.
+ *
+ * Pure, so both sides can be built up front and the whole run scheduled as one
+ * pool instead of two sequential halves.
+ */
+function requestFor(tools: ReturnType<typeof present>, intent: Intent): CallRequest {
+  // The key is spread in only when there is history to carry. Setting it to
+  // `[]` would change the serialized request for every single-turn intent
+  // and invalidate every cassette recorded before history existed.
+  return {
+    intent: intent.text,
+    tools,
+    ...(intent.history !== undefined && intent.history.length > 0
+      ? { history: intent.history }
+      : {}),
+  };
+}
+
 async function runSide(
   contract: Contract,
   intents: readonly Intent[],
@@ -152,30 +221,29 @@ async function runSide(
   k: number,
   cache: BehaviourCache | undefined,
   stats: CacheStats,
+  concurrency: number,
 ): Promise<IntentRuns[]> {
   const tools = present(contract);
-  const out: IntentRuns[] = [];
+  const requests = intents.map((intent) => requestFor(tools, intent));
 
-  for (const intent of intents) {
-    // The key is spread in only when there is history to carry. Setting it to
-    // `[]` would change the serialized request for every single-turn intent
-    // and invalidate every cassette recorded before history existed.
-    const request: CallRequest = {
-      intent: intent.text,
-      tools,
-      ...(intent.history !== undefined && intent.history.length > 0
-        ? { history: intent.history }
-        : {}),
-    };
-    const choices: ToolChoice[] = [];
+  // One flat task list across every intent and every run, so the pool stays
+  // saturated. Scheduling per intent would idle the pool at each boundary
+  // waiting for that intent's slowest call.
+  const tasks: Array<() => Promise<ToolChoice | null>> = [];
+  for (const request of requests) {
     for (let run = 0; run < k; run += 1) {
-      const choice = await runOnce(caller, request, run, cache, stats);
-      if (choice !== null) choices.push(choice);
+      tasks.push(() => runOnce(caller, request, run, cache, stats));
     }
-    out.push({ intent, choices });
   }
 
-  return out;
+  const results = await pooled(tasks, concurrency);
+
+  return intents.map((intent, i) => ({
+    intent,
+    // A null is a replay miss: the run is short one sample, the interval
+    // widens, and nothing is claimed that was not measured.
+    choices: results.slice(i * k, i * k + k).filter((c): c is ToolChoice => c !== null),
+  }));
 }
 
 export async function runBehaviour(options: RunOptions): Promise<RunResult> {
@@ -186,8 +254,14 @@ export async function runBehaviour(options: RunOptions): Promise<RunResult> {
   const selected = selectIntents(options.intents, changed, mode);
 
   const stats: CacheStats = { hits: 0, misses: 0, writes: 0 };
-  const before = await runSide(options.from.contract, selected, options.caller, k, options.cache, stats);
-  const after = await runSide(options.to.contract, selected, options.caller, k, options.cache, stats);
+  const concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
+
+  // The sides stay ordered. Each already saturates the pool on its own, so
+  // interleaving them would not raise throughput — total calls and the
+  // in-flight ceiling are what set the wall time — and it would double the load
+  // a provider sees from one run.
+  const before = await runSide(options.from.contract, selected, options.caller, k, options.cache, stats, concurrency);
+  const after = await runSide(options.to.contract, selected, options.caller, k, options.cache, stats, concurrency);
 
   const comparison = compareRuns({
     before: { contract: options.from.contract, runs: before },
