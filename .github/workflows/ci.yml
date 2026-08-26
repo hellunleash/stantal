@@ -56,3 +56,41 @@ jobs:
 
       - name: The bin the manifest promises exists and runs
         run: node dist/cli.js --help
+
+  private:
+    name: nothing private is tracked
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # `docs/` holds the research trail, an unshipped case study, competitor
+      # notes and measured numbers that are not published anywhere. CLAUDE.md
+      # is the working brief. Neither has ever been committed, and the point of
+      # this job is that the claim stops depending on anyone remembering.
+      #
+      # Checked against the index rather than the working tree: a file can sit
+      # on disk ignored and harmless, and the only thing that matters is
+      # whether git is carrying it.
+      - name: No private path is tracked
+        run: |
+          tracked=$(git ls-files -- \
+            'docs/' 'CLAUDE.md' 'AGENTS.md' 'notes/' 'scratch/' '.claude/' \
+            '.env' '.env.local' '*.private.md' '.stantal/')
+          if [ -n "$tracked" ]; then
+            echo "::error::these are tracked and must not be:"
+            echo "$tracked"
+            exit 1
+          fi
+          echo "clean — nothing private is tracked"
+
+      # The template is public and must stay a template. A key pasted into it
+      # is the one mistake that has actually happened on this repo before.
+      - name: The env template carries no key material
+        run: |
+          if [ -f .env.example ] && grep -qE '(sk-[A-Za-z0-9]|AIza[A-Za-z0-9]|pm_live_|gho_)' .env.example; then
+            echo "::error::.env.example contains something shaped like a real credential"
+            exit 1
+          fi
+          echo "clean — .env.example carries no key material"
