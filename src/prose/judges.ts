@@ -187,16 +187,29 @@ function wireFor(config: JudgeConfig, prompt: string): Wire {
   const base = (config.baseUrl ?? DEFAULT_BASE[config.provider]).replace(/\/+$/, "");
 
   switch (config.provider) {
-    case "anthropic":
+    case "anthropic": {
+      // Anthropic through Vertex is a pass-through: the body is Anthropic's own
+      // Messages format, not a Vertex one. Three things differ from the direct
+      // API, and each of them fails the request on its own.
+      //
+      //   the model moves into the URL, so sending it in the body is an error
+      //   `anthropic_version` replaces the `anthropic-version` header
+      //   the credential is an OAuth bearer token, not an API key
+      //
+      // Everything else — the prompt, the reply shape, the reader below — is
+      // identical, which is why the id stays `anthropic:<model>` and a recording
+      // made through one route answers a question asked through the other.
+      const onVertex = config.vertex !== undefined;
       return {
-        url: `${base}/v1/messages`,
+        url: onVertex ? vertexUrl(config.vertex!, model, "anthropic") : `${base}/v1/messages`,
         headers: {
           "content-type": "application/json",
-          "x-api-key": config.apiKey,
-          "anthropic-version": "2023-06-01",
+          ...(onVertex
+            ? { authorization: `Bearer ${vertexToken()}` }
+            : { "x-api-key": config.apiKey, "anthropic-version": "2023-06-01" }),
         },
         body: {
-          model,
+          ...(onVertex ? { anthropic_version: "vertex-2023-10-16" } : { model }),
           max_tokens: 4096,
           system: JUDGE_SYSTEM_PROMPT,
           messages: [{ role: "user", content: prompt }],
@@ -213,6 +226,7 @@ function wireFor(config: JudgeConfig, prompt: string): Wire {
             .join("");
         },
       };
+    }
 
     case "openai":
       return {
@@ -344,19 +358,27 @@ export function judgeFromEnv(env: NodeJS.ProcessEnv = process.env): Judge | null
   const requested = env["STANTAL_JUDGE"]?.toLowerCase();
   if (requested === "none") return null;
 
-  // A configured Vertex project is a credential for gemini, which authenticates
+  // A configured Vertex project is a credential for gemini and for anthropic,
+  // both of which authenticate
   // with an OAuth token rather than an API key there.
   const vertexConfig = vertexFromEnv(env);
   const geminiKey = env["GEMINI_API_KEY"] ?? env["GOOGLE_API_KEY"];
 
+  // Which providers Vertex can authenticate on its own. Not every provider it
+  // serves: openai's models there are the open-weight ones, which are a
+  // different model rather than a different route to the same one, so routing
+  // `openai:` at them would answer under an id that never produced that answer.
+  const VIA_VERTEX: readonly JudgeProvider[] = ["gemini", "anthropic"];
+  const vertexCanServe = (p: JudgeProvider): boolean => vertexConfig !== null && VIA_VERTEX.includes(p);
+
   const candidates: Array<{ provider: JudgeProvider; key: string | undefined }> = [
-    { provider: "anthropic", key: env["ANTHROPIC_API_KEY"] },
+    { provider: "anthropic", key: env["ANTHROPIC_API_KEY"] ?? (vertexCanServe("anthropic") ? "" : undefined) },
     { provider: "openai", key: env["OPENAI_API_KEY"] },
-    { provider: "gemini", key: geminiKey ?? (vertexConfig === null ? undefined : "") },
+    { provider: "gemini", key: geminiKey ?? (vertexCanServe("gemini") ? "" : undefined) },
   ];
 
   const usable = (c: { key: string | undefined; provider: JudgeProvider }): boolean =>
-    c.key !== undefined && (c.key.length > 0 || (c.provider === "gemini" && vertexConfig !== null));
+    c.key !== undefined && (c.key.length > 0 || vertexCanServe(c.provider));
 
   const chosen =
     requested === undefined ? candidates.find(usable) : candidates.find((c) => c.provider === requested);
@@ -370,7 +392,10 @@ export function judgeFromEnv(env: NodeJS.ProcessEnv = process.env): Judge | null
     provider: chosen.provider,
     // Empty on the Vertex path, where the bearer token is the credential.
     apiKey: chosen.key ?? "",
-    ...(chosen.provider === "gemini" && vertexConfig !== null ? { vertex: vertexConfig } : {}),
+    // Only where the key is absent. Somebody who set a real API key asked for
+    // the vendor's own endpoint, and quietly rerouting it to their cloud bill
+    // is not ours to decide.
+    ...(vertexCanServe(chosen.provider) && (chosen.key ?? "").length === 0 ? { vertex: vertexConfig! } : {}),
     ...(model ? { model } : {}),
     ...(baseUrl ? { baseUrl } : {}),
     ...(transport === "http" || transport === "sdk" || transport === "auto" ? { transport } : {}),

@@ -35,6 +35,40 @@ export type VertexConfig = {
 
 export const DEFAULT_VERTEX_LOCATION = "global";
 
+/**
+ * Whose model this is.
+ *
+ * Vertex serves Google's own models and partner models from the same API, under
+ * different publishers and with different request shapes. The publisher decides
+ * the URL, the method and the body, so it travels together rather than being
+ * inferred at three separate call sites.
+ */
+export type VertexPublisher = "google" | "anthropic";
+
+/**
+ * Where each publisher's models actually live.
+ *
+ * Measured, not assumed. Anthropic's models are **not** served from `global`:
+ * listing publisher models there returns an HTML error page rather than a
+ * catalogue, while `us-central1` returns eleven models including the two this
+ * project defaults to. Gemini is the opposite — its current flash models 404
+ * from `us-central1` and resolve from `global`.
+ *
+ * So a single default location is wrong for one publisher whichever value it
+ * takes, and an explicit `global` for anthropic is a mistake rather than a
+ * preference: it cannot work, so it is corrected rather than honoured.
+ */
+const PUBLISHER_LOCATION: Record<VertexPublisher, string> = {
+  google: DEFAULT_VERTEX_LOCATION,
+  anthropic: "us-central1",
+};
+
+export function vertexLocation(config: VertexConfig, publisher: VertexPublisher = "google"): string {
+  const wanted = config.location ?? PUBLISHER_LOCATION[publisher];
+  if (publisher === "anthropic" && wanted === "global") return PUBLISHER_LOCATION.anthropic;
+  return wanted;
+}
+
 export function vertexFromEnv(env: NodeJS.ProcessEnv = process.env): VertexConfig | null {
   const project = env["STANTAL_VERTEX_PROJECT"];
   if (project === undefined || project.length === 0) return null;
@@ -42,14 +76,22 @@ export function vertexFromEnv(env: NodeJS.ProcessEnv = process.env): VertexConfi
   return { project, ...(location ? { location } : {}) };
 }
 
-export function vertexUrl(config: VertexConfig, model: string): string {
-  const location = config.location ?? DEFAULT_VERTEX_LOCATION;
+export function vertexUrl(
+  config: VertexConfig,
+  model: string,
+  publisher: VertexPublisher = "google",
+): string {
+  const location = vertexLocation(config, publisher);
   // The global endpoint has no region prefix; a regional one does.
   const host = location === "global" ? "aiplatform.googleapis.com" : `${location}-aiplatform.googleapis.com`;
+  // Google's models answer `generateContent`. A partner model is passed through
+  // in its own vendor's format, so it answers `rawPredict` — the body is the
+  // vendor's, not Vertex's.
+  const method = publisher === "google" ? "generateContent" : "rawPredict";
   return (
     `https://${host}/v1/projects/${encodeURIComponent(config.project)}` +
-    `/locations/${encodeURIComponent(location)}/publishers/google/models/` +
-    `${encodeURIComponent(model)}:generateContent`
+    `/locations/${encodeURIComponent(location)}/publishers/${publisher}/models/` +
+    `${encodeURIComponent(model)}:${method}`
   );
 }
 
