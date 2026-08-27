@@ -11,6 +11,24 @@ upgrade needs a full re-run.
 
 ## [Unreleased]
 
+### Added
+
+- **`stantal connect`** registers the tool with a coding agent by writing an MCP
+  entry into a config file in the repository — never the home directory, so a
+  mistake cannot reach another project, and the file is committable so one
+  person connecting connects the team. Existing servers in that file are
+  preserved and reported; a config that cannot be parsed is an error rather
+  than something to overwrite. Claude Code, Cursor and VS Code.
+- **`stantal mcp`** is the server itself, over stdio. Four tools:
+  `list_contract_dependencies`, `check_upgrade`, `pin_contract`, `find_onset`.
+  Every optional parameter is documented both on the parameter and in the tool
+  description — this project would flag its own server otherwise.
+- Detection prefers evidence in the repository over a binary on PATH. Several
+  agents installed is not several agents used here, and where nothing in the
+  project says which, the choice is handed back rather than guessed.
+- The MCP entry pins an exact version, never `latest`. A release we publish must
+  not change somebody’s verdict without them taking an upgrade.
+
 ## [0.2.0] - 2026-08-27
 
 ### Added

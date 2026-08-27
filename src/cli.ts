@@ -32,6 +32,9 @@ import { packageDirectory } from "./testkit.js";
 import { applyPatch, planPatch } from "./patch/plan.js";
 import { canApply } from "./patch/taxonomy.js";
 import { renderHtml } from "./verdict/html.js";
+import { AGENTS, agentById } from "./connect/agents.js";
+import { detectAgents, install, runAgent, type DetectedAgent, type InstallResult } from "./connect/install.js";
+import { serveStdio } from "./serve/mcp.js";
 
 /**
  * Rung 1 — the whole product in one command, with nothing installed.
@@ -51,6 +54,8 @@ stantal — know whether an upgrade changes how a model uses your dependency
   stantal check <dir> --against <version> [options]
   stantal pin <package> [options]
   stantal patch <package> <from> [options]
+  stantal connect [options]
+  stantal mcp
 
 Comparing two versions tells you whether to take an upgrade.
 Walking the history tells you which release broke it, and the last one that
@@ -64,6 +69,12 @@ Checking a directory is the provider's gate before publishing: it reads the
 build on disk, fetches the release you name, and tells you what your next
 version does to the models already calling you -- while it still costs
 minutes to fix rather than a deprecation cycle.
+
+Connecting registers this tool with a coding agent, by writing an MCP entry into
+a config file in your repository. That file is committable, so one person
+connecting connects the team, and it is four visible lines to delete if you want
+it gone. The "mcp" subcommand is the server itself, spoken over stdio; you
+rarely run it by hand.
 
 Pinning writes contract tests into your own repository. It reads the version you
 have installed right now, records what the package offers, and leaves a suite
@@ -90,6 +101,11 @@ Options
   --emit-tests          Write contract tests for what this comparison found,
                         pinning the older side so they fail on the upgrade.
   --out <dir>           Where emitted tests go. Default: stantal/
+  --agent <id>          connect: which agent to configure. Detected by default.
+  --run                 connect: also hand the setup prompt to that agent.
+                        Off by default — starting your agent can edit files
+                        and spend tokens, so it is never done on install.
+  --directory <dir>     connect: project root to write into. Default: cwd
   --apply               patch: actually write the edits into node_modules.
                         Off by default; the plan is printed instead.
   --html <file>         Also write the verdict as one self-contained HTML page.
@@ -471,6 +487,118 @@ function emitFromReport(report: Report, out: string | undefined): void {
     generator: `stantal ${ownVersion()}`,
   });
   process.stdout.write(renderWritten(written, report.subject.from));
+}
+
+/**
+ * `stantal connect` — put the server where the upgrade decision is made.
+ *
+ * Writes the MCP entry into a coding agent's project config. The config is a
+ * file in the repository, not in the user's home directory: a global config is
+ * shared by every project on the machine, and a project file is committable, so
+ * one person running this connects the whole team.
+ *
+ * It does not start anyone's agent unless asked. Spawning a coding agent can
+ * edit files and spend tokens, and a tool that does that on install has taken a
+ * decision that was not its to take.
+ */
+function runConnect(
+  values: {
+    agent?: string | undefined;
+    run?: boolean | undefined;
+    json?: boolean | undefined;
+    directory?: string | undefined;
+  },
+): number {
+  const directory = values.directory ?? process.cwd();
+  const version = ownVersion();
+
+  let targets: DetectedAgent[];
+  if (values.agent !== undefined) {
+    const named = agentById(values.agent);
+    if (named === null) {
+      process.stderr.write(
+        `stantal: unknown agent "${values.agent}". Known: ${AGENTS.map((a) => a.id).join(", ")}\n`,
+      );
+      return 2;
+    }
+    targets = [{ agent: named, because: "you named it", strength: "marker" }];
+  } else {
+    targets = detectAgents(directory);
+  }
+
+  if (targets.length === 0) {
+    process.stderr.write(
+      `stantal: no coding agent detected in ${directory}.\n\n` +
+        `Name one directly:\n` +
+        AGENTS.map((a) => `  stantal connect --agent ${a.id}\n`).join("") +
+        `\nOr skip all of this — the CLI needs no setup at all:\n` +
+        `  npx stantal pin <package>\n\n`,
+    );
+    return 2;
+  }
+
+  // Several agents installed on the machine is not several agents used in this
+  // project. Writing three config files into a repository that asked for one is
+  // clutter somebody has to clean up, so the choice is handed back instead.
+  if (targets.length > 1 && targets.every((t) => t.strength === "binary")) {
+    process.stderr.write(
+      `stantal: found more than one agent on this machine, and nothing in ${directory} says which one
+` +
+        `this project uses. Name it:
+
+` +
+        targets.map((t) => `  stantal connect --agent ${t.agent.id}
+`).join("") +
+        `
+`,
+    );
+    return 2;
+  }
+
+  const installed: InstallResult[] = [];
+  for (const { agent } of targets) {
+    try {
+      installed.push(install({ directory, agent, version }));
+    } catch (error) {
+      process.stderr.write(`stantal: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 2;
+    }
+  }
+
+  if (values.json === true) {
+    process.stdout.write(`${JSON.stringify({ directory, version, installed }, null, 2)}\n`);
+    return 0;
+  }
+
+  const out: string[] = [""];
+  for (let i = 0; i < installed.length; i += 1) {
+    const result = installed[i]!;
+    const why = targets[i]?.because ?? "";
+    out.push(`  ${result.action === "added" ? "connected" : "updated"}  ${result.agent.label}`);
+    out.push(`    ${result.file}  — ${why}`);
+    if (result.preserved.length > 0) {
+      // Said out loud. The reason this is worth printing is that it is the
+      // thing a careful person is worried about when a tool edits their config.
+      out.push(`    left alone: ${result.preserved.join(", ")}`);
+    }
+    out.push(`    ${result.agent.next}`);
+    out.push("");
+  }
+
+  out.push(`  No account, no key, no signup. Everything the server does runs on this machine.`);
+  out.push("");
+  process.stdout.write(out.join("\n"));
+
+  if (values.run !== true) return 0;
+
+  // Only past an explicit flag. Even then it is the user's own agent, running
+  // with its own approval prompts intact.
+  for (const { agent } of targets) {
+    const result = runAgent(agent, directory);
+    process.stdout.write(`  ${result.detail}\n`);
+    if (result.ran) return 0;
+  }
+  return 0;
 }
 
 /**
@@ -1043,6 +1171,9 @@ export async function main(argv: readonly string[]): Promise<number> {
         "emit-tests": { type: "boolean" },
         out: { type: "string" },
         apply: { type: "boolean" },
+        agent: { type: "string" },
+        run: { type: "boolean" },
+        directory: { type: "string" },
         html: { type: "string" },
         "no-judge": { type: "boolean" },
         behaviour: { type: "boolean" },
@@ -1170,6 +1301,15 @@ GEMINI_API_KEY). Continuing without Layer 2.
 
   if (positionals[0] === "manifest") {
     return runManifest(positionals[1], positionals[2], values, judge, behaviour);
+  }
+
+  if (positionals[0] === "mcp") {
+    await serveStdio({ judge, version: ownVersion() });
+    return 0;
+  }
+
+  if (positionals[0] === "connect") {
+    return runConnect(values);
   }
 
   if (positionals[0] === "patch") {
