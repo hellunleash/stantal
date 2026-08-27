@@ -11,6 +11,8 @@ upgrade needs a full re-run.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-27
+
 ### Added
 
 - **`--html <file>`** writes the verdict as one self-contained page. No script,
