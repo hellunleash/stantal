@@ -11,6 +11,8 @@ upgrade needs a full re-run.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-27
+
 ### Added
 
 - **`--publish <url>`** sends a verdict to a host and prints a link to it. Layer
