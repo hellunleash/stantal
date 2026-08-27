@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { extractFromModule } from "./module.js";
 import { memoryPackageSource, type PackageSource } from "./package-source.js";
+import { isEvidencedAbsence } from "../contract/surface.js";
 
 /**
  * Fixtures here are generic, hand-written packages written to exercise one
@@ -274,5 +275,33 @@ describe("extractFromModule, when the surface is not there", () => {
   test("an unparseable entry is a reading failure, not a finding", () => {
     const result = extract({ "dist/pack.js": "export const = ;;;" });
     expect(result).toMatchObject({ present: false, absence: { reason: "unparseable" } });
+  });
+});
+
+describe("a JSON entry point", () => {
+  test("is an evidenced absence, not a failed read", () => {
+    // Packages very commonly export "./package.json". A manifest genuinely
+    // holds no tool descriptors, so that is a fact about the file rather than a
+    // gap in our reading. Reported as unparseable it becomes a withheld claim,
+    // and one such door was enough to turn a whole comparison into
+    // "unreadable" — found by running this tool against its own releases.
+    const result = extractFromModule({
+      package: "@example/tools",
+      version: "2.0.0",
+      subpath: "./package.json",
+      source: packageOf({
+        "package.json": JSON.stringify({
+          name: "@example/tools",
+          version: "2.0.0",
+          exports: { ".": "./dist/index.js", "./package.json": "./package.json" },
+        }),
+        "dist/index.js": "export const x = 1;",
+      }),
+    });
+
+    expect(result.present).toBe(false);
+    if (result.present) return;
+    expect(result.absence.reason).toBe("no_descriptors");
+    expect(isEvidencedAbsence(result.absence.reason)).toBe(true);
   });
 });

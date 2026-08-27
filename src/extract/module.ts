@@ -447,6 +447,13 @@ export function extractFromModule(options: ModuleExtractOptions): SurfaceResult 
   const entry = resolveEntryPoint(source, query);
   if (!entry.found) return absent(entry.reason, entry.candidates.length > 0 ? entry.candidates : [subpath]);
 
+  // A JSON entry point is not a failed read. Packages very commonly export
+  // "./package.json", and a manifest genuinely holds no tool descriptors — that
+  // is a fact about the file rather than a gap in our reading, so it must be an
+  // evidenced absence. Reported as unparseable it becomes a withheld claim, and
+  // one such door was enough to turn a whole comparison into "unreadable".
+  if (/.json$/i.test(entry.path)) return absent("no_descriptors", [entry.path]);
+
   const graph = new ModuleGraph(query);
   const entryModule = graph.load(source, entry.path);
   if (entryModule === null) return absent("unparseable", [entry.path]);
