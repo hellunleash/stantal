@@ -11,6 +11,34 @@ upgrade needs a full re-run.
 
 ## [Unreleased]
 
+### Added
+
+- **Contract tests you keep.** `stantal pin <package>` reads the version you
+  have installed and writes a Vitest suite that records what the package offers
+  today. It passes now and fails the day an upgrade takes any of it away. The
+  suite reads the contract statically out of `node_modules`, so it never
+  reaches the network and never executes the package it is checking.
+- `--emit-tests` on a version comparison writes the same kind of suite from
+  what the comparison found, pinning the older side so the tests fail on the
+  upgrade rather than passing quietly.
+- `--out <dir>` sets where emitted tests go. Default `stantal/`, kept apart
+  from hand-written tests so a regenerate never overwrites someone's edits.
+- `stantal/testkit`, the runtime the generated tests import: `loadContract`,
+  `findTool`, `findParam`, `documentsParam`.
+- A library entry point. `Report`, `Contract`, the taxonomies and the layer
+  functions are importable from `stantal`; everything else stays internal.
+
+### Notes
+
+- An assertion is verified against the contract it pins before it is written.
+  A finding proposes a test and the contract confirms it — a generated test that
+  fails on a version where nothing is wrong is deleted unread, and it takes the
+  real findings in the same file with it.
+- Only findings whose meaning has been checked earn a test. An unconfirmed
+  finding is a line in a report and never a file in someone's repository.
+- A door whose schema could not be read gets no parameter assertions, and a door
+  with nothing to pin is skipped rather than written empty.
+
 ## [0.1.0] - 2026-08-26
 
 The first release with a stable interface worth using. `0.0.0` and `0.0.1` were

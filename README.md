@@ -312,7 +312,7 @@ silently dropped.
 
 ## Status
 
-Early development. The name is reserved on npm and the code runs, but nothing
+Early development. `0.1.0` is published and every layer below runs, but nothing
 about the CLI's interface is stable yet. See [CHANGELOG.md](CHANGELOG.md).
 
 | | |
@@ -323,7 +323,10 @@ about the CLI's interface is stable yet. See [CHANGELOG.md](CHANGELOG.md).
 | ✅ | Layer 1 — prose comparison, with an optional model judge |
 | ✅ | CLI, and the release-history walk |
 | ✅ | Layer 2 — behavioural comparison, single and multi-turn |
-| ⬜ | Verdict URLs, CI check, blast radius |
+| ✅ | Layer 3 — which of your own call sites a finding reaches |
+| ✅ | Layer 4 — which release to move to, or why there is none |
+| ✅ | GitHub Action, and the provider-side gate: `check` and `manifest` |
+| ⬜ | Verdict URLs — a report you can hand to someone else |
 
 **What Layer 2 can and cannot say.** A request may carry prior turns, so a
 failure that only appears once a conversation is under way is reachable — some

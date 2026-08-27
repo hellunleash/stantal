@@ -3,6 +3,17 @@
   "version": "0.1.0",
   "description": "Tells you whether a model will behave differently after you upgrade a package, before you take the upgrade.",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./testkit": {
+      "types": "./dist/testkit.d.ts",
+      "import": "./dist/testkit.js"
+    },
+    "./package.json": "./package.json"
+  },
   "license": "MIT",
   "author": "hellunleash (https://github.com/hellunleash)",
   "homepage": "https://github.com/hellunleash/stantal#readme",

@@ -24,6 +24,11 @@ import {
   type Report,
   type SurfaceReport,
 } from "./report.js";
+import { assertionsFromContract, assertionsFromReport } from "./emit/assertions.js";
+import { emitTests, type EmitTarget, type WrittenFile } from "./emit/write.js";
+import { extractFromModule } from "./extract/module.js";
+import { exportedSubpaths, fsPackageSource } from "./extract/package-source.js";
+import { packageDirectory } from "./testkit.js";
 
 /**
  * Rung 1 — the whole product in one command, with nothing installed.
@@ -41,6 +46,7 @@ stantal — know whether an upgrade changes how a model uses your dependency
   stantal history <package> [options]
   stantal manifest <before...> <after...> [options]
   stantal check <dir> --against <version> [options]
+  stantal pin <package> [options]
 
 Comparing two versions tells you whether to take an upgrade.
 Walking the history tells you which release broke it, and the last one that
@@ -54,6 +60,12 @@ Checking a directory is the provider's gate before publishing: it reads the
 build on disk, fetches the release you name, and tells you what your next
 version does to the models already calling you -- while it still costs
 minutes to fix rather than a deprecation cycle.
+
+Pinning writes contract tests into your own repository. It reads the version you
+have installed right now, records what the package offers, and leaves a suite
+that passes today and fails the day an upgrade takes any of it away. Nothing is
+fetched, the package is never executed, and the tests keep working whether or
+not you ever run this tool again.
 
 Each side of the manifest form takes a comma-separated list of documents, catalog
 first, because a contract is often split - schemas generated from routes, prose
@@ -71,6 +83,9 @@ Options
   --repo <dir>          Layer 3: which of YOUR call sites a finding reaches.
                         Reads that directory only, never writes, never calls
                         out. Off unless you pass it.
+  --emit-tests          Write contract tests for what this comparison found,
+                        pinning the older side so they fail on the upgrade.
+  --out <dir>           Where emitted tests go. Default: stantal/
   --json                Print the full report as JSON.
   --no-judge            Skip the model judge even if a key is set.
   --behaviour           Also run Layer 2: put the contract in front of a model
@@ -384,6 +399,156 @@ function renderHistory(result: HistoryResult): string {
       : `judged by ${result.judge}`;
   out.push(`  ${dim(judgeNote)}`, `  ${dim("run with --json for the full walk")}`, "");
   return out.join("\n");
+}
+
+/**
+ * Where an emitted suite goes when the caller does not say.
+ *
+ * A directory of our own rather than the project's test folder. Generated files
+ * mixed in with hand-written ones get edited by hand and then silently
+ * overwritten on the next run, and one lost afternoon is enough for someone to
+ * stop using the feature.
+ */
+const DEFAULT_TEST_DIR = "stantal";
+
+function renderWritten(written: readonly WrittenFile[], pinnedAt: string): string {
+  if (written.length === 0) {
+    return [
+      ``,
+      `  no tests written — nothing here could be pinned`,
+      `  a finding earns a test only once its meaning has been checked, and only`,
+      `  when the version being pinned really carries what the finding claims`,
+      ``,
+      ``,
+    ].join("\n");
+  }
+
+  const lines = [``, `  wrote ${written.length} file(s), pinning ${pinnedAt}`, ``];
+  for (const file of written) {
+    lines.push(`    ${file.path}`);
+    lines.push(`      ${file.assertions} assertion(s)  ${file.subpath}`);
+  }
+  lines.push(``);
+  lines.push(`  Run them with your own test command. They pass against ${pinnedAt},`);
+  lines.push(`  and fail when an upgrade takes any of it away.`);
+  lines.push(``);
+  lines.push(``);
+  return lines.join("\n");
+}
+
+/**
+ * Emit contract tests from a comparison.
+ *
+ * Pins the *older* side. The findings decide what is worth pinning; the older
+ * contract decides what may be claimed about it. Both halves are needed — the
+ * findings alone would write assertions that were never true, and the contract
+ * alone would write hundreds nobody reads.
+ */
+function emitFromReport(report: Report, out: string | undefined): void {
+  const targets: EmitTarget[] = report.surfaces
+    .filter((surface) => surface.from.present)
+    .map((surface) => ({
+      package: report.subject.package,
+      subpath: surface.subpath,
+      version: report.subject.from,
+      // One surface at a time, so an assertion can never be attributed to the
+      // wrong door on its way into a filename.
+      assertions: assertionsFromReport({ ...report, surfaces: [surface] }),
+    }));
+
+  const written = emitTests({
+    directory: out ?? DEFAULT_TEST_DIR,
+    targets,
+    generator: `stantal ${ownVersion()}`,
+  });
+  process.stdout.write(renderWritten(written, report.subject.from));
+}
+
+/**
+ * `stantal pin <package>` — write contract tests for what is installed now.
+ *
+ * The only command here that writes into the user's repository, and the only
+ * one that needs no second version, no registry and no network. It reads what
+ * is installed, records what the package offers, and leaves behind a suite that
+ * fails the day a release quietly drops any of it.
+ *
+ * Deliberately not a comparison. Most people who should run this have not hit a
+ * problem yet and have no second version in mind, and asking for one would make
+ * the safe move the harder one.
+ */
+function runPin(
+  pkg: string | undefined,
+  values: {
+    surface?: string[] | undefined;
+    out?: string | undefined;
+    json?: boolean | undefined;
+  },
+): number {
+  if (pkg === undefined) {
+    process.stderr.write(`stantal: pin wants a package name.\n\n  stantal pin @scope/example-sdk\n\n`);
+    return 2;
+  }
+
+  const directory = packageDirectory(pkg);
+  if (directory === null) {
+    process.stderr.write(
+      `stantal: ${pkg} is not installed under any node_modules above ${process.cwd()}.\n` +
+        `Contract tests pin the version you actually run, so install it first.\n`,
+    );
+    return 2;
+  }
+
+  const source = fsPackageSource(directory);
+  const manifest = source.packageJson();
+  if (manifest === null) {
+    process.stderr.write(`stantal: ${directory} has no readable package.json\n`);
+    return 2;
+  }
+
+  const version = typeof manifest["version"] === "string" ? manifest["version"] : "unknown";
+  const subpaths = values.surface ?? exportedSubpaths(manifest);
+
+  const targets: EmitTarget[] = [];
+  const unreadable: string[] = [];
+  for (const subpath of subpaths) {
+    const result = extractFromModule({ package: pkg, version, subpath, source });
+    if (!result.present) {
+      // Named, never silently skipped. "We could not read this door" and "this
+      // door has nothing in it" are opposite claims, and only one of them means
+      // there is nothing to protect.
+      unreadable.push(subpath);
+      continue;
+    }
+    targets.push({
+      package: pkg,
+      subpath,
+      version,
+      assertions: assertionsFromContract(result.contract, subpath, result.notes),
+    });
+  }
+
+  const written = emitTests({
+    directory: values.out ?? DEFAULT_TEST_DIR,
+    targets,
+    generator: `stantal ${ownVersion()}`,
+  });
+
+  if (values.json === true) {
+    process.stdout.write(`${JSON.stringify({ package: pkg, version, written, unreadable }, null, 2)}\n`);
+    return written.length === 0 ? 2 : 0;
+  }
+
+  process.stdout.write(`\n  ${pkg}@${version}\n`);
+  process.stdout.write(renderWritten(written, `${pkg}@${version}`));
+  if (unreadable.length > 0) {
+    process.stdout.write(`  could not read: ${unreadable.join(", ")}\n`);
+    process.stdout.write(`  nothing is pinned there, which is not the same as nothing being there\n\n`);
+  }
+
+  // Nothing written and nothing readable is a failure to do the job, not a
+  // clean result. Exiting 0 here would let a CI step that pins a package pass
+  // while protecting nothing at all.
+  return written.length === 0 ? 2 : 0;
 }
 
 /**
@@ -716,6 +881,8 @@ export async function main(argv: readonly string[]): Promise<number> {
       options: {
         surface: { type: "string", multiple: true },
         json: { type: "boolean" },
+        "emit-tests": { type: "boolean" },
+        out: { type: "string" },
         "no-judge": { type: "boolean" },
         behaviour: { type: "boolean" },
         k: { type: "string" },
@@ -844,6 +1011,10 @@ GEMINI_API_KEY). Continuing without Layer 2.
     return runManifest(positionals[1], positionals[2], values, judge, behaviour);
   }
 
+  if (positionals[0] === "pin") {
+    return runPin(positionals[1], values);
+  }
+
   const [pkg, from, to] = positionals;
   if (pkg === undefined || from === undefined || to === undefined) {
     process.stderr.write(`${USAGE}\n`);
@@ -864,6 +1035,7 @@ GEMINI_API_KEY). Continuing without Layer 2.
     });
 
     process.stdout.write(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : render(report));
+    if (values["emit-tests"] === true) emitFromReport(report, values.out);
     return exitCodeFor(report.verdict);
   } catch (error) {
     // Anything that stops us reading is exit 2, never a verdict. A tool that
