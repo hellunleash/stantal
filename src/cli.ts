@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
@@ -31,6 +31,7 @@ import { exportedSubpaths, fsPackageSource } from "./extract/package-source.js";
 import { packageDirectory } from "./testkit.js";
 import { applyPatch, planPatch } from "./patch/plan.js";
 import { canApply } from "./patch/taxonomy.js";
+import { renderHtml } from "./verdict/html.js";
 
 /**
  * Rung 1 — the whole product in one command, with nothing installed.
@@ -91,6 +92,9 @@ Options
   --out <dir>           Where emitted tests go. Default: stantal/
   --apply               patch: actually write the edits into node_modules.
                         Off by default; the plan is printed instead.
+  --html <file>         Also write the verdict as one self-contained HTML page.
+                        Nothing is fetched when it is opened, so it can be
+                        forwarded to someone who will not run what you send.
   --json                Print the full report as JSON.
   --no-judge            Skip the model judge even if a key is set.
   --behaviour           Also run Layer 2: put the contract in front of a model
@@ -470,6 +474,24 @@ function emitFromReport(report: Report, out: string | undefined): void {
 }
 
 /**
+ * Write the verdict as a page, and say where it went.
+ *
+ * A failure to write it is reported and never fatal. The verdict is the
+ * product's answer and it has already been printed; losing the exit code over
+ * a full disk or a bad path would replace a real result with an unrelated one.
+ */
+function writeHtmlVerdict(report: Report, path: string): void {
+  try {
+    writeFileSync(path, renderHtml({ report, generator: `stantal ${ownVersion()}` }), "utf8");
+    process.stdout.write(`  verdict written to ${path}\n\n`);
+  } catch (error) {
+    process.stderr.write(
+      `stantal: could not write ${path}: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
+}
+
+/**
  * `stantal patch <package> <from>` — put the deleted prose back.
  *
  * The `patch` remedy from Layer 4, made real. When every published release
@@ -696,6 +718,7 @@ async function runCheck(
   directory: string | undefined,
   values: {
     json?: boolean | undefined;
+    html?: string | undefined;
     against?: string | undefined;
     surface?: string[] | undefined;
     cache?: string | undefined;
@@ -742,6 +765,7 @@ async function runCheck(
     });
 
     process.stdout.write(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : render(report));
+    if (values.html !== undefined) writeHtmlVerdict(report, values.html);
     return exitCodeFor(report.verdict);
   } catch (error) {
     process.stderr.write(`stantal: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -763,6 +787,7 @@ async function runManifest(
     json?: boolean | undefined;
     name?: string | undefined;
     surface?: string[] | undefined;
+    html?: string | undefined;
     "fields-at"?: string | undefined;
     "exclude-when"?: string[] | undefined;
     repo?: string | undefined;
@@ -835,6 +860,7 @@ async function runManifest(
     });
 
     process.stdout.write(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : render(report));
+    if (values.html !== undefined) writeHtmlVerdict(report, values.html);
     return exitCodeFor(report.verdict);
   } catch (error) {
     process.stderr.write(`stantal: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -1017,6 +1043,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         "emit-tests": { type: "boolean" },
         out: { type: "string" },
         apply: { type: "boolean" },
+        html: { type: "string" },
         "no-judge": { type: "boolean" },
         behaviour: { type: "boolean" },
         k: { type: "string" },
@@ -1173,6 +1200,7 @@ GEMINI_API_KEY). Continuing without Layer 2.
     });
 
     process.stdout.write(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : render(report));
+    if (values.html !== undefined) writeHtmlVerdict(report, values.html);
     if (values["emit-tests"] === true) emitFromReport(report, values.out);
     return exitCodeFor(report.verdict);
   } catch (error) {

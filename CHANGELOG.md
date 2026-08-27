@@ -13,6 +13,11 @@ upgrade needs a full re-run.
 
 ### Added
 
+- **`--html <file>`** writes the verdict as one self-contained page. No script,
+  no stylesheet, no font and no image is fetched when it is opened, because a
+  verdict gets forwarded into places with no network and read by people who are
+  right not to run what a stranger sends them. Every finding prints the quote it
+  rests on, and withheld claims are shown rather than dropped.
 - **The verdict lands on the pull request.** The Action now posts it as a
   comment and edits that same comment on every push, rather than adding a new
   one. It runs even when the check failed the job, which is the case where
