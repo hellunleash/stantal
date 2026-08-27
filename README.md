@@ -1,263 +1,104 @@
 <h1 align="center">Stantal</h1>
 
 <p align="center">
-  <b>Your tests pass. Your types check. The model still gets it wrong.</b><br/>
-  Stantal finds the upgrade that did it.
+  <b>They didn't file a ticket. They just left.</b><br/>
+  Find the release that broke how an AI calls your dependency.
 </p>
 
 <p align="center">
   <a href="https://github.com/hellunleash/stantal/actions/workflows/ci.yml"><img alt="ci" src="https://img.shields.io/github/actions/workflow/status/hellunleash/stantal/ci.yml?branch=main&style=flat-square&label=ci" /></a>
   <a href="https://www.npmjs.com/package/stantal"><img alt="npm" src="https://img.shields.io/npm/v/stantal?style=flat-square&color=cb3837&logo=npm" /></a>
-  <img alt="status" src="https://img.shields.io/badge/status-early%20development-orange?style=flat-square" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" />
-  <img alt="typescript" src="https://img.shields.io/badge/TypeScript-strict-3178c6?style=flat-square&logo=typescript&logoColor=white" />
   <img alt="node" src="https://img.shields.io/badge/node-%3E%3D20-339933?style=flat-square&logo=nodedotjs&logoColor=white" />
 </p>
 
 ---
 
-`npm install` succeeds. `tsc` exits 0. Your tests pass. The wire returns `200`.
-And your product quietly stops working.
+## Start here
 
-When the consumer of an API is a language model, the tool descriptions *are* the
-contract. Deleting a sentence of prose is a breaking change with no type
-signature. Nothing in your toolchain is looking at it.
+**Paste this into Claude Code, Cursor or Codex:**
 
-Most of the time the answer is *"this one is fine, take it."* That is the point.
-Everyone already tells stranded users to upgrade. They don't, because nobody can
-tell them whether the new version breaks something else.
+> Set up stantal in this repo. Run `npx stantal connect`, then do what it prints.
+> It needs no account and no API key. Tell me what it found.
 
-## Install
+That is the whole setup. Your agent does the rest.
+
+**Prefer a terminal?** Same thing, one line:
 
 ```bash
-npx stantal <package> <from> <to>
+npx stantal connect
 ```
 
-No account, no setup, nothing to configure.
-
-## Usage
-
 ```
-$ npx stantal @scope/example-sdk 1.4.0 1.5.0
+  connected  Claude Code
+    .mcp.json  — left alone: github
 
-  @scope/example-sdk · 1.4.0 → 1.5.0
+  2 of your dependencies give an AI tools it can call:
+    @modelcontextprotocol/server-filesystem  14 tools
+    tavily-mcp                                5 tools
 
-  VERDICT  prose-risk
-           `target` is optional, has no description, and the tool
-           description never says when to pass it.
+  Ask your agent:  pin my contract dependencies with stantal
 
-  ./pack  2 tool(s)
-    medium  undocumented_optional  build.target  unconfirmed
-      `target` is optional, has no description, and the tool description
-      never says when to pass it
-
-  run with --json for the full report
+  No account, no key, no signup. Everything above ran on this machine.
 ```
 
-Exit codes: `0` clean, `1` something to look at, `2` could not read enough to say.
+Nothing to install, no config to write, no signup. It reads what you already
+have.
 
-### Reading a surface on its own
+---
 
-A package can open several doors — an MCP server, a host tool pack, a framework
-shim — and they do not always agree. Each is read and compared separately.
+## What this is for
+
+An update changes one sentence in a package's tool descriptions. No error. No
+failed build. No version marked breaking. The AI calling it starts getting it
+wrong, a feature quietly stops working, and nobody tells you.
+
+Types don't catch it. Tests don't catch it. Semver doesn't describe it. When the
+thing calling an API is a model, **the descriptions are the contract**, and
+deleting a sentence is a breaking change with no signature.
+
+We checked 22 popular packages across 487 releases: **168 changes** a model would
+read differently, and **145** of them broke nothing you could have tested for.
+
+---
+
+## The four things you will actually use
+
+### 1. Lock in what a package does today
 
 ```bash
-npx stantal @scope/example-sdk 1.4.0 1.5.0 --surface ./pack
+npx stantal pin @acme/sdk
 ```
 
-### Which of your own files it touches
+Writes a test file into your repo recording what that package offers now. It
+passes today and fails the day an update takes any of it away. Nothing to
+maintain — you own the file, and it keeps working whether or not you ever run
+this again.
 
-A finding is a fact about the package and the same fact for everyone. Whether it
-reaches *you* is a different question, and usually a much shorter answer.
+### 2. Should I take this update?
 
 ```bash
-npx stantal @scope/example-sdk 1.4.0 1.5.0 --repo .
+npx stantal @acme/sdk 1.4.0 1.5.0
 ```
 
 ```
-  reaches your code in 2 place(s)  118 file(s) scanned
-    dependency       @scope/example-sdk
-      package.json (dependencies) — "^1.5.0" admits 1 affected version(s)
-    param_reference  build.target
-      src/agent.ts:42 — names `target` in a file that uses `build`
-```
-
-It reads that directory and nothing else, never writes, and never calls out. A
-finding on a door you do not import is filtered out with the reason, and a
-directory it could not read properly says so rather than reporting nothing.
-
-### Which release to move to
-
-Walking the history says when a defect entered. Passing the version you are on
-says what to do about it.
-
-```bash
-npx stantal history @scope/example-sdk --current 1.4.0
-```
-
-```
-  WHAT TO DO  upgrade
-     1.9.0 is the nearest release clean of 2 findings (latest is 2.3.0)
-
-    move to  1.9.0
-    latest   2.3.0  — more change than you asked for
-```
-
-The nearest clean release, never simply the latest: twenty releases of drift is
-not one upgrade. If no release is clean it says so instead of naming one, and if
-a release could not be read it is skipped rather than recommended.
-
-### The judge
-
-Findings that depend on meaning rather than text are marked `unconfirmed` until a
-model confirms them. Set any one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or
-`GEMINI_API_KEY` and they get checked. No key is a normal run, not an error.
-
-The judge answers a closed question about one finding at a time, and must quote
-the text it relied on. Quotes are verified against the source, so an invented
-justification is discarded rather than reported.
-
-### Models
-
-The judge (Layer 1) and the behavioural caller (Layer 2) each default to one
-model per provider:
-
-| provider | Layer 1 judge | Layer 2 caller |
-|---|---|---|
-| anthropic | `claude-opus-5` | `claude-sonnet-5` |
-| openai | `gpt-5.4-mini` | `gpt-5.4` |
-| gemini | `gemini-3.6-flash` | `gemini-3.6-flash` |
-
-Pick a provider with `STANTAL_JUDGE` / `STANTAL_CALLER` (either also accepts
-`none`, which turns that layer off regardless of which keys are set), and a
-model with `STANTAL_JUDGE_MODEL` / `STANTAL_CALLER_MODEL`. Both read the same
-three keys — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` (or
-`GOOGLE_API_KEY`) — to decide which providers are even available.
-
-**Gemini is pinned on purpose.** Every judge cassette on disk was recorded
-against `gemini:gemini-3.6-flash`, and the findings this project reports
-replay from those recordings with no key and no network call at all. A newer
-`gemini-3.7-flash` exists and works, but that is not a reason to move the pin.
-Repinning would strand every recording on disk and force the whole judged
-history to be answered again for no benefit. OpenAI's default moved because
-`gpt-4o` was two generations stale, not because gemini needed to catch up to
-it.
-
-**Tested live against the OpenAI API on 2026-08-26**, not exhaustively:
-`gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.5` call tools normally. `gpt-5-mini`
-declined to call a tool at all. The `gpt-5.6` family rejects function tools
-on the chat-completions endpoint outright. That is a spot check on one date,
-not a compatibility matrix — it is more honest, and it will still be correct
-after the next model release, which a matrix would not be.
-
-Each layer caches what it calls out for: `STANTAL_JUDGE_CACHE` and
-`STANTAL_BEHAVIOUR_CACHE` (`record` by default, or `replay`, or `off`; the
-CLI's `--replay` flag is shorthand for `STANTAL_JUDGE_CACHE=replay`).
-`replay` never reaches the network, so a recorded run repeats for free — that
-is how the `gemini-3.6-flash` recordings above stay reproducible with no key
-at all.
-
-**Gemini through Vertex AI.** AI Studio and Vertex serve the same models and
-bill separately; only Vertex draws on Google Cloud credits. Set
-`STANTAL_VERTEX_PROJECT` and both layers route there. It is a transport, not a
-provider — the id stays `gemini:<model>`, so recordings made through one route
-still answer questions asked through the other. Auth is an OAuth token rather
-than an API key: `GOOGLE_ACCESS_TOKEN` if you have one, otherwise the `gcloud`
-CLI is asked. `STANTAL_VERTEX_LOCATION` defaults to `global`, which is where the
-current flash models actually live.
-
-`STANTAL_SERVICE_TIER` (OpenAI only) requests cheaper, slower processing from
-the API. It is opt-in and **unverified**: nobody has confirmed against the
-live API that it changes anything, so it stays off unless you set it
-yourself.
-
-## In CI
-
-There is a GitHub Action, so the check runs on the pull request that proposes
-the upgrade rather than after someone takes it.
-
-```yaml
-name: Contract check
-on: pull_request
-
-jobs:
-  stantal:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: hellunleash/stantal@v0
-        with:
-          package: "@modelcontextprotocol/server-filesystem"
-          from: "2025.7.1"
-          to: "2025.8.21"
-```
-
-It fails the job when a change would be read differently by a model, writes a
-summary to the run, and exposes `verdict`, `findings`, `reaches` and `report`
-as outputs for a later step.
-
-No key is required. The run works with none, and a key only upgrades findings
-from leads to confirmed — see [The judge](#the-judge).
-
-`repo` defaults to the checkout, so the summary also says which of *your* files
-the findings actually touch. That scan is local, read-only, and never calls out.
-Set `repo: none` to skip it.
-
-| input | default | |
-|---|---|---|
-| `package`, `from`, `to` | — | The dependency and the two versions. |
-| `manifest` | — | Two space-separated sides instead, for a contract that never reached a registry. Each side may list several documents, comma-separated, catalog first. |
-| `surface` | every door | Space-separated subpaths, e.g. `. ./ai-sdk`. |
-| `repo` | `.` | Directory to scan for call sites. `none` to skip. |
-| `fail-on` | `found` | `found`, `unreadable`, or `never`. |
-| `replay` | `false` | Answer only from committed recordings. Cannot call out, so it cannot spend. |
-| `behaviour` | `false` | Also put the contract in front of a model. Costs k calls per request per side. |
-| `version` | pinned | Which release of the CLI to run. |
-
-Two things worth knowing before you turn it on:
-
-**Start with `fail-on: unreadable`.** On an existing dependency the first run
-usually finds real things, and a check that blocks every pull request on day one
-gets switched off by the end of the week. `unreadable` fails only when too
-little could be read to say anything, which is the blind spot worth stopping
-for. Move to `found` once the backlog is clear.
-
-**`replay: true` makes the run free and deterministic.** Recordings are keyed on
-the text of the question, so a check that runs on every pull request asks about
-an unchanged parameter once, ever. Commit `.stantal/judge` and CI never calls
-out at all.
-
-## For API providers
-
-Run it against a release you have not published yet. Nothing has shipped, so
-there is nothing to defend. You see which of your changes a model will read
-differently, while it still costs minutes to fix.
-
-```
-$ npx stantal check ./ --against 1.4.0 --surface ./pack
-
-  @scope/example-sdk · 1.4.0 → 1.5.0 (local)
-
   VERDICT  prose-risk
            `target` is optional, has no description, and the tool
            description never says when to pass it.
 ```
 
-It reads the build in your working tree, fetches the release you name, and
-compares. The package name comes from your own `package.json`, so the two
-cannot disagree.
+Exit `0` clean · `1` something to look at · `2` could not read enough to say.
 
-Put it in CI and it runs on the pull request that proposes the change, which is
-the only moment fixing it is cheap.
+Add `--repo .` to also see which of **your** files it touches.
 
-### Which of your users you already stranded
+### 3. Which release broke it, and where can I go?
 
-If something did ship, the walk says when it entered and who is stuck behind it.
+```bash
+npx stantal history @acme/sdk --current 1.4.0
+```
 
 ```
-$ npx stantal history @scope/example-sdk --surface ./pack --current 1.4.0
-
-  undocumented_optional  build.target  ./pack
+  undocumented_optional  build.target
     introduced in 1.5.0, last clean 1.4.0
     31 release(s) affected, still present
 
@@ -266,74 +107,162 @@ $ npx stantal history @scope/example-sdk --surface ./pack --current 1.4.0
      — there is nowhere to upgrade to
 ```
 
-That is the support backlog as a number: the release it entered, the last one
-that was safe, and how long anyone on it has had nowhere to go.
+It names the nearest clean release, never just the latest. If none exists it
+says so rather than inventing one.
 
-## Private code and private registries
+### 4. Put a deleted sentence back
 
-Everything here runs on your machine, and the parts that could talk to anything
-are the parts you turn on.
+```bash
+npx stantal patch @acme/sdk 1.4.0 --apply
+```
 
-**Private registries work with no configuration.** Fetching is `pacote`, which
-is what npm itself uses, so your `.npmrc`, your auth token and your proxy are
-already handled.
+When no released version is clean, this restores the prose into your installed
+copy. Descriptions only — never a schema, a type or a required field. It has to
+find the text exactly once or it refuses.
 
-**A contract that never reaches a registry works too.** `stantal manifest` reads
-files you hand it and fetches nothing, so an internal service that writes its
-tool set to disk is a first-class case rather than a workaround.
+<details>
+<summary>Everything else</summary>
 
-**`--repo` never calls out.** The scan that finds your call sites is a local
-read. Nothing about your source leaves the machine, ever.
+```bash
+npx stantal check ./ --against 1.4.0    # a release you have not published yet
+npx stantal manifest <before> <after>   # a contract that never reached a registry
+npx stantal mcp                         # the MCP server itself, over stdio
+```
 
-**What the optional model layers send, exactly.** With a key set, the judge is
-asked one closed question per candidate, and a question carries three things: a
-tool name, a parameter name, and that tool's description **as shipped in the
-package**. Layer 2 sends the tool names and descriptions, plus a generated
-request string. Neither one sends your source, your repository, your file names
-or your credentials, because neither one is given them.
+Flags worth knowing: `--surface <subpath>` reads one entry point only ·
+`--html <file>` writes the verdict as one shareable page · `--json` prints
+everything · `--replay` answers only from recordings and cannot make a network
+call.
 
-**And you can turn both off.** `--no-judge` skips the judge; `--replay` answers
-only from recordings already on disk and cannot make a network call at all. A CI
-job in replay mode is free, deterministic, and offline.
+</details>
 
-The keyless path is not a degraded mode — it is the default, and it is checked
-in CI on every commit: a job runs the whole tool with every provider variable
-emptied and fails unless a real verdict comes out.
+---
 
-## What it does not do
+## Using your own model
 
-It never runs the package it is reading. Contracts are parsed out of the
-published files, so nothing from an untrusted package is executed on your
-machine.
+**You do not need one.** Everything above runs with no key and no account. That
+is the default, and CI checks it on every commit.
 
-It withholds claims it cannot support. Where extraction could not read part of a
-contract, the affected findings are listed as withheld rather than reported or
-silently dropped.
+A model adds exactly one thing. Some findings are judgement calls — *does this
+sentence really explain this input?* Without a key those are reported as
+`unconfirmed` leads. With one, they get confirmed or dropped.
+
+Set **any one** of these and it is picked up automatically:
+
+```bash
+export ANTHROPIC_API_KEY=...
+export OPENAI_API_KEY=...
+export GEMINI_API_KEY=...
+```
+
+Or put one in a `.env` file in your project — it is read automatically.
+[`.env.example`](.env.example) lists every option with comments.
+
+| provider | judge | behaviour runner |
+|---|---|---|
+| anthropic | `claude-opus-5` | `claude-sonnet-5` |
+| openai | `gpt-5.4-mini` | `gpt-5.4` |
+| gemini | `gemini-3.6-flash` | `gemini-3.6-flash` |
+
+- `STANTAL_JUDGE=none` turns it off even with a key set.
+- `STANTAL_JUDGE_MODEL=...` picks a different model.
+- `STANTAL_VERTEX_PROJECT=my-project` routes Gemini or Claude through Google
+  Cloud instead, so it bills to your cloud account rather than an API key.
+
+**What gets sent:** one closed question per finding, carrying a tool name, a
+parameter name, and that tool's description *as published in the package*. Never
+your source, your file names, or anything about your repository.
+
+<details>
+<summary>Comparing what a model actually does (opt-in)</summary>
+
+`--behaviour` goes further: it shows a model both versions and compares the tool
+calls it makes. Off unless you ask, because it costs several calls per request
+per version. Nothing is executed — no credentials and no side effects, just the
+call the model would have made.
+
+</details>
+
+---
+
+## In CI
+
+```yaml
+name: Contract check
+on: pull_request
+
+jobs:
+  stantal:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hellunleash/stantal@v0
+        with:
+          package: "@acme/sdk"
+          from: "1.4.0"
+          to: "1.5.0"
+```
+
+It posts the verdict as a comment on the pull request and edits that same
+comment on every push. No key required.
+
+| input | default | |
+|---|---|---|
+| `package`, `from`, `to` | — | The dependency and the two versions. |
+| `repo` | `.` | Scan your files for what the findings touch. `none` to skip. |
+| `fail-on` | `found` | `found`, `unreadable`, or `never`. |
+| `comment` | `true` | Post the verdict on the pull request. |
+| `emit-tests` | `false` | Also write the pinned tests. |
+| `replay` | `false` | Answer only from committed recordings. Cannot spend. |
+| `version` | pinned | Which release of the CLI to run. |
+
+**Start with `fail-on: unreadable`.** On an existing dependency the first run
+usually finds real things, and a check that blocks every pull request on day one
+gets switched off by Friday.
+
+---
+
+## If you ship an API
+
+Run it against a release you have not published yet:
+
+```bash
+npx stantal check ./ --against 1.4.0
+```
+
+Nothing has shipped, so there is nothing to defend. You find out which of your
+changes will strand customers while it still costs ten minutes to fix.
+
+Already shipped? `npx stantal history <your-package>` gives you the release it
+entered, the last one that was safe, and how long anyone on it has had nowhere
+to go.
+
+---
+
+## Privacy
+
+- **Nothing leaves your machine unless you ask.** No account, no telemetry.
+- **It never runs the package it reads.** Contracts are parsed out of published
+  files, so nothing from an untrusted package executes on your machine.
+- **`--repo` never calls out.** The scan of your files is a local read.
+- **Private registries already work.** Fetching uses `pacote`, which is what npm
+  itself uses, so your `.npmrc`, auth token and proxy are handled.
+- **`--publish` strips your file paths** before sending, and prints what it
+  removed.
+
+It also withholds claims it cannot support. Where a package could not be fully
+read, the affected findings are listed as withheld rather than reported or
+quietly dropped.
+
+---
 
 ## Status
 
-Early development. `0.1.0` is published and every layer below runs, but nothing
-about the CLI's interface is stable yet. See [CHANGELOG.md](CHANGELOG.md).
-
-| | |
-|---|---|
-| ✅ | Contract extraction, per surface, without executing the package |
-| ✅ | Fetch and unpack published versions |
-| ✅ | Layer 0 — structural comparison |
-| ✅ | Layer 1 — prose comparison, with an optional model judge |
-| ✅ | CLI, and the release-history walk |
-| ✅ | Layer 2 — behavioural comparison, single and multi-turn |
-| ✅ | Layer 3 — which of your own call sites a finding reaches |
-| ✅ | Layer 4 — which release to move to, or why there is none |
-| ✅ | GitHub Action, and the provider-side gate: `check` and `manifest` |
-| ⬜ | Verdict URLs — a report you can hand to someone else |
-
-**What Layer 2 can and cannot say.** A request may carry prior turns, so a
-failure that only appears once a conversation is under way is reachable — some
-are, and they are invisible to a first-turn-only harness, because on turn one
-leaving a field out is the correct answer. What it reports is what *this* model
-did on *this* pair, at the confidence the sample supports. A finding whose two
-rates do not separate is labelled `underpowered` rather than promoted.
+Early development. It runs, it is tested on Linux, Windows and macOS, and the
+interface is not stable yet. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Development
 

@@ -494,6 +494,12 @@ function emitFromReport(report: Report, out: string | undefined): void {
   process.stdout.write(renderWritten(written, report.subject.from));
 }
 
+/** Which provider would settle a judgement call right now, or null for none. */
+function judgeName(): string | null {
+  const judge = judgeFromEnv();
+  return judge === null ? null : judge.id;
+}
+
 /**
  * `stantal connect` — put the server where the upgrade decision is made.
  *
@@ -612,6 +618,18 @@ function runConnect(
   }
   out.push("");
   out.push(`  No account, no key, no signup. Everything above ran on this machine.`);
+
+  // Said here rather than only in a readme. Some findings are judgement calls
+  // and are reported as leads when no model is available to settle them.
+  // Somebody who never learns that reads "unconfirmed" as "they are not sure
+  // this is real", which is close to the opposite of what it means.
+  const provider = judgeName();
+  if (provider === null) {
+    out.push(`  Judgement calls will read "unconfirmed". To have a model settle them, set`);
+    out.push(`  ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY. Your key, your bill.`);
+  } else {
+    out.push(`  Judgement calls will be settled by ${provider}.`);
+  }
   out.push("");
   process.stdout.write(out.join("\n"));
 

@@ -1,6 +1,7 @@
 import { Terminal, type Frame } from "@/components/terminal";
 import { Reveal } from "@/components/reveal";
 import { Copyable } from "@/components/copyable";
+import { CopyablePrompt } from "@/components/copyable-prompt";
 
 /**
  * Every line below was captured from a real run against real published
@@ -78,23 +79,26 @@ export default function Page() {
 
       <Reveal className="mt-12" delay={0.1}>
         <Terminal frames={DEMO} />
-        <Copyable command="npx stantal connect" className="mt-5" />
-        <p className="mt-3 text-sm text-zinc-500">
-          Claude Code, Cursor and VS Code. Takes about a second.
-        </p>
       </Reveal>
 
-      <Reveal className="mt-16">
-        <h3 className="mb-4 text-xs font-semibold uppercase tracking-[0.1em] text-zinc-400 dark:text-zinc-600">
-          Already inside your agent?
+      {/* The prompt leads, because it is the path with nothing to learn. Typing a
+          command means knowing there is a command; pasting a sentence does not. */}
+      <Reveal className="mt-14">
+        <h3 className="mb-1 text-xs font-semibold uppercase tracking-[0.1em] text-zinc-400 dark:text-zinc-600">
+          Paste this into Claude Code, Cursor or Codex
         </h3>
-        <div className="rounded-r-lg border border-l-[3px] border-zinc-200 border-l-violet-500 bg-zinc-50 px-5 py-4 dark:border-zinc-800 dark:border-l-violet-400 dark:bg-zinc-900/50">
-          <p className="text-[15px] leading-relaxed text-zinc-800 dark:text-zinc-200">
-            Install stantal in this repo, then use it to pin every dependency that gives you tools
-            to call. It needs no account and no API key. Tell me what it found.
-          </p>
-        </div>
-        <p className="mt-3 text-sm text-zinc-500">Paste that in instead.</p>
+        <p className="mb-4 text-sm text-zinc-500">Your agent does the rest. About a minute.</p>
+        <CopyablePrompt text="Set up stantal in this repo. Run `npx stantal connect`, then do what it prints. It needs no account and no API key. Tell me what it found." />
+      </Reveal>
+
+      <Reveal className="mt-10">
+        <h3 className="mb-1 text-xs font-semibold uppercase tracking-[0.1em] text-zinc-400 dark:text-zinc-600">
+          Or run it yourself
+        </h3>
+        <p className="mb-4 text-sm text-zinc-500">
+          Claude Code, Cursor and VS Code. Takes about a second.
+        </p>
+        <Copyable command="npx stantal connect" />
       </Reveal>
 
       <Divider />
