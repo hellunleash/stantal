@@ -3,97 +3,147 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Stantal — catch the upgrade that broke your agent</title>
-<meta name="description" content="Your tests pass, your types check, and the model still gets it wrong. Stantal finds the upgrade that did it.">
+<title>Stantal — find the release that stranded your customers</title>
+<meta name="description" content="An API change made the model call it wrong. Nothing errored, nothing was marked breaking, and nobody filed a ticket. Stantal finds it.">
 <style>
-:root{--bg:#fff;--fg:#14161b;--dim:#5b6270;--faint:#8b93a1;--line:#e4e7ec;--card:#f7f8fa;
---accent:#5b3df5;--good:#0a7d33;--warn:#8a5a00;--bad:#b3261e;--code:#f2f3f6}
-@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#0e1014;--fg:#e8eaee;
---dim:#98a0ae;--faint:#6d7686;--line:#232830;--card:#15181e;--accent:#a48bff;--good:#4ade80;
---warn:#e0a33a;--bad:#ff6b5e;--code:#12151a}}
+:root{--bg:#fff;--fg:#101319;--dim:#565e6d;--faint:#8992a1;--line:#e5e8ed;--card:#f7f8fa;
+--accent:#5b3df5;--good:#0a7d33;--bad:#c0392b;--term:#14171d;--termfg:#e6e9ef;--code:#f2f3f6}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#0c0e12;--fg:#eaecf0;
+--dim:#9aa2b1;--faint:#69717f;--line:#20242c;--card:#13161c;--accent:#a48bff;--good:#4ade80;
+--bad:#ff6b5e;--term:#05070a;--termfg:#e6e9ef;--code:#111419}}
 *{box-sizing:border-box}
-html{-webkit-text-size-adjust:100%}
+html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
 body{margin:0;background:var(--bg);color:var(--fg);
-font:16px/1.65 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-main{max-width:46rem;margin:0 auto;padding:4rem 1.25rem 5rem}
-section{margin:0 0 4rem}
-h1{font-size:clamp(1.8rem,5vw,2.6rem);line-height:1.15;letter-spacing:-.02em;margin:0 0 1rem}
-h2{font-size:1.15rem;letter-spacing:-.01em;margin:0 0 .75rem}
-h3{font-size:.78rem;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);
-margin:0 0 .6rem;font-weight:600}
-p{margin:0 0 1rem;color:var(--dim)}
-p.lead{font-size:1.1rem;color:var(--fg)}
-code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-code{font-size:.88em;background:var(--code);padding:.1em .35em;border-radius:4px}
-pre{background:var(--code);border:1px solid var(--line);border-radius:10px;
-padding:1rem 1.1rem;overflow-x:auto;font-size:.85rem;line-height:1.6;margin:0 0 1rem}
-pre code{background:none;padding:0;font-size:inherit}
-.cmd{background:var(--fg);color:var(--bg);border-radius:10px;padding:1rem 1.15rem;
-font-size:1rem;display:flex;align-items:center;gap:.7rem;overflow-x:auto;margin:0 0 .6rem}
-.cmd .p{color:var(--faint);user-select:none}
-.note{font-size:.9rem;color:var(--faint);margin:0 0 2rem}
-.grid{display:grid;gap:.75rem;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr))}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1rem 1.1rem}
-.card h4{margin:0 0 .3rem;font-size:.95rem}
-.card p{margin:0;font-size:.9rem}
-.stat{font-size:2.4rem;font-weight:700;letter-spacing:-.03em;line-height:1;margin:0 0 .2rem}
+font:16px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+-webkit-font-smoothing:antialiased}
+main{max-width:44rem;margin:0 auto;padding:5rem 1.25rem 4rem}
+section{margin:0 0 5rem}
+h1{font-size:clamp(2rem,6vw,3rem);line-height:1.08;letter-spacing:-.033em;margin:0 0 1.25rem;font-weight:700}
+h2{font-size:clamp(1.3rem,3.5vw,1.7rem);line-height:1.2;letter-spacing:-.02em;margin:0 0 1rem;font-weight:650}
+h3{font-size:.75rem;text-transform:uppercase;letter-spacing:.1em;color:var(--faint);margin:0 0 1rem;font-weight:600}
+p{margin:0 0 1.1rem;color:var(--dim)}
+.lead{font-size:1.15rem;line-height:1.55;color:var(--fg)}
+strong{color:var(--fg);font-weight:600}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.87em;
+background:var(--code);padding:.12em .38em;border-radius:4px}
+
+/* the demo window */
+.win{background:var(--term);border-radius:12px;overflow:hidden;margin:0 0 1rem;
+box-shadow:0 1px 2px rgba(0,0,0,.1),0 12px 32px -12px rgba(0,0,0,.35)}
+.bar{display:flex;align-items:center;gap:.45rem;padding:.7rem .9rem;background:rgba(255,255,255,.04)}
+.dot{width:11px;height:11px;border-radius:50%;background:#3a3f4a}
+.bar span{margin-left:.5rem;font:11px ui-monospace,monospace;color:#6b7280}
+.win pre{margin:0;padding:1.1rem 1.2rem;overflow-x:auto;color:var(--termfg);
+font:13px/1.75 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.win .c{color:#8b94a5}.win .g{color:#4ade80}.win .r{color:#ff7b6b}.win .y{color:#f5c451}.win .p{color:#a48bff}
+
+.cmd{background:var(--fg);color:var(--bg);border-radius:10px;padding:1.05rem 1.2rem;
+font:1rem/1 ui-monospace,SFMono-Regular,Menlo,monospace;display:flex;gap:.75rem;
+align-items:center;overflow-x:auto;margin:0 0 .65rem}
+.cmd b{opacity:.4;font-weight:400}
+.note{font-size:.9rem;color:var(--faint);margin:0}
+
+.paste{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent);
+border-radius:0 8px 8px 0;padding:1rem 1.15rem;margin:0 0 .65rem}
+.paste p{margin:0;color:var(--fg);font-size:.95rem;line-height:1.55}
+
+.stats{display:grid;gap:1.75rem;grid-template-columns:repeat(auto-fit,minmax(10rem,1fr));margin:0 0 1.5rem}
+.stat{font-size:2.6rem;font-weight:700;letter-spacing:-.035em;line-height:1;margin:0 0 .35rem}
 .stat.b{color:var(--bad)}
-.stats{display:grid;gap:1.5rem;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));margin:0 0 1.25rem}
-.stats p{font-size:.88rem;margin:0}
-table{border-collapse:collapse;width:100%;font-size:.9rem;margin:0 0 1rem}
-th,td{text-align:left;padding:.5rem .6rem .5rem 0;border-bottom:1px solid var(--line);vertical-align:top}
-th{font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-weight:600}
-td.y{color:var(--good)}td.n{color:var(--bad)}
-hr{border:0;border-top:1px solid var(--line);margin:0 0 3rem}
-footer{border-top:1px solid var(--line);padding-top:1.25rem;color:var(--faint);font-size:.85rem}
-a{color:var(--accent)}
-.tag{display:inline-block;font-size:.72rem;letter-spacing:.05em;text-transform:uppercase;
-color:var(--faint);border:1px solid var(--line);border-radius:999px;padding:.15rem .55rem;margin:0 0 1.25rem}
+.stats p{font-size:.9rem;margin:0;line-height:1.5}
+
+.grid{display:grid;gap:.8rem;grid-template-columns:repeat(auto-fit,minmax(12.5rem,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1.05rem 1.15rem}
+.card h4{margin:0 0 .35rem;font-size:.95rem;font-weight:600}
+.card p{margin:0;font-size:.9rem;line-height:1.5}
+
+table{border-collapse:collapse;width:100%;font-size:.92rem;margin:0 0 1.1rem}
+th,td{text-align:left;padding:.55rem .6rem .55rem 0;border-bottom:1px solid var(--line)}
+th{font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);font-weight:600}
+td.y{color:var(--good);font-weight:500}td.n{color:var(--dim)}
+hr{border:0;border-top:1px solid var(--line);margin:0 0 4rem}
+footer{border-top:1px solid var(--line);padding-top:1.4rem;color:var(--faint);font-size:.87rem}
+footer p{color:var(--faint);margin:0}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.tag{display:inline-block;font-size:.7rem;letter-spacing:.09em;text-transform:uppercase;
+color:var(--faint);border:1px solid var(--line);border-radius:999px;padding:.2rem .6rem;margin:0 0 1.5rem}
 </style>
 </head>
 <body>
 <main>
 
 <section>
-  <span class="tag">Open source · MIT</span>
-  <h1>Your tests pass. Your types check.<br>The model still gets it wrong.</h1>
-  <p class="lead">When the thing calling your API is a language model, the descriptions
-  <em>are</em> the contract. Delete a sentence of guidance and you have shipped a breaking
-  change with no type signature. Nothing in your toolchain is looking at it.</p>
+  <span class="tag">Open source · MIT · no account</span>
+  <h1>They didn't file a ticket.<br>They just left.</h1>
+  <p class="lead">An update changed one sentence in an API's description. No error. No failed
+  build. No version marked breaking. The AI calling it started getting it wrong, the feature
+  quietly stopped working, and the customer went away without saying anything.</p>
+  <p class="lead"><strong>Stantal finds the release that did it.</strong></p>
+</section>
 
-  <div class="cmd"><span class="p">$</span><span>npx stantal connect</span></div>
-  <p class="note">No account. No signup. No API key. It runs on your machine and reports in
-  about a second.</p>
+<section>
+  <h3>What it looks like</h3>
+  <div class="win">
+    <div class="bar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>bash</span></div>
+<pre><span class="c">$</span> npx stantal connect
+
+  <span class="g">connected</span>  Claude Code
+    .mcp.json  <span class="c">— left alone: github</span>
+
+  2 of your dependencies give an AI tools it can call:
+    <span class="p">@modelcontextprotocol/server-filesystem</span>  14 tools
+    <span class="p">tavily-mcp</span>                               5 tools
+
+  <span class="y">Ask your agent:</span>  pin my dependencies with stantal
+
+  <span class="c">No account, no key, no signup. All of that ran on this machine.</span></pre>
+  </div>
+  <div class="cmd"><b>$</b><span>npx stantal connect</span></div>
+  <p class="note">Works in Claude Code, Cursor and VS Code. Takes about a second.</p>
+</section>
+
+<section>
+  <h3>Already inside your agent?</h3>
+  <div class="paste">
+    <p>Install stantal in this repo, then use it to pin every dependency that gives you tools to
+    call. It needs no account and no API key. Tell me what it found.</p>
+  </div>
+  <p class="note">Paste that into Claude Code, Cursor or Codex instead.</p>
 </section>
 
 <hr>
 
 <section>
-  <h3>What we found</h3>
-  <div class="stats">
-    <div><p class="stat">168</p><p>contract changes a model would read differently, across 487
-    releases of 22 popular agent packages.</p></div>
-    <div><p class="stat b">145</p><p>of them had no structural signal at all. No type error, no
-    semver bump, nothing to fail a build.</p></div>
+  <h2>How a sentence breaks a product</h2>
+  <p>Here is a real tool from a widely used server. Three of its inputs are optional, none of them
+  are explained, and the description mentions none of them:</p>
+  <div class="win">
+    <div class="bar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>list_commits</span></div>
+<pre><span class="c">description:</span> "Get list of commits of a branch in a GitHub repository"
+
+owner    <span class="c">required</span>
+repo     <span class="c">required</span>
+sha      <span class="r">optional, no explanation</span>   <span class="c">← a commit hash? the branch?</span>
+page     <span class="r">optional, no explanation</span>
+perPage  <span class="r">optional, no explanation</span></pre>
   </div>
-  <p>Twelve of the twenty-two packages carried at least one. Ten carried none — including both
-  official reference servers. A tool that found problems everywhere would just be broken, so the
-  zeroes matter as much as the number.</p>
+  <p>A person reads the code and works it out. The AI only ever sees the text above, so it guesses.
+  It puts a branch name where a commit hash goes, the call fails, and your user sees a feature that
+  doesn't work. Nothing in your pipeline noticed, because nothing was wrong with the code.</p>
 </section>
 
 <section>
-  <h3>One of them, in full</h3>
-  <p><code>list_commits</code>, in Anthropic's own reference GitHub server:</p>
-<pre><code>description: "Get list of commits of a branch in a GitHub repository"
-
-owner:   z.string()
-repo:    z.string()
-sha:     z.string().optional()      &lt;- what goes here?
-page:    z.number().optional()
-perPage: z.number().optional()</code></pre>
-  <p>Three optional inputs. None of them described. The description mentions none of them. A model
-  has no way to know whether <code>sha</code> takes a commit hash or the branch name in the sentence
-  above it. This compiles, ships, and passes every test.</p>
+  <h3>We went and counted</h3>
+  <div class="stats">
+    <div><p class="stat">168</p><p>changes across 487 releases of 22 popular packages that would
+    make an AI call them differently.</p></div>
+    <div><p class="stat b">145</p><p>of those broke nothing you could have tested for. No error,
+    no type failure, no breaking version.</p></div>
+  </div>
+  <p>Twelve of the twenty-two packages had at least one. Ten had none — including both official
+  reference servers. A tool that found something wrong everywhere would just be broken, so the ten
+  matter as much as the number.</p>
 </section>
 
 <hr>
@@ -101,56 +151,62 @@ perPage: z.number().optional()</code></pre>
 <section>
   <h2>What you get</h2>
   <div class="grid">
-    <div class="card"><h4>An answer</h4><p>Take this upgrade, or don't. One word, and the evidence
-    under it.</p></div>
-    <div class="card"><h4>A test you keep</h4><p>Records what your dependency offers today. Fails
-    the day an upgrade takes it away.</p></div>
-    <div class="card"><h4>A fix</h4><p>Puts the deleted sentence back, when no released version is
-    clean.</p></div>
+    <div class="card"><h4>An answer</h4><p>Take this update, or don't — and the evidence
+    underneath it.</p></div>
+    <div class="card"><h4>A test you keep</h4><p>Records what your dependency does today. Fails
+    the day an update takes it away.</p></div>
+    <div class="card"><h4>A fix</h4><p>Puts the deleted sentence back, when no released version
+    is clean.</p></div>
     <div class="card"><h4>A link</h4><p>One page you can send to whoever shipped it.</p></div>
   </div>
 </section>
 
 <section>
-  <h2>Why there is no API key</h2>
-  <p>Most tools like this need a model to work, so they need your key, so they need an account
-  before you can see anything. We don't.</p>
+  <h2>There is no API key</h2>
+  <p>Tools like this usually need an AI to work, so they need your key, so they need an account
+  before you see anything. We don't.</p>
   <table>
-    <tr><th>What</th><th>Needs a key</th></tr>
-    <tr><td>Reading a package's tools</td><td class="y">no</td></tr>
-    <tr><td>Comparing two versions</td><td class="y">no</td></tr>
-    <tr><td>Writing the tests</td><td class="y">no</td></tr>
-    <tr><td>Finding which release broke it</td><td class="y">no</td></tr>
-    <tr><td>Confirming a judgement call</td><td class="n">yours, if you want it</td></tr>
+    <tr><th>What you do</th><th>Needs a key</th></tr>
+    <tr><td>See which dependencies give an AI tools</td><td class="y">no</td></tr>
+    <tr><td>Compare two versions</td><td class="y">no</td></tr>
+    <tr><td>Write the tests</td><td class="y">no</td></tr>
+    <tr><td>Find which release broke it</td><td class="y">no</td></tr>
+    <tr><td>Put the deleted sentence back</td><td class="y">no</td></tr>
+    <tr><td>Second-guess a borderline call</td><td class="n">yours, only if you want it</td></tr>
   </table>
-  <p>A model is one narrow, optional job here: answering yes or no about whether a sentence
-  explains an input, and quoting the text it used. Rules do the rest. Set
-  <code>ANTHROPIC_API_KEY</code>, <code>OPENAI_API_KEY</code> or <code>GEMINI_API_KEY</code> if you
-  want that step — it is your key, your bill, and never ours.</p>
+  <p>An AI does one small optional job here: saying yes or no to whether a sentence explains an
+  input, and quoting the text it used. Rules do everything else. If you want that step, set
+  <code>ANTHROPIC_API_KEY</code>, <code>OPENAI_API_KEY</code> or <code>GEMINI_API_KEY</code> — your
+  key, your bill, never ours.</p>
 </section>
 
 <hr>
 
 <section>
-  <h2>If you ship an API</h2>
-  <p>Run it against a release you haven't published yet. Nothing is out there, so there is nothing
-  to defend.</p>
-<pre><code>npx stantal check ./ --against 1.4.0</code></pre>
-  <p>You find out which of your changes will silently strand customers while it still costs minutes
-  to fix, instead of a support thread six months later.</p>
+  <h2>If you're the one shipping the API</h2>
+  <p>You cannot see this from your side. The calls succeed. The error rate is flat. The dashboards
+  are green. The customer is filling in a field wrong because you deleted the sentence that told
+  them not to, and they will not tell you — they will just stop.</p>
+  <div class="cmd"><b>$</b><span>npx stantal check ./ --against 1.4.0</span></div>
+  <p class="note">Run it on a release you haven't published yet. Nothing has shipped, so there is
+  nothing to defend and nobody to blame — you just fix it in ten minutes instead of finding out in
+  six months.</p>
 </section>
 
 <section>
-  <h2>Or skip the setup</h2>
-<pre><code>npx stantal &lt;package&gt; &lt;from&gt; &lt;to&gt;      # should I take this upgrade?
-npx stantal pin &lt;package&gt;              # lock in what it does today
-npx stantal history &lt;package&gt;          # which release broke it?</code></pre>
-  <p>Every one of those works with nothing installed and nothing configured.</p>
+  <h3>Or skip all of it</h3>
+  <div class="win">
+    <div class="bar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>bash</span></div>
+<pre>npx stantal <span class="p">&lt;package&gt; &lt;from&gt; &lt;to&gt;</span>   <span class="c"># should I take this update?</span>
+npx stantal pin <span class="p">&lt;package&gt;</span>           <span class="c"># lock in what it does today</span>
+npx stantal history <span class="p">&lt;package&gt;</span>       <span class="c"># which release broke it?</span></pre>
+  </div>
+  <p>Every one of those runs with nothing installed and nothing set up.</p>
 </section>
 
 <footer>
-  <p>Stantal is MIT-licensed and runs entirely on your machine. It never executes the packages it
-  reads. <a href="https://github.com/hellunleash/stantal">Source</a> ·
+  <p>MIT licensed. Runs on your machine. Never executes the packages it reads.
+  <a href="https://github.com/hellunleash/stantal">GitHub</a> ·
   <a href="https://www.npmjs.com/package/stantal">npm</a></p>
 </footer>
 

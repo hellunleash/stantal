@@ -9,7 +9,7 @@ set -euo pipefail
 
 PROJECT="${STANTAL_GCP_PROJECT:-stantal-506811}"
 REGION="${STANTAL_GCP_REGION:-us-central1}"
-SERVICE="${STANTAL_SERVICE_NAME:-verdict}"
+SERVICE="${STANTAL_SERVICE_NAME:-stantal}"
 BUCKET="${STANTAL_VERDICT_BUCKET:-${PROJECT}-verdicts}"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
