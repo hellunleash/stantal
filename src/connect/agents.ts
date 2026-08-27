@@ -48,7 +48,7 @@ export const AGENTS: readonly AgentTarget[] = [
     key: "mcpServers",
     binaries: ["claude"],
     markers: [".mcp.json", ".claude"],
-    next: "Restart Claude Code, approve the server when it asks, then say: check my dependencies with stantal",
+    next: "Restart Claude Code and approve the server when it asks",
   },
   {
     id: "cursor",
@@ -57,7 +57,7 @@ export const AGENTS: readonly AgentTarget[] = [
     key: "mcpServers",
     binaries: ["cursor", "cursor-agent"],
     markers: [".cursor"],
-    next: "Reload Cursor, enable the server in Settings → MCP, then ask it to check your dependencies with stantal",
+    next: "Reload Cursor and enable the server in Settings → MCP",
   },
   {
     id: "vscode",
@@ -66,7 +66,7 @@ export const AGENTS: readonly AgentTarget[] = [
     key: "servers",
     binaries: ["code"],
     markers: [".vscode"],
-    next: "Reload VS Code, start the server from the MCP view, then ask Copilot to check your dependencies with stantal",
+    next: "Reload VS Code and start the server from the MCP view",
   },
 ];
 

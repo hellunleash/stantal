@@ -35,7 +35,7 @@ import { renderHtml } from "./verdict/html.js";
 import { publishableReport } from "./verdict/publish.js";
 import { AGENTS, agentById } from "./connect/agents.js";
 import { detectAgents, install, runAgent, type DetectedAgent, type InstallResult } from "./connect/install.js";
-import { serveStdio } from "./serve/mcp.js";
+import { contractDependencies, serveStdio } from "./serve/mcp.js";
 
 /**
  * Rung 1 — the whole product in one command, with nothing installed.
@@ -590,7 +590,28 @@ function runConnect(
     out.push("");
   }
 
-  out.push(`  No account, no key, no signup. Everything the server does runs on this machine.`);
+  // Something to read on the first run.
+  //
+  // Writing the config and stopping leaves nothing visible to show for the
+  // command: the agent has to be restarted before any of it does anything, and
+  // a first run with no output is one nobody repeats. This is the one question
+  // worth answering immediately — of everything installed here, what is even in
+  // scope for contract drift. It is a read, not a write.
+  const relevant = contractDependencies(directory);
+  if (relevant.length === 0) {
+    out.push(`  Nothing installed here hands a model a tool contract, so nothing can drift yet.`);
+    out.push(`  That is a normal result. Add an MCP server or an agent SDK and run this again.`);
+  } else {
+    const tools = relevant.reduce((n, d) => n + d.tools, 0);
+    out.push(`  ${relevant.length} of your dependencies hand a model a tool contract (${tools} tools):`);
+    for (const dep of relevant) {
+      out.push(`    ${dep.package}@${dep.version}  ${dep.tools} tool(s)  ${dep.subpaths.join(", ")}`);
+    }
+    out.push("");
+    out.push(`  Ask your agent:  pin my contract dependencies with stantal`);
+  }
+  out.push("");
+  out.push(`  No account, no key, no signup. Everything above ran on this machine.`);
   out.push("");
   process.stdout.write(out.join("\n"));
 
