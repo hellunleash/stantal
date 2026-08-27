@@ -392,10 +392,17 @@ export function judgeFromEnv(env: NodeJS.ProcessEnv = process.env): Judge | null
     provider: chosen.provider,
     // Empty on the Vertex path, where the bearer token is the credential.
     apiKey: chosen.key ?? "",
-    // Only where the key is absent. Somebody who set a real API key asked for
-    // the vendor's own endpoint, and quietly rerouting it to their cloud bill
-    // is not ours to decide.
-    ...(vertexCanServe(chosen.provider) && (chosen.key ?? "").length === 0 ? { vertex: vertexConfig! } : {}),
+    // A named Vertex project wins over a key that happens to be present.
+    //
+    // The opposite was tried first, on the reasoning that rerouting somebody's
+    // bill is not ours to decide. Running it showed the flaw: naming a GCP
+    // project is not accidental, and a machine with a key in .env — which is
+    // most of them — made STANTAL_VERTEX_PROJECT do nothing at all. A setting
+    // that silently has no effect is worse than either behaviour, because the
+    // bill still arrives and from the endpoint nobody chose.
+    //
+    // Setting the project *is* the request. Unset it to use the vendor directly.
+    ...(vertexCanServe(chosen.provider) ? { vertex: vertexConfig! } : {}),
     ...(model ? { model } : {}),
     ...(baseUrl ? { baseUrl } : {}),
     ...(transport === "http" || transport === "sdk" || transport === "auto" ? { transport } : {}),
