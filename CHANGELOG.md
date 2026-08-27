@@ -13,6 +13,15 @@ upgrade needs a full re-run.
 
 ### Added
 
+- **`--publish <url>`** sends a verdict to a host and prints a link to it. Layer
+  3’s result is removed first and the removal is printed: it carries paths and
+  line numbers out of your own repository, and a verdict is meant to be
+  forwarded to the package’s author. There is no built-in address — pass one or
+  set `STANTAL_VERDICT_HOST`.
+- A verdict host for Cloud Run under `service/`. It accepts a report and renders
+  it; it never accepts HTML, which would make it free hosting for whatever
+  anyone uploads. Pages are content-addressed, so publishing the same verdict
+  twice returns the same link and no database is needed.
 - **`stantal connect`** registers the tool with a coding agent by writing an MCP
   entry into a config file in the repository — never the home directory, so a
   mistake cannot reach another project, and the file is committable so one

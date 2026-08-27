@@ -32,6 +32,7 @@ import { packageDirectory } from "./testkit.js";
 import { applyPatch, planPatch } from "./patch/plan.js";
 import { canApply } from "./patch/taxonomy.js";
 import { renderHtml } from "./verdict/html.js";
+import { publishableReport } from "./verdict/publish.js";
 import { AGENTS, agentById } from "./connect/agents.js";
 import { detectAgents, install, runAgent, type DetectedAgent, type InstallResult } from "./connect/install.js";
 import { serveStdio } from "./serve/mcp.js";
@@ -111,6 +112,10 @@ Options
   --html <file>         Also write the verdict as one self-contained HTML page.
                         Nothing is fetched when it is opened, so it can be
                         forwarded to someone who will not run what you send.
+  --publish <url>       Send the verdict to a host and print a link to it.
+                        Your own file paths are removed first and the removal
+                        is printed. There is no built-in address: pass one, or
+                        set STANTAL_VERDICT_HOST.
   --json                Print the full report as JSON.
   --no-judge            Skip the model judge even if a key is set.
   --behaviour           Also run Layer 2: put the contract in front of a model
@@ -602,6 +607,69 @@ function runConnect(
 }
 
 /**
+ * Send a verdict somewhere it can be linked to.
+ *
+ * The only thing this tool does that sends anything anywhere, and it happens
+ * only when a flag asks for it. Two consequences are handled here rather than
+ * in the host, because a promise kept by somebody else's server is not a
+ * promise:
+ *
+ * 1. **Layer 3's result never leaves.** It carries paths and line numbers out
+ *    of the user's own repository. A verdict is meant to be forwarded to the
+ *    package's author, who has no business seeing the shape of a codebase that
+ *    is not theirs.
+ * 2. **What was removed is printed.** A silent strip is indistinguishable from
+ *    a leak to anyone reading the output, and the person deciding whether to
+ *    send this is the one who needs to know.
+ */
+async function publishVerdict(report: Report, host: string): Promise<void> {
+  const { report: safe, stripped } = publishableReport(report);
+  const endpoint = `${host.replace(/\/+$/, "")}/v`;
+
+  for (const item of stripped) {
+    process.stdout.write(`  removed before sending: ${item.detail}\n`);
+  }
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ report: safe }),
+    });
+    const body: unknown = await response.json().catch(() => null);
+    if (!response.ok) {
+      const detail =
+        body !== null && typeof body === "object" && "error" in body ? String((body as { error: unknown }).error) : "";
+      process.stderr.write(`stantal: could not publish (${response.status}) ${detail}\n`);
+      return;
+    }
+    const url = body !== null && typeof body === "object" && "url" in body ? String((body as { url: unknown }).url) : "";
+    process.stdout.write(`  published: ${url}\n\n`);
+  } catch (error) {
+    // Never fatal. The verdict has already been printed and it is the product's
+    // answer; losing the exit code because a host was unreachable would replace
+    // a real result with an unrelated one.
+    process.stderr.write(
+      `stantal: could not reach ${endpoint}: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
+}
+
+/**
+ * Where to publish, if anywhere.
+ *
+ * There is no built-in default on purpose. A flag that quietly sends a report
+ * to an address the user never typed is the kind of thing this project exists
+ * to object to when other people do it.
+ */
+function verdictHost(values: { publish?: string | undefined }): string | null {
+  const named = values.publish;
+  if (named !== undefined && named.length > 0) return named;
+  const fromEnv = process.env["STANTAL_VERDICT_HOST"];
+  return fromEnv !== undefined && fromEnv.length > 0 ? fromEnv : null;
+}
+
+/**
  * Write the verdict as a page, and say where it went.
  *
  * A failure to write it is reported and never fatal. The verdict is the
@@ -847,6 +915,7 @@ async function runCheck(
   values: {
     json?: boolean | undefined;
     html?: string | undefined;
+    publish?: string | undefined;
     against?: string | undefined;
     surface?: string[] | undefined;
     cache?: string | undefined;
@@ -894,6 +963,8 @@ async function runCheck(
 
     process.stdout.write(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : render(report));
     if (values.html !== undefined) writeHtmlVerdict(report, values.html);
+    const host = verdictHost(values);
+    if (host !== null) await publishVerdict(report, host);
     return exitCodeFor(report.verdict);
   } catch (error) {
     process.stderr.write(`stantal: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -916,6 +987,7 @@ async function runManifest(
     name?: string | undefined;
     surface?: string[] | undefined;
     html?: string | undefined;
+    publish?: string | undefined;
     "fields-at"?: string | undefined;
     "exclude-when"?: string[] | undefined;
     repo?: string | undefined;
@@ -989,6 +1061,8 @@ async function runManifest(
 
     process.stdout.write(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : render(report));
     if (values.html !== undefined) writeHtmlVerdict(report, values.html);
+    const host = verdictHost(values);
+    if (host !== null) await publishVerdict(report, host);
     return exitCodeFor(report.verdict);
   } catch (error) {
     process.stderr.write(`stantal: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -1175,6 +1249,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         run: { type: "boolean" },
         directory: { type: "string" },
         html: { type: "string" },
+        publish: { type: "string" },
         "no-judge": { type: "boolean" },
         behaviour: { type: "boolean" },
         k: { type: "string" },
@@ -1341,6 +1416,8 @@ GEMINI_API_KEY). Continuing without Layer 2.
 
     process.stdout.write(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : render(report));
     if (values.html !== undefined) writeHtmlVerdict(report, values.html);
+    const host = verdictHost(values);
+    if (host !== null) await publishVerdict(report, host);
     if (values["emit-tests"] === true) emitFromReport(report, values.out);
     return exitCodeFor(report.verdict);
   } catch (error) {

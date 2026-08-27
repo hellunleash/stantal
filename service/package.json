@@ -1,0 +1,11 @@
+{
+  "name": "stantal-verdict-host",
+  "private": true,
+  "type": "module",
+  "description": "Serves forwardable verdict pages. Renders reports; never accepts HTML.",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node server.mjs" },
+  "dependencies": {
+    "@google-cloud/storage": "^7.14.0"
+  }
+}

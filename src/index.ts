@@ -45,3 +45,5 @@ export { blastRadius } from "./blast/scan.js";
 export { assertionsFromContract, assertionsFromReport } from "./emit/assertions.js";
 export { emitTests } from "./emit/write.js";
 export { renderVitest, testFileName } from "./emit/vitest.js";
+export { renderHtml } from "./verdict/html.js";
+export { publishableReport } from "./verdict/publish.js";
