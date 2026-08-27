@@ -25,6 +25,13 @@ rm -f "${here}/vendor/"*.tgz
 ( cd "${repo}" && npm run build >/dev/null && npm pack --pack-destination "${here}/vendor" >/dev/null )
 mv "${here}/vendor/"stantal-*.tgz "${here}/vendor/stantal.tgz"
 
+# 1b. The landing page, exported to plain files. Built here rather than
+#     committed so the page and the code that serves it can never disagree.
+echo "==> building the landing page"
+rm -rf "${here}/site"
+( cd "${repo}/site" && npm run build >/dev/null )
+cp -r "${repo}/site/out" "${here}/site"
+
 # 2. The bucket. Uniform access, no public reads: pages are served through the
 #    service, never straight off the bucket, so there is exactly one path in and
 #    one way to change what it returns.

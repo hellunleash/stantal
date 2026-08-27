@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { Storage } from "@google-cloud/storage";
@@ -34,15 +34,56 @@ const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN ?? "";
 /** Well under Cloud Run's request cap, and far above any real report. */
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
-// Read once at startup. The landing page is the same on every request, and
-// re-reading it per request would trade a cold start for a disk hit forever.
 const HERE = dirname(fileURLToPath(import.meta.url));
-let LANDING = "";
-try {
-  LANDING = readFileSync(join(HERE, "landing.html"), "utf8");
-} catch {
-  LANDING = "";
+const SITE = join(HERE, "site");
+
+/**
+ * The exported landing page, read once at startup.
+ *
+ * Loaded into memory rather than read per request. It is a handful of files
+ * totalling around a megabyte, it never changes between deploys, and a disk hit
+ * on every request would be paid forever to avoid a cost paid once.
+ */
+const STATIC = new Map();
+const TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".woff2": "font/woff2",
+  ".json": "application/json; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
+  ".png": "image/png",
+};
+
+function loadSite(dir, prefix = "") {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    const route = `${prefix}/${entry.name}`;
+    if (entry.isDirectory()) {
+      loadSite(full, route);
+      continue;
+    }
+    const ext = entry.name.slice(entry.name.lastIndexOf("."));
+    // Only types we serve. An unknown extension is skipped rather than sent
+    // with a guessed content type, which is how a static host ends up serving
+    // something a browser treats as script.
+    if (TYPES[ext] === undefined) continue;
+    try {
+      STATIC.set(route, { body: readFileSync(full), type: TYPES[ext] });
+    } catch {
+      // Unreadable file: skipped, never served empty.
+    }
+  }
 }
+loadSite(SITE);
 
 const storage = new Storage();
 const bucket = BUCKET.length > 0 ? storage.bucket(BUCKET) : null;
@@ -117,6 +158,26 @@ function send(response, status, body, type = "application/json") {
   response.end(payload);
 }
 
+/**
+ * Serve one built file.
+ *
+ * Everything under /_next/static carries a content hash in its name, so it can
+ * be cached forever and a deploy invalidates it by changing the name. The HTML
+ * must not be: it is the file that points at the new hashes, and a cached copy
+ * would go on loading the previous deploy's assets after they are gone.
+ */
+function sendAsset(response, asset, path, headOnly = false) {
+  const immutable = path.startsWith("/_next/static/");
+  response.writeHead(200, {
+    "content-type": asset.type,
+    "content-length": asset.body.length,
+    "cache-control": immutable ? "public, max-age=31536000, immutable" : "public, max-age=0, must-revalidate",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+  });
+  response.end(headOnly ? undefined : asset.body);
+}
+
 async function handlePublish(request, response) {
   if (bucket === null) return send(response, 500, { error: "VERDICT_BUCKET is not configured" });
 
@@ -163,9 +224,12 @@ const server = createServer((request, response) => {
   if (request.method === "GET" && url.pathname === "/status") {
     return send(response, 200, { ok: true, bucket: BUCKET.length > 0 });
   }
-  if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
-    if (LANDING.length === 0) return send(response, 404, { error: "not found" });
-    return send(response, 200, LANDING, "text/html");
+  // HEAD as well as GET. Crawlers and caches ask for headers without a body,
+  // and answering those with a 404 says the asset does not exist.
+  if (request.method === "GET" || request.method === "HEAD") {
+    const path = url.pathname === "/" ? "/index.html" : url.pathname;
+    const asset = STATIC.get(path);
+    if (asset !== undefined) return sendAsset(response, asset, path, request.method === "HEAD");
   }
   if (request.method === "POST" && url.pathname === "/v") {
     return handlePublish(request, response).catch((error) =>

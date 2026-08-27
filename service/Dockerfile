@@ -10,7 +10,8 @@ WORKDIR /app
 COPY package.json vendor/stantal.tgz ./
 RUN npm install --omit=dev --no-audit --no-fund ./stantal.tgz && rm stantal.tgz
 
-COPY server.mjs landing.html ./
+COPY server.mjs ./
+COPY site ./site
 
 ENV PORT=8080
 EXPOSE 8080

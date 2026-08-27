@@ -34,3 +34,7 @@ npm-debug.log*
 # Coverage
 coverage/
 service/vendor/
+service/site/
+site/out/
+site/node_modules/
+site/.next/
