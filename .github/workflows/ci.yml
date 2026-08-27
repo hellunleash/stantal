@@ -16,9 +16,9 @@ permissions:
 
 jobs:
   gate:
-    name: gate (node ${{ matrix.node }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    name: gate (${{ matrix.os }} · node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
 
     strategy:
       fail-fast: false
@@ -27,6 +27,20 @@ jobs:
         # that says `>=20` and is only ever run on one version is claiming
         # something nobody checked.
         node: [20, 22, 24]
+        # Linux for every Node version, and one job each on Windows and macOS.
+        #
+        # Not vanity. This tool reads files, joins paths, resolves entry points
+        # and shells out to gcloud, and every one of those behaves differently
+        # on Windows: the separator, the line endings, PATHEXT, and Node's
+        # refusal to spawn a .cmd directly. A package tested only on Linux
+        # discovers all of that in a user's terminal instead of in CI, and the
+        # bug is reported as "your tool does not work" with no way to reproduce.
+        os: [ubuntu-latest]
+        include:
+          - os: windows-latest
+            node: 22
+          - os: macos-latest
+            node: 22
 
     steps:
       - uses: actions/checkout@v5
