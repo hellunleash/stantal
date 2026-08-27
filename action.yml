@@ -52,6 +52,29 @@ inputs:
       Off by default because it costs k calls per request per side.
     required: false
     default: "false"
+  emit-tests:
+    description: >
+      Also write contract tests for what this run found, pinning the version in
+      use so they fail on the upgrade instead of passing quietly. They are left
+      in the workspace for a later step to commit or upload; this action does
+      not push anything.
+    required: false
+    default: "false"
+  out:
+    description: Directory emitted tests are written to.
+    required: false
+    default: stantal
+  comment:
+    description: >
+      Post the verdict as a comment on the pull request, editing the same
+      comment on every push rather than adding a new one. Ignored outside a
+      pull request. Needs `pull-requests: write`.
+    required: false
+    default: "true"
+  github-token:
+    description: "Token used to post that comment. Needs `pull-requests: write`."
+    required: false
+    default: ${{ github.token }}
   version:
     description: Which release of the CLI to run. Pinned by default, so a new one cannot change a verdict under you.
     required: false
@@ -105,6 +128,8 @@ runs:
         IN_FAIL_ON: ${{ inputs.fail-on }}
         IN_REPLAY: ${{ inputs.replay }}
         IN_BEHAVIOUR: ${{ inputs.behaviour }}
+        IN_EMIT_TESTS: ${{ inputs.emit-tests }}
+        IN_OUT: ${{ inputs.out }}
         IN_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
@@ -136,6 +161,7 @@ runs:
         if [ "$IN_REPO" != "none" ]; then args+=(--repo "$IN_REPO"); fi
         if [ "$IN_REPLAY" = "true" ]; then args+=(--replay); fi
         if [ "$IN_BEHAVIOUR" = "true" ]; then args+=(--behaviour); fi
+        if [ "$IN_EMIT_TESTS" = "true" ]; then args+=(--emit-tests --out "$IN_OUT"); fi
 
         report="${RUNNER_TEMP:-/tmp}/stantal-report.json"
 
@@ -194,7 +220,10 @@ runs:
           echo "report=$report"
         } >> "$GITHUB_OUTPUT"
 
-        node -p "JSON.parse(process.argv[1]).markdown" "$summary" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+        body="${RUNNER_TEMP:-/tmp}/stantal-comment.md"
+        node -p "JSON.parse(process.argv[1]).markdown" "$summary" > "$body"
+        echo "comment-file=$body" >> "$GITHUB_OUTPUT"
+        cat "$body" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
         case "$IN_FAIL_ON" in
           never)
@@ -214,3 +243,45 @@ runs:
               *) echo "::error::${verdict} — ${findings} change(s) a model would read differently"; exit 1 ;;
             esac ;;
         esac
+
+    # Runs even when the check above failed the job, which is the normal case
+    # when there is a finding. Guarding this on success would post the comment
+    # only on the runs where nobody needed to read it.
+    - name: Comment on the pull request
+      if: ${{ always() && inputs.comment == 'true' && github.event.pull_request.number }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        TARGET_REPO: ${{ github.repository }}
+        BODY_FILE: ${{ steps.run.outputs.comment-file }}
+      run: |
+        set -uo pipefail
+
+        if [ -z "${BODY_FILE:-}" ] || [ ! -s "$BODY_FILE" ]; then
+          echo "::notice::no verdict to comment"
+          exit 0
+        fi
+
+        # One comment per pull request, edited in place. A bot that appends a
+        # new comment on every push is the single fastest way to get removed
+        # from a repository, however good the finding is.
+        marker="<!-- stantal-verdict -->"
+        payload="${RUNNER_TEMP:-/tmp}/stantal-comment-body.md"
+        { printf '%s\n' "$marker"; cat "$BODY_FILE"; } > "$payload"
+
+        existing=$(gh api "repos/$TARGET_REPO/issues/$PR_NUMBER/comments" --paginate \
+          --jq "map(select(.body | startswith(\"$marker\"))) | .[0].id // empty" 2>/dev/null || true)
+
+        if [ -n "$existing" ]; then
+          gh api -X PATCH "repos/$TARGET_REPO/issues/comments/$existing" -F "body=@$payload" >/dev/null 2>&1
+        else
+          gh api -X POST "repos/$TARGET_REPO/issues/$PR_NUMBER/comments" -F "body=@$payload" >/dev/null 2>&1
+        fi
+
+        # A comment that could not be posted is not a reason to change the
+        # verdict. The job's pass or fail is the product's answer; this step
+        # only decides how comfortably it is read.
+        if [ $? -ne 0 ]; then
+          echo "::warning::could not post the verdict comment — check that the job grants pull-requests: write"
+        fi

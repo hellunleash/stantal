@@ -13,6 +13,27 @@ upgrade needs a full re-run.
 
 ### Added
 
+- **The verdict lands on the pull request.** The Action now posts it as a
+  comment and edits that same comment on every push, rather than adding a new
+  one. It runs even when the check failed the job, which is the case where
+  somebody actually needs to read it. A comment that cannot be posted warns and
+  leaves the verdict alone. New inputs: `comment`, `github-token`,
+  `emit-tests`, `out`.
+- **`stantal patch <package> <from>`** puts deleted prose back into the copy of
+  a dependency you actually run. This is Layer 4's `patch` remedy made real:
+  when every published release carries the defect there is nowhere to upgrade
+  to, and the calling code was never wrong.
+  - Only prose is restored — never a schema, a type or a required flag. A
+    description cannot break a caller, because no caller branches on one.
+  - The text is located by exact match and must appear exactly once in the
+    whole package. Zero occurrences and more than one are both refused with the
+    reason, because choosing between two would be a guess that rewrites
+    somebody's dependency.
+  - Both string encodings are searched, so a multi-line description whose
+    literal is escaped is found rather than silently missed, and the
+    replacement is re-encoded to match what it replaces.
+  - Nothing is written without `--apply`, and applying re-checks the bytes
+    first, so a stale plan skips rather than corrupts.
 - **Contract tests you keep.** `stantal pin <package>` reads the version you
   have installed and writes a Vitest suite that records what the package offers
   today. It passes now and fails the day an upgrade takes any of it away. The

@@ -29,6 +29,8 @@ import { emitTests, type EmitTarget, type WrittenFile } from "./emit/write.js";
 import { extractFromModule } from "./extract/module.js";
 import { exportedSubpaths, fsPackageSource } from "./extract/package-source.js";
 import { packageDirectory } from "./testkit.js";
+import { applyPatch, planPatch } from "./patch/plan.js";
+import { canApply } from "./patch/taxonomy.js";
 
 /**
  * Rung 1 — the whole product in one command, with nothing installed.
@@ -47,6 +49,7 @@ stantal — know whether an upgrade changes how a model uses your dependency
   stantal manifest <before...> <after...> [options]
   stantal check <dir> --against <version> [options]
   stantal pin <package> [options]
+  stantal patch <package> <from> [options]
 
 Comparing two versions tells you whether to take an upgrade.
 Walking the history tells you which release broke it, and the last one that
@@ -86,6 +89,8 @@ Options
   --emit-tests          Write contract tests for what this comparison found,
                         pinning the older side so they fail on the upgrade.
   --out <dir>           Where emitted tests go. Default: stantal/
+  --apply               patch: actually write the edits into node_modules.
+                        Off by default; the plan is printed instead.
   --json                Print the full report as JSON.
   --no-judge            Skip the model judge even if a key is set.
   --behaviour           Also run Layer 2: put the contract in front of a model
@@ -462,6 +467,134 @@ function emitFromReport(report: Report, out: string | undefined): void {
     generator: `stantal ${ownVersion()}`,
   });
   process.stdout.write(renderWritten(written, report.subject.from));
+}
+
+/**
+ * `stantal patch <package> <from>` — put the deleted prose back.
+ *
+ * The `patch` remedy from Layer 4, made real. When every published release
+ * carries the defect there is nowhere to upgrade to, and the calling code was
+ * never wrong — the wrong bytes are in `node_modules`. Restoring them is the
+ * only thing that actually works.
+ *
+ * The version on disk is the newer side. Asking for it separately would let the
+ * two disagree, and a patch computed against a version that is not installed is
+ * a patch that corrupts a file.
+ *
+ * Only prose is ever restored. A description cannot break a caller, because no
+ * caller branches on one — only a model reads it, which is this project's whole
+ * premise. Schemas, types and required flags are never touched.
+ */
+async function runPatch(
+  pkg: string | undefined,
+  from: string | undefined,
+  values: {
+    json?: boolean | undefined;
+    apply?: boolean | undefined;
+    surface?: string[] | undefined;
+    cache?: string | undefined;
+  },
+  judge: Judge | null,
+): Promise<number> {
+  if (pkg === undefined || from === undefined) {
+    process.stderr.write(
+      `stantal: patch wants a package and the version whose prose you want back.\n\n` +
+        `  stantal patch @scope/example-sdk 1.4.0\n\n`,
+    );
+    return 2;
+  }
+
+  const directory = packageDirectory(pkg);
+  if (directory === null) {
+    process.stderr.write(
+      `stantal: ${pkg} is not installed under any node_modules above ${process.cwd()}.\n` +
+        `A patch edits the copy you actually run, so there has to be one.\n`,
+    );
+    return 2;
+  }
+
+  const manifest = fsPackageSource(directory).packageJson();
+  const installed = manifest !== null && typeof manifest["version"] === "string" ? manifest["version"] : null;
+  if (installed === null) {
+    process.stderr.write(`stantal: cannot read a version from ${directory}/package.json\n`);
+    return 2;
+  }
+  if (installed === from) {
+    process.stderr.write(
+      `stantal: ${pkg}@${from} is what is installed, so there is nothing to restore.\n` +
+        `Name the version whose prose you want back, not the one you are on.\n`,
+    );
+    return 2;
+  }
+
+  try {
+    const report = await buildReport({
+      package: pkg,
+      from,
+      to: installed,
+      registry: pacoteRegistry(),
+      judge,
+      ...(values.cache !== undefined ? { cacheRoot: values.cache } : {}),
+      ...(values.surface !== undefined ? { subpaths: values.surface } : {}),
+    });
+
+    const plan = planPatch({ report, packageDir: directory, version: installed });
+
+    if (values.json === true) {
+      process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);
+      return canApply(plan) ? 0 : 1;
+    }
+
+    const out: string[] = ["", `  ${pkg}@${installed}  restoring prose from ${from}`, ""];
+
+    if (!canApply(plan)) {
+      out.push(`  nothing to restore`);
+      for (const refusal of plan.refused) {
+        out.push(`    ${refusal.tool}  ${refusal.reason} — ${refusal.detail}`);
+      }
+      out.push("");
+      process.stdout.write(out.join("\n") + "\n");
+      return 1;
+    }
+
+    for (const edit of plan.edits) {
+      out.push(`    ${edit.tool}  ${edit.subpath}`);
+      out.push(`      ${edit.file}  (${edit.encoding})`);
+      out.push(`      ${edit.why}`);
+    }
+    if (plan.refused.length > 0) {
+      out.push("", `  declined ${plan.refused.length}:`);
+      for (const refusal of plan.refused) {
+        out.push(`    ${refusal.tool}  ${refusal.reason} — ${refusal.detail}`);
+      }
+    }
+    out.push("");
+
+    if (values.apply !== true) {
+      // Printed, never written, unless asked. Editing a dependency is a side
+      // effect nobody should get from a command they ran to look at something.
+      out.push(`  nothing was written — re-run with --apply to make these edits`);
+      out.push("");
+      process.stdout.write(out.join("\n") + "\n");
+      return 1;
+    }
+
+    const results = applyPatch(plan, directory);
+    for (const result of results) {
+      out.push(`  ${result.applied ? "patched" : "skipped"}  ${result.file} — ${result.detail}`);
+    }
+    out.push("");
+    // A fresh `npm install` throws this away. Saying so is the difference
+    // between a fix and a fix that silently disappears on the next CI run.
+    out.push(`  node_modules is not durable. Make it stick with:`);
+    out.push(`    npx patch-package ${pkg}`);
+    out.push("");
+    process.stdout.write(out.join("\n") + "\n");
+    return results.some((r) => r.applied) ? 0 : 1;
+  } catch (error) {
+    process.stderr.write(`stantal: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
 }
 
 /**
@@ -883,6 +1016,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         json: { type: "boolean" },
         "emit-tests": { type: "boolean" },
         out: { type: "string" },
+        apply: { type: "boolean" },
         "no-judge": { type: "boolean" },
         behaviour: { type: "boolean" },
         k: { type: "string" },
@@ -1009,6 +1143,10 @@ GEMINI_API_KEY). Continuing without Layer 2.
 
   if (positionals[0] === "manifest") {
     return runManifest(positionals[1], positionals[2], values, judge, behaviour);
+  }
+
+  if (positionals[0] === "patch") {
+    return runPatch(positionals[1], positionals[2], values, judge);
   }
 
   if (positionals[0] === "pin") {
