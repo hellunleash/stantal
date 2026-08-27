@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stantal — catch the upgrade that broke your agent</title>
+<meta name="description" content="Your tests pass, your types check, and the model still gets it wrong. Stantal finds the upgrade that did it.">
+<style>
+:root{--bg:#fff;--fg:#14161b;--dim:#5b6270;--faint:#8b93a1;--line:#e4e7ec;--card:#f7f8fa;
+--accent:#5b3df5;--good:#0a7d33;--warn:#8a5a00;--bad:#b3261e;--code:#f2f3f6}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#0e1014;--fg:#e8eaee;
+--dim:#98a0ae;--faint:#6d7686;--line:#232830;--card:#15181e;--accent:#a48bff;--good:#4ade80;
+--warn:#e0a33a;--bad:#ff6b5e;--code:#12151a}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);
+font:16px/1.65 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:46rem;margin:0 auto;padding:4rem 1.25rem 5rem}
+section{margin:0 0 4rem}
+h1{font-size:clamp(1.8rem,5vw,2.6rem);line-height:1.15;letter-spacing:-.02em;margin:0 0 1rem}
+h2{font-size:1.15rem;letter-spacing:-.01em;margin:0 0 .75rem}
+h3{font-size:.78rem;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);
+margin:0 0 .6rem;font-weight:600}
+p{margin:0 0 1rem;color:var(--dim)}
+p.lead{font-size:1.1rem;color:var(--fg)}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+code{font-size:.88em;background:var(--code);padding:.1em .35em;border-radius:4px}
+pre{background:var(--code);border:1px solid var(--line);border-radius:10px;
+padding:1rem 1.1rem;overflow-x:auto;font-size:.85rem;line-height:1.6;margin:0 0 1rem}
+pre code{background:none;padding:0;font-size:inherit}
+.cmd{background:var(--fg);color:var(--bg);border-radius:10px;padding:1rem 1.15rem;
+font-size:1rem;display:flex;align-items:center;gap:.7rem;overflow-x:auto;margin:0 0 .6rem}
+.cmd .p{color:var(--faint);user-select:none}
+.note{font-size:.9rem;color:var(--faint);margin:0 0 2rem}
+.grid{display:grid;gap:.75rem;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1rem 1.1rem}
+.card h4{margin:0 0 .3rem;font-size:.95rem}
+.card p{margin:0;font-size:.9rem}
+.stat{font-size:2.4rem;font-weight:700;letter-spacing:-.03em;line-height:1;margin:0 0 .2rem}
+.stat.b{color:var(--bad)}
+.stats{display:grid;gap:1.5rem;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));margin:0 0 1.25rem}
+.stats p{font-size:.88rem;margin:0}
+table{border-collapse:collapse;width:100%;font-size:.9rem;margin:0 0 1rem}
+th,td{text-align:left;padding:.5rem .6rem .5rem 0;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-weight:600}
+td.y{color:var(--good)}td.n{color:var(--bad)}
+hr{border:0;border-top:1px solid var(--line);margin:0 0 3rem}
+footer{border-top:1px solid var(--line);padding-top:1.25rem;color:var(--faint);font-size:.85rem}
+a{color:var(--accent)}
+.tag{display:inline-block;font-size:.72rem;letter-spacing:.05em;text-transform:uppercase;
+color:var(--faint);border:1px solid var(--line);border-radius:999px;padding:.15rem .55rem;margin:0 0 1.25rem}
+</style>
+</head>
+<body>
+<main>
+
+<section>
+  <span class="tag">Open source · MIT</span>
+  <h1>Your tests pass. Your types check.<br>The model still gets it wrong.</h1>
+  <p class="lead">When the thing calling your API is a language model, the descriptions
+  <em>are</em> the contract. Delete a sentence of guidance and you have shipped a breaking
+  change with no type signature. Nothing in your toolchain is looking at it.</p>
+
+  <div class="cmd"><span class="p">$</span><span>npx stantal connect</span></div>
+  <p class="note">No account. No signup. No API key. It runs on your machine and reports in
+  about a second.</p>
+</section>
+
+<hr>
+
+<section>
+  <h3>What we found</h3>
+  <div class="stats">
+    <div><p class="stat">168</p><p>contract changes a model would read differently, across 487
+    releases of 22 popular agent packages.</p></div>
+    <div><p class="stat b">145</p><p>of them had no structural signal at all. No type error, no
+    semver bump, nothing to fail a build.</p></div>
+  </div>
+  <p>Twelve of the twenty-two packages carried at least one. Ten carried none — including both
+  official reference servers. A tool that found problems everywhere would just be broken, so the
+  zeroes matter as much as the number.</p>
+</section>
+
+<section>
+  <h3>One of them, in full</h3>
+  <p><code>list_commits</code>, in Anthropic's own reference GitHub server:</p>
+<pre><code>description: "Get list of commits of a branch in a GitHub repository"
+
+owner:   z.string()
+repo:    z.string()
+sha:     z.string().optional()      &lt;- what goes here?
+page:    z.number().optional()
+perPage: z.number().optional()</code></pre>
+  <p>Three optional inputs. None of them described. The description mentions none of them. A model
+  has no way to know whether <code>sha</code> takes a commit hash or the branch name in the sentence
+  above it. This compiles, ships, and passes every test.</p>
+</section>
+
+<hr>
+
+<section>
+  <h2>What you get</h2>
+  <div class="grid">
+    <div class="card"><h4>An answer</h4><p>Take this upgrade, or don't. One word, and the evidence
+    under it.</p></div>
+    <div class="card"><h4>A test you keep</h4><p>Records what your dependency offers today. Fails
+    the day an upgrade takes it away.</p></div>
+    <div class="card"><h4>A fix</h4><p>Puts the deleted sentence back, when no released version is
+    clean.</p></div>
+    <div class="card"><h4>A link</h4><p>One page you can send to whoever shipped it.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2>Why there is no API key</h2>
+  <p>Most tools like this need a model to work, so they need your key, so they need an account
+  before you can see anything. We don't.</p>
+  <table>
+    <tr><th>What</th><th>Needs a key</th></tr>
+    <tr><td>Reading a package's tools</td><td class="y">no</td></tr>
+    <tr><td>Comparing two versions</td><td class="y">no</td></tr>
+    <tr><td>Writing the tests</td><td class="y">no</td></tr>
+    <tr><td>Finding which release broke it</td><td class="y">no</td></tr>
+    <tr><td>Confirming a judgement call</td><td class="n">yours, if you want it</td></tr>
+  </table>
+  <p>A model is one narrow, optional job here: answering yes or no about whether a sentence
+  explains an input, and quoting the text it used. Rules do the rest. Set
+  <code>ANTHROPIC_API_KEY</code>, <code>OPENAI_API_KEY</code> or <code>GEMINI_API_KEY</code> if you
+  want that step — it is your key, your bill, and never ours.</p>
+</section>
+
+<hr>
+
+<section>
+  <h2>If you ship an API</h2>
+  <p>Run it against a release you haven't published yet. Nothing is out there, so there is nothing
+  to defend.</p>
+<pre><code>npx stantal check ./ --against 1.4.0</code></pre>
+  <p>You find out which of your changes will silently strand customers while it still costs minutes
+  to fix, instead of a support thread six months later.</p>
+</section>
+
+<section>
+  <h2>Or skip the setup</h2>
+<pre><code>npx stantal &lt;package&gt; &lt;from&gt; &lt;to&gt;      # should I take this upgrade?
+npx stantal pin &lt;package&gt;              # lock in what it does today
+npx stantal history &lt;package&gt;          # which release broke it?</code></pre>
+  <p>Every one of those works with nothing installed and nothing configured.</p>
+</section>
+
+<footer>
+  <p>Stantal is MIT-licensed and runs entirely on your machine. It never executes the packages it
+  reads. <a href="https://github.com/hellunleash/stantal">Source</a> ·
+  <a href="https://www.npmjs.com/package/stantal">npm</a></p>
+</footer>
+
+</main>
+</body>
+</html>

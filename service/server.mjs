@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { Storage } from "@google-cloud/storage";
 import { renderHtml } from "stantal";
 
@@ -30,6 +33,16 @@ const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN ?? "";
 
 /** Well under Cloud Run's request cap, and far above any real report. */
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
+
+// Read once at startup. The landing page is the same on every request, and
+// re-reading it per request would trade a cold start for a disk hit forever.
+const HERE = dirname(fileURLToPath(import.meta.url));
+let LANDING = "";
+try {
+  LANDING = readFileSync(join(HERE, "landing.html"), "utf8");
+} catch {
+  LANDING = "";
+}
 
 const storage = new Storage();
 const bucket = BUCKET.length > 0 ? storage.bucket(BUCKET) : null;
@@ -149,6 +162,10 @@ const server = createServer((request, response) => {
   // never reaches the container, which reads as a service that is down.
   if (request.method === "GET" && url.pathname === "/status") {
     return send(response, 200, { ok: true, bucket: BUCKET.length > 0 });
+  }
+  if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
+    if (LANDING.length === 0) return send(response, 404, { error: "not found" });
+    return send(response, 200, LANDING, "text/html");
   }
   if (request.method === "POST" && url.pathname === "/v") {
     return handlePublish(request, response).catch((error) =>
