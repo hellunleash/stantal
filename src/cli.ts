@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
-import { isPresent } from "./contract/surface.js";
+import { isEvidencedAbsence, isPresent } from "./contract/surface.js";
 import { callerFromEnv } from "./behaviour/callers.js";
 import { behaviourCacheFromEnv } from "./behaviour/run.js";
 import type { Judge } from "./prose/judge.js";
@@ -26,6 +26,7 @@ import {
 } from "./report.js";
 import { assertionsFromContract, assertionsFromReport } from "./emit/assertions.js";
 import { emitTests, type EmitTarget, type WrittenFile } from "./emit/write.js";
+import { hostReadiness, readinessNotes } from "./emit/host.js";
 import { extractFromModule } from "./extract/module.js";
 import { exportedSubpaths, fsPackageSource } from "./extract/package-source.js";
 import { packageDirectory } from "./testkit.js";
@@ -459,8 +460,11 @@ function renderWritten(written: readonly WrittenFile[], pinnedAt: string): strin
     lines.push(`      ${file.assertions} assertion(s)  ${file.subpath}`);
   }
   lines.push(``);
-  lines.push(`  Run them with your own test command. They pass against ${pinnedAt},`);
-  lines.push(`  and fail when an upgrade takes any of it away.`);
+  // Deliberately does not say how to run them. Whether anything here can is a
+  // question this cannot answer, and the readiness notes below answer it —
+  // telling somebody to "run your test command" when they have none reads as
+  // advice from a tool that did not look.
+  lines.push(`  They pass against ${pinnedAt}, and fail when an upgrade takes any of it away.`);
   lines.push(``);
   lines.push(``);
   return lines.join("\n");
@@ -898,15 +902,29 @@ function runPin(
   const version = typeof manifest["version"] === "string" ? manifest["version"] : "unknown";
   const subpaths = values.surface ?? exportedSubpaths(manifest);
 
+  // The project being written into, as distinct from the package being read.
+  const root = process.cwd();
+
   const targets: EmitTarget[] = [];
-  const unreadable: string[] = [];
+  // Two different results, kept apart. "This entry point ships no tools" is a
+  // fact about the package; "we could not read it" is a gap in our reading, and
+  // only the second leaves something unprotected. Reporting them in one list
+  // told a user their UI entry point was fine when it was the one surface we
+  // had failed on.
+  const empty: string[] = [];
+  const unreadable: Array<{ subpath: string; detail: string; evidence: string | null }> = [];
   for (const subpath of subpaths) {
     const result = extractFromModule({ package: pkg, version, subpath, source });
     if (!result.present) {
-      // Named, never silently skipped. "We could not read this door" and "this
-      // door has nothing in it" are opposite claims, and only one of them means
-      // there is nothing to protect.
-      unreadable.push(subpath);
+      if (isEvidencedAbsence(result.absence.reason)) {
+        empty.push(subpath);
+      } else {
+        unreadable.push({
+          subpath,
+          detail: result.absence.detail,
+          evidence: result.absence.checked[0] ?? null,
+        });
+      }
       continue;
     }
     targets.push({
@@ -923,16 +941,41 @@ function runPin(
     generator: `stantal ${ownVersion()}`,
   });
 
+  // Whether this repository can resolve what the generated files import, and
+  // whether anything here would ever run them. Checked after writing rather
+  // than before, because the answer is advice rather than a veto — the files
+  // were asked for.
+  const readiness = hostReadiness(root);
+
   if (values.json === true) {
-    process.stdout.write(`${JSON.stringify({ package: pkg, version, written, unreadable }, null, 2)}\n`);
+    process.stdout.write(
+      `${JSON.stringify({ package: pkg, version, written, empty, unreadable, readiness }, null, 2)}\n`,
+    );
     return written.length === 0 ? 2 : 0;
   }
 
   process.stdout.write(`\n  ${pkg}@${version}\n`);
   process.stdout.write(renderWritten(written, `${pkg}@${version}`));
+
+  const notes = readinessNotes(readiness, root);
+  if (notes.length > 0) {
+    process.stdout.write(`  BEFORE THESE DO ANYTHING\n`);
+    for (const line of notes) process.stdout.write(line.length === 0 ? "\n" : `    ${line}\n`);
+    process.stdout.write("\n");
+  }
+
+  if (empty.length > 0) {
+    process.stdout.write(`  nothing to pin at: ${empty.join(", ")}\n`);
+    process.stdout.write(`    those entry points ship no tools, so there is nothing to protect\n\n`);
+  }
+
   if (unreadable.length > 0) {
-    process.stdout.write(`  could not read: ${unreadable.join(", ")}\n`);
-    process.stdout.write(`  nothing is pinned there, which is not the same as nothing being there\n\n`);
+    process.stdout.write(`  COULD NOT READ ${unreadable.length} entry point(s) — left unprotected:\n`);
+    for (const gap of unreadable) {
+      process.stdout.write(`    ${gap.subpath}  ${gap.detail}\n`);
+      if (gap.evidence !== null) process.stdout.write(`      ${gap.evidence}\n`);
+    }
+    process.stdout.write(`    This is a gap in our reading, not proof they ship nothing.\n\n`);
   }
 
   // Nothing written and nothing readable is a failure to do the job, not a

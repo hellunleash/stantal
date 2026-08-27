@@ -78,7 +78,7 @@ inputs:
   version:
     description: Which release of the CLI to run. Pinned by default, so a new one cannot change a verdict under you.
     required: false
-    default: "0.3.0"
+    default: "0.4.0"
 
 outputs:
   verdict:

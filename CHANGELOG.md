@@ -11,6 +11,30 @@ upgrade needs a full re-run.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-27
+
+Three things a real install found, all in `pin`.
+
+### Fixed
+
+- **`pin` no longer breaks the host project silently.** The files it writes
+  import `vitest` and `stantal/testkit`. Written into a project that has
+  neither — and whose tsconfig globs the tree — its type-check went from
+  passing to ten unresolved-import errors, in a command that has nothing to do
+  with testing. It now checks what the project can resolve, prints the exact
+  install command, and says where the failure will appear.
+- **`pin` says when nothing will ever run the tests.** App repos often gate on
+  a type-check and have no runner at all. A suite nobody runs cannot fail when
+  an upgrade removes something, which is the entire reason it exists. It is now
+  detected and named, with the two commands that fix it. Where a runner does
+  exist, it just says how to run them.
+- **`pin` distinguishes “ships no tools” from “we could not read it”.** Both
+  were reported in one list, so an entry point the reader had genuinely failed
+  on looked the same as one that was simply empty. The unreadable ones are now
+  reported separately, with the reason and a `file.js:line`, and stated to be
+  a gap in our reading rather than proof the package ships nothing.
+
+
 ## [0.3.0] - 2026-08-27
 
 ### Added
