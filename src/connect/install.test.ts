@@ -148,9 +148,20 @@ describe("the setup prompt", () => {
     expect(prompt).not.toContain("autonomously");
   });
 
-  test("scopes the agent to pinning, and says not to upgrade anything", () => {
+  test("points at the briefing rather than being the briefing", () => {
+    // The steps live in AGENTS.md now, where they can branch on what the audit
+    // actually found. A prompt cannot: it says the same four things in a repo
+    // with one contract dependency and in one with twelve.
     const prompt = setupPrompt();
-    expect(prompt).toContain("pin_contract");
+    expect(prompt).toContain("AGENTS.md");
+    expect(prompt).toContain("Contract drift (stantal)");
+  });
+
+  test("still scopes the agent, and says not to upgrade anything", () => {
+    // The scope has to survive the move. An agent told to read a file and then
+    // left unbounded is a worse default than the fixed script it replaced.
+    const prompt = setupPrompt();
     expect(prompt).toContain("Do not upgrade anything");
+    expect(prompt).toContain("do not change any code other than generated test files");
   });
 });

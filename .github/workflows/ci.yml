@@ -162,3 +162,37 @@ jobs:
             if (r.caller !== "none") throw new Error(`a caller ran without a key: ${r.caller}`);
             console.log(`keyless verdict: ${r.verdict}, judge: ${r.judge}, caller: ${r.caller}`);
           ' "$report"
+
+      # The same promise, on the command a first-time user actually types.
+      # `npx stantal` with no arguments is now the front door, so it is the run
+      # that has to work with nothing configured — and asserting C1 only on the
+      # three-argument form would leave the default path unchecked.
+      - name: The no-argument command works with every key unset
+        env:
+          ANTHROPIC_API_KEY: ""
+          OPENAI_API_KEY: ""
+          GEMINI_API_KEY: ""
+          GOOGLE_API_KEY: ""
+          GOOGLE_ACCESS_TOKEN: ""
+          STANTAL_VERTEX_PROJECT: ""
+        run: |
+          set -o pipefail
+          audit=$(mktemp)
+
+          set +e
+          node dist/cli.js --json > "$audit"
+          status=$?
+          set -e
+
+          if [ "$status" -gt 1 ]; then
+            echo "::error::exit $status — the no-argument command must produce an answer with no key"
+            head -c 2000 "$audit"
+            exit 1
+          fi
+
+          node -e '
+            const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+            if (typeof r.verdict !== "string") throw new Error("the audit produced no verdict");
+            if (!Array.isArray(r.entries)) throw new Error("the audit produced no entries");
+            console.log(`keyless audit: ${r.verdict}, ${r.entries.length} contract dependency/ies`);
+          ' "$audit"

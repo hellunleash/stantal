@@ -141,6 +141,16 @@ export function install(options: InstallOptions): InstallResult {
 /**
  * The prompt handed to an agent when the caller asks us to run one.
  *
+ * It used to be the four steps themselves. That made the same four calls in a
+ * repository with one contract dependency and in one with twelve, and it never
+ * asked the person anything. **It now points at `AGENTS.md` instead**, which is
+ * a decision procedure rather than a script: the agent reads what the audit
+ * actually found and asks about that.
+ *
+ * It also survives this prompt never being used. Most people will not pass
+ * `--run`; they will open their own agent, which finds `AGENTS.md` on its own
+ * because that is what the file is for.
+ *
  * Written as a request rather than a set of orders, and it deliberately does
  * not tell the agent to work without confirmation. A tool that silences the
  * approval prompts in somebody's agent has taken a decision that was not its to
@@ -149,14 +159,16 @@ export function install(options: InstallOptions): InstallResult {
  */
 export function setupPrompt(): string {
   return [
-    "Use the stantal MCP server that was just configured in this project.",
+    "This project now has the stantal MCP server configured, and an AGENTS.md",
+    "section explaining what to do with it.",
     "",
-    "1. Call list_contract_dependencies to see which installed dependencies hand a model a tool contract.",
-    "2. For each one it finds, call pin_contract to write a test suite recording what that package offers today.",
-    "3. Run the project's test command once to confirm the new tests pass.",
-    "4. Tell me what was pinned, and stop.",
+    'Read the "Contract drift (stantal)" section of AGENTS.md and follow it.',
     "",
-    "Do not upgrade anything, and do not change any code other than the generated test files.",
+    "It will have you make one call and then ask me a short set of questions about",
+    "what that call actually found. Ask them together, and skip any the result does",
+    "not support.",
+    "",
+    "Do not upgrade anything, and do not change any code other than generated test files.",
   ].join("\n");
 }
 

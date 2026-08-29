@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -57,9 +57,10 @@ describe("--behaviour", () => {
 
   it("warns and carries on when no key is set, rather than failing", async () => {
     process.env["STANTAL_CALLER"] = "none";
-    // No positionals, so this returns on usage before touching the network. The
-    // point is only that asking for Layer 2 without a key is not fatal here.
-    const code = await main(["--behaviour"]);
+    // One positional and no versions, so this returns on usage before touching
+    // the network. The point is only that asking for Layer 2 without a key is
+    // not fatal here.
+    const code = await main(["example", "--behaviour"]);
     expect(code).toBe(2);
     expect(stderr).toContain("stantal —");
   });
@@ -79,10 +80,10 @@ describe("--k validation", () => {
   it("warns rather than silently dropping it when --behaviour is absent", async () => {
     // Parsed on every path, so the same argument means the same thing whether
     // or not a key happens to be present.
-    // No positionals, so this stops at usage without touching the network. The
-    // warning still has to have been printed by then, which is the point: an
-    // argument is judged before any work is done on its behalf.
-    const code = await main(["--k", "8"]);
+    // One positional and no versions, so this stops at usage without touching
+    // the network. The warning still has to have been printed by then, which is
+    // the point: an argument is judged before any work is done on its behalf.
+    const code = await main(["example", "--k", "8"]);
     expect(code).toBe(2);
     expect(stderr).toContain("--k only applies with --behaviour");
   });
@@ -390,10 +391,27 @@ describe("--repo (Layer 3)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("does not read the repo unless a directory is named", async () => {
-    // The only layer that touches private code must never run because a repo
-    // happened to be the working directory.
+  it("reads the working directory by default", async () => {
+    // On by default. The caution belongs on sending something out, not on
+    // reading something in -- and the Action has defaulted this to "." since it
+    // shipped, so the old default left the path a person types answering a
+    // weaker question than the path CI runs.
     await main(["manifest", write("a.json", CATALOG), write("b.json", NARROWED), "--no-judge", "--json"]);
+    expect((JSON.parse(stdout) as { blast: unknown }).blast).not.toBeNull();
+  });
+
+  it("reads nothing when told none", async () => {
+    // The escape hatch, on the same sentinel the Action already uses. A null
+    // blast means nobody looked, which is a claim that has to stay reachable.
+    await main([
+      "manifest",
+      write("a.json", CATALOG),
+      write("b.json", NARROWED),
+      "--repo",
+      "none",
+      "--no-judge",
+      "--json",
+    ]);
     expect((JSON.parse(stdout) as { blast: unknown }).blast).toBeNull();
   });
 
@@ -420,5 +438,139 @@ describe("--repo (Layer 3)", () => {
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
+  });
+});
+
+describe("pin --all", () => {
+  let root: string;
+  let stdout: string;
+  let stderr: string;
+  let cwd: string;
+
+  const PACK = `export const tools = [{
+    name: "build",
+    description: "Build a screen from a request.",
+    inputSchema: { type: "object", properties: { request: { type: "string" } }, required: ["request"] },
+  }];`;
+
+  function installed(name: string, version: string): void {
+    const dir = join(root, "node_modules", ...name.split("/"));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name, version, exports: { ".": "./pack.js" } }));
+    writeFileSync(join(dir, "pack.js"), PACK);
+  }
+
+  beforeEach(() => {
+    stdout = "";
+    stderr = "";
+    cwd = process.cwd();
+    root = mkdtempSync(join(tmpdir(), "stantal-pinall-"));
+    writeFileSync(
+      join(root, "package.json"),
+      JSON.stringify({ name: "consumer", dependencies: { "@example/tools": "^1.0.0", "left-pad": "^1.0.0" } }),
+    );
+    installed("@example/tools", "1.0.0");
+    // A dependency that hands a model nothing, so it must not be pinned.
+    const plain = join(root, "node_modules", "left-pad");
+    mkdirSync(plain, { recursive: true });
+    writeFileSync(join(plain, "package.json"), JSON.stringify({ name: "left-pad", version: "1.0.0", main: "./index.js" }));
+    writeFileSync(join(plain, "index.js"), "export const pad = 1;");
+
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      stdout += String(chunk);
+      return true;
+    });
+    vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      stderr += String(chunk);
+      return true;
+    });
+  });
+
+  afterEach(() => {
+    process.chdir(cwd);
+    vi.restoreAllMocks();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("pins every contract-bearing dependency and leaves the rest alone", async () => {
+    const code = await main(["pin", "--all", "--directory", root]);
+    expect(code).toBe(0);
+    expect(existsSync(join(root, "stantal", "example-tools.root.contract.test.ts"))).toBe(true);
+    expect(existsSync(join(root, "stantal", "left-pad.root.contract.test.ts"))).toBe(false);
+  });
+
+  it("writes into the directory it was pointed at, not the working directory", async () => {
+    // Scanning one root and writing into another would put a suite about one
+    // project inside a different one, and nothing downstream would notice.
+    await main(["pin", "--all", "--directory", root]);
+    expect(existsSync(join(process.cwd(), "stantal", "example-tools.root.contract.test.ts"))).toBe(false);
+  });
+
+  it("never overwrites a suite that already exists", async () => {
+    mkdirSync(join(root, "stantal"), { recursive: true });
+    const path = join(root, "stantal", "example-tools.root.contract.test.ts");
+    writeFileSync(path, "// pinned by hand at an older version", "utf8");
+
+    const code = await main(["pin", "--all", "--directory", root]);
+    expect(code).toBe(0);
+    // Re-recording against what is installed now would erase the assertions
+    // that were about to fail, and report it as success.
+    expect(readFileSync(path, "utf8")).toBe("// pinned by hand at an older version");
+    expect(stdout).toContain("already pinned, left alone");
+    // "0 of 2 pinned" was what this said, which reads as a failure and is the
+    // opposite of what happened.
+    expect(stdout).not.toContain("0 of");
+  });
+
+  it("refuses a package name and --all together", async () => {
+    const code = await main(["pin", "@example/tools", "--all", "--directory", root]);
+    expect(code).toBe(2);
+    expect(stderr).toContain("a package name or --all, not both");
+  });
+
+  it("says so, and exits clean, when nothing here hands a model tools", async () => {
+    const bare = mkdtempSync(join(tmpdir(), "stantal-bare-"));
+    writeFileSync(join(bare, "package.json"), JSON.stringify({ name: "empty" }));
+    try {
+      const code = await main(["pin", "--all", "--directory", bare]);
+      expect(code).toBe(0);
+      expect(stderr).toContain("no installed dependency");
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the no-argument command", () => {
+  let root: string;
+  let stdout: string;
+
+  beforeEach(() => {
+    stdout = "";
+    root = mkdtempSync(join(tmpdir(), "stantal-audit-cli-"));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "consumer" }));
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      stdout += String(chunk);
+      return true;
+    });
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("runs the audit instead of printing usage", async () => {
+    const code = await main(["--directory", root, "--no-judge"]);
+    // Nothing here to check is a clean exit, not a failure. A non-zero exit
+    // would teach people to stop running this in CI.
+    expect(code).toBe(0);
+    expect(stdout).toContain("Nothing here can be affected by contract drift");
+  });
+
+  it("still prints usage when a package was named without versions", async () => {
+    const code = await main(["@example/tools"]);
+    expect(code).toBe(2);
   });
 });

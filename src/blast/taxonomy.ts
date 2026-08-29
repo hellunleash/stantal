@@ -70,8 +70,25 @@ export type Reach = {
  * would make them indistinguishable — which is exactly how a consumer ends up
  * believing they are safe.
  */
+/**
+ * Why a real finding cannot reach this consumer.
+ *
+ * A machine-readable kind alongside the sentence, because callers branch on
+ * this. "Your declared range already excludes it" and "you never import that
+ * door" lead to different advice, and matching on the wording of a sentence to
+ * tell them apart is a bug waiting for the day somebody improves the wording.
+ */
+export type FilteredKind =
+  /** The manifest names the package, and the declared range admits no affected version. */
+  | "range_excludes"
+  /** There is a manifest and it does not name the package at all. */
+  | "not_a_dependency"
+  /** The repo imports this package, but never the subpath the finding sits on. */
+  | "subpath_not_imported";
+
 export type Filtered = {
   target: string;
+  kind: FilteredKind;
   reason: string;
 };
 

@@ -18,12 +18,31 @@
 
 **Paste this into Claude Code, Cursor or Codex:**
 
-> Set up stantal in this repo. Run `npx stantal connect`, then do what it prints.
-> It needs no account and no API key. Tell me what it found.
+> Set up stantal in this repo. Run `npx stantal connect`, then read the
+> "Contract drift" section of the AGENTS.md it writes and follow it.
+> It needs no account and no API key.
 
-That is the whole setup. Your agent does the rest.
+That is the whole setup. `connect` registers the MCP server and writes an
+`AGENTS.md` section — a short decision procedure, not a script. Your agent makes
+one call, then asks you about **what that call actually found**: which packages
+to protect, which upgrade to hold, which of your files a change reaches. In a
+repo with nothing to report it says so and stops.
 
-**Prefer a terminal?** Same thing, one line:
+The file stays in your repository, so the next person to clone it is briefed
+without installing anything. Delete the block to opt out.
+
+**Prefer a terminal?** No arguments, no setup:
+
+```bash
+npx stantal
+```
+
+Run that in any repository. It finds which of your dependencies hand a model
+tools, checks the upgrade waiting for each one, works out which of your own files
+it reaches, and prints a short list of what to do in order. It reads and ranks;
+it writes nothing.
+
+To register it with your coding agent instead, so the agent can ask on its own:
 
 ```bash
 npx stantal connect
@@ -31,13 +50,18 @@ npx stantal connect
 
 ```
   connected  Claude Code
-    .mcp.json  — left alone: github
+    .mcp.json  — this project already has .mcp.json
+    left alone: github
+    Restart Claude Code and approve the server when it asks
 
-  2 of your dependencies give an AI tools it can call:
-    @modelcontextprotocol/server-filesystem  14 tools
-    tavily-mcp                                5 tools
+  created  AGENTS.md
+    what your agent reads before it does anything — delete the block to opt out
 
-  Ask your agent:  pin my contract dependencies with stantal
+  2 of your dependencies hand a model a tool contract (19 tools):
+    @modelcontextprotocol/server-filesystem  14 tool(s)  bin:mcp-server-filesystem
+    tavily-mcp                                5 tool(s)  bin:tavily-mcp
+
+  Ask your agent:  read AGENTS.md and set up stantal
 
   No account, no key, no signup. Everything above ran on this machine.
 ```
@@ -64,16 +88,22 @@ read differently, and **145** of them broke nothing you could have tested for.
 
 ## The four things you will actually use
 
-### 1. Lock in what a package does today
+### 1. Lock in what your packages do today
 
 ```bash
-npx stantal pin @acme/sdk
+npx stantal pin --all
 ```
 
-Writes a test file into your repo recording what that package offers now. It
-passes today and fails the day an update takes any of it away. Nothing to
-maintain — you own the file, and it keeps working whether or not you ever run
-this again.
+**Pinning here is not version pinning.** It does not touch your `package.json`
+and it does not stop you upgrading. It writes a test file into your repo
+recording what each package offers a model right now — which tools exist, which
+parameters they take, which of those are required. The suite passes today and
+fails the day an update takes any of it away. Nothing to maintain: you own the
+files, and they keep working whether or not you ever run this tool again.
+
+`--all` does every contract-bearing dependency at once and never overwrites a
+suite that already exists. `npx stantal pin @acme/sdk` does one, and re-records
+it against whatever is installed now.
 
 ### 2. Should I take this update?
 
@@ -89,7 +119,8 @@ npx stantal @acme/sdk 1.4.0 1.5.0
 
 Exit `0` clean · `1` something to look at · `2` could not read enough to say.
 
-Add `--repo .` to also see which of **your** files it touches.
+It already reports which of **your** files a finding touches. Pass `--repo none`
+to turn that off, or `--repo <dir>` to point it at a different directory.
 
 ### 3. Which release broke it, and where can I go?
 
@@ -124,6 +155,7 @@ find the text exactly once or it refuses.
 <summary>Everything else</summary>
 
 ```bash
+npx stantal watch                       # for a scheduled job: decide what to say
 npx stantal check ./ --against 1.4.0    # a release you have not published yet
 npx stantal manifest <before> <after>   # a contract that never reached a registry
 npx stantal mcp                         # the MCP server itself, over stdio
@@ -132,7 +164,7 @@ npx stantal mcp                         # the MCP server itself, over stdio
 Flags worth knowing: `--surface <subpath>` reads one entry point only ·
 `--html <file>` writes the verdict as one shareable page · `--json` prints
 everything · `--replay` answers only from recordings and cannot make a network
-call.
+call · `--repo none` skips reading your own files.
 
 </details>
 
@@ -225,6 +257,33 @@ gets switched off by Friday.
 
 ---
 
+## Let it watch on its own
+
+The check above runs when somebody opens a pull request. Contract drift does not
+wait for that — it arrives on release day, in a dependency nobody was thinking
+about.
+
+Copy [`templates/stantal-watch.yml`](templates/stantal-watch.yml) into
+`.github/workflows/`. Once a week it reads your contracts and, when one moves:
+
+- **If a bump is already open** — Renovate, Dependabot, a person — it comments
+  the verdict on **that** pull request. It does not open a competing one.
+- **Otherwise** it opens one pull request that adds contract tests recording what
+  each package offers today.
+
+**It ships the proof, not the fix.** The tests it writes pass on your current
+versions and fail the moment an upgrade takes any of the contract away, so the
+claim is checkable in one command by somebody who has never heard of us. It
+never upgrades anything and never touches your source.
+
+It runs with no account and no key. Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or
+`GEMINI_API_KEY` as a repository secret and it also puts both contracts in front
+of a real model and compares what it does — a scheduled run is the one place
+that is worth paying for, because it happens at most once per release and lands
+where someone is deciding.
+
+---
+
 ## If you ship an API
 
 Run it against a release you have not published yet:
@@ -247,7 +306,9 @@ to go.
 - **Nothing leaves your machine unless you ask.** No account, no telemetry.
 - **It never runs the package it reads.** Contracts are parsed out of published
   files, so nothing from an untrusted package executes on your machine.
-- **`--repo` never calls out.** The scan of your files is a local read.
+- **The scan of your files never calls out.** It reads the directory you are in,
+  matches findings against it, and stops there — no network, no upload. Turn it
+  off entirely with `--repo none`.
 - **Private registries already work.** Fetching uses `pacote`, which is what npm
   itself uses, so your `.npmrc`, auth token and proxy are handled.
 - **`--publish` strips your file paths** before sending, and prints what it

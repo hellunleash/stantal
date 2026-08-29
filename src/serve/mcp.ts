@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -7,11 +6,22 @@ import { extractFromModule } from "../extract/module.js";
 import { packageDirectory } from "../testkit.js";
 import { assertionsFromContract } from "../emit/assertions.js";
 import { emitTests, type EmitTarget } from "../emit/write.js";
-import { buildReport, exitCodeFor } from "../report.js";
+import { buildReport, countFindings, exitCodeFor } from "../report.js";
 import { pacoteRegistry } from "../registry/npm.js";
 import { walkHistory } from "../history.js";
 import { planRemedy } from "../remedy/plan.js";
+import { fsRepoSource } from "../blast/repo.js";
+import {
+  auditProject,
+  auditVerdict,
+  contractDependencies,
+  heldByRange,
+  isCurrent,
+  isUnreachable,
+} from "../audit.js";
 import type { Judge } from "../prose/judge.js";
+
+export { contractDependencies };
 
 /**
  * Stantal as an MCP server.
@@ -28,8 +38,14 @@ import type { Judge } from "../prose/judge.js";
  * be the loudest possible argument that the rule does not matter.
  *
  * **Nothing here needs an account, a key or a network call to us.** Two of the
- * four tools never touch the network at all. The other two fetch published
+ * five tools never touch the network at all. The other three fetch published
  * tarballs from the registry the user already uses.
+ *
+ * **`audit_project` is the front door and the others are follow-ups.** An agent
+ * handed four tools has to sequence them, and sequencing them correctly means
+ * holding our mental model of the problem — which is our job, not its. One call
+ * returns the ranked plan; the rest exist for going deeper on one package once
+ * that plan has named it.
  */
 
 /** How long an answer is allowed to get before it stops being useful to a model. */
@@ -43,59 +59,6 @@ function json(value: unknown): { content: Array<{ type: "text"; text: string }> 
   return text(JSON.stringify(value, null, 2));
 }
 
-/**
- * Which installed dependencies ship a contract a model reads.
- *
- * Offline and quick, because it is the first question and a slow first question
- * does not get asked twice.
- */
-export function contractDependencies(directory: string): Array<{
-  package: string;
-  version: string;
-  subpaths: string[];
-  tools: number;
-}> {
-  let manifest: Record<string, unknown>;
-  try {
-    manifest = JSON.parse(readFileSync(`${directory}/package.json`, "utf8")) as Record<string, unknown>;
-  } catch {
-    return [];
-  }
-
-  const named = new Set<string>();
-  for (const field of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
-    const block = manifest[field];
-    if (block !== null && typeof block === "object") {
-      for (const name of Object.keys(block as Record<string, unknown>)) named.add(name);
-    }
-  }
-
-  const out: Array<{ package: string; version: string; subpaths: string[]; tools: number }> = [];
-  for (const name of [...named].sort()) {
-    const dir = packageDirectory(name, directory);
-    if (dir === null) continue;
-    const source = fsPackageSource(dir);
-    const own = source.packageJson();
-    if (own === null) continue;
-    const version = typeof own["version"] === "string" ? own["version"] : "unknown";
-
-    const withTools: string[] = [];
-    let tools = 0;
-    for (const subpath of exportedSubpaths(own)) {
-      const result = extractFromModule({ package: name, version, subpath, source });
-      if (result.present && result.contract.tools.length > 0) {
-        withTools.push(subpath);
-        tools += result.contract.tools.length;
-      }
-    }
-    // Only packages that actually hand a model a tool set. Listing every
-    // dependency would bury the handful that matter under a hundred that
-    // cannot be affected by any of this.
-    if (withTools.length > 0) out.push({ package: name, version, subpaths: withTools, tools });
-  }
-  return out;
-}
-
 export type ServerOptions = {
   judge?: Judge | null;
   version?: string;
@@ -106,16 +69,102 @@ export function createServer(options: ServerOptions = {}): McpServer {
   const server = new McpServer({ name: "stantal", version: options.version ?? "0.0.0" });
 
   server.registerTool(
+    "audit_project",
+    {
+      title: "Audit this project and return what to do about it",
+      description:
+        "Answers the whole question in one call: which of this project's dependencies hand a " +
+        "language model a tool contract, whether an upgrade is waiting for any of them, what " +
+        "that upgrade would change about what the model reads, which of this project's own " +
+        "files those changes reach, and which dependencies already have contract tests. " +
+        "Returns a ranked plan, worst first. Prefer this over calling " +
+        "list_contract_dependencies and check_upgrade separately — the other tools exist for " +
+        "following up on one package once this has named it. Fetches published tarballs from " +
+        "the registry; no package is ever executed and nothing is written. " +
+        "Pass `directory` only when the project root is not the current working directory. " +
+        "Pass `skip_reach` only to skip reading this project's own source, which is the slow " +
+        "part on a large repository and the only part that reads code you have not published.",
+      inputSchema: {
+        directory: z
+          .string()
+          .optional()
+          .describe(
+            "Project root holding the package.json to audit. Defaults to the current working " +
+              "directory, which is correct for a normal repository checkout.",
+          ),
+        skip_reach: z
+          .boolean()
+          .optional()
+          .describe(
+            "Set true to skip scanning this project's own files for the places a finding " +
+              "touches. Defaults to false, which scans them. Skipping is faster on a large " +
+              "repository, but the result can then no longer say whether anything reaches you.",
+          ),
+      },
+    },
+    async ({ directory, skip_reach }) => {
+      const root = directory ?? process.cwd();
+      const result = await auditProject({
+        directory: root,
+        registry: pacoteRegistry(),
+        judge,
+        ...(skip_reach === true ? {} : { repo: fsRepoSource(root) }),
+      });
+
+      // Shaped for a model rather than handed over raw. A full report per
+      // dependency is tens of kilobytes of nested detail, and burying the one
+      // line that matters inside it is the same failure this project exists to
+      // find. The follow-up tools return the detail when it is wanted.
+      return json({
+        verdict: auditVerdict(result),
+        declared_dependencies: result.declared,
+        contract_dependencies: result.entries.length,
+        can_run_tests: result.readiness.hasRunner,
+        missing_for_tests: result.readiness.missing,
+        dependencies: result.entries.map((entry) => ({
+          package: entry.package,
+          installed: entry.installed,
+          latest: entry.latest,
+          upgrade_available: entry.latest !== null && !isCurrent(entry),
+          tools: entry.tools,
+          subpaths: entry.subpaths,
+          pinned: entry.pinnedSubpaths.length === entry.subpaths.length,
+          unpinned_subpaths: entry.subpaths.filter((s) => !entry.pinnedSubpaths.includes(s)),
+          verdict: entry.report?.verdict ?? null,
+          headline: entry.report?.headline ?? null,
+          findings: entry.report === null ? null : countFindings(entry.report),
+          reaches:
+            entry.report?.blast?.reaches.slice(0, 8).map((r) => ({
+              kind: r.kind,
+              target: r.target,
+              evidence: r.evidence,
+            })) ?? null,
+          // The findings are real and this project's declared range admits
+          // none of the versions carrying them. Different advice from both
+          // "nothing reaches you" and "hold it", so it travels separately.
+          held_by_declared_range: heldByRange(entry),
+          // Kept, never collapsed into the verdict. "We could not read this"
+          // and "we read it and it is fine" are opposite claims.
+          unreachable: isUnreachable(entry),
+          note: entry.note,
+        })),
+      });
+    },
+  );
+
+  server.registerTool(
     "list_contract_dependencies",
     {
       title: "List dependencies that expose a tool contract",
       description:
         "Lists which of this project's installed dependencies hand a language model a tool " +
-        "contract — a set of tool names, descriptions and parameters. Start here: most " +
-        "dependencies expose nothing of the kind and cannot be affected by contract drift, so " +
-        "this narrows a hundred packages down to the few worth checking. Reads node_modules " +
-        "only. It makes no network call and never executes any package. " +
-        "Pass `directory` only when the project root is not the current working directory.",
+        "contract — a set of tool names, descriptions and parameters. Most dependencies expose " +
+        "nothing of the kind and cannot be affected by contract drift, so this narrows a " +
+        "hundred packages down to the few worth checking. Use audit_project instead when you " +
+        "want to know what to do about them; this tool answers only what exists, and answers " +
+        "it offline. Reads node_modules only. It makes no network call and never executes any " +
+        "package. Pass `directory` only when the project root is not the current working " +
+        "directory.",
       inputSchema: {
         directory: z
           .string()

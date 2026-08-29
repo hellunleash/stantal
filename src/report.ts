@@ -604,6 +604,29 @@ export function exitCodeFor(verdict: VerdictLevel): 0 | 1 | 2 {
 }
 
 /**
+ * What this report found, per layer, folded across every surface.
+ *
+ * Kept in four separate numbers rather than one total. A structural change and
+ * a prose finding are not the same claim, and `withheld` is not a finding at
+ * all — it is a claim we declined to make. Summing them would inflate the count
+ * and let a reader mistake our silence for our evidence.
+ */
+export function countFindings(report: Report): {
+  structural: number;
+  prose: number;
+  behavioural: number;
+  withheld: number;
+} {
+  const surfaces = report.surfaces;
+  return {
+    structural: surfaces.flatMap((s) => s.comparison.diff?.changes ?? []).filter((c) => c.breaking).length,
+    prose: surfaces.flatMap((s) => s.prose.findings).length,
+    behavioural: surfaces.flatMap((s) => s.behaviour?.findings ?? []).length,
+    withheld: surfaces.reduce((n, s) => n + s.comparison.suppressed.length + s.prose.skipped.length, 0),
+  };
+}
+
+/**
  * A build that has not been published yet, against a release that has.
  *
  * The provider's own gate, and the one case neither other entry point serves.

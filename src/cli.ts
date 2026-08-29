@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync } from "node:fs";
-import { basename } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { isEvidencedAbsence, isPresent } from "./contract/surface.js";
@@ -8,7 +8,7 @@ import { callerFromEnv } from "./behaviour/callers.js";
 import { behaviourCacheFromEnv } from "./behaviour/run.js";
 import type { Judge } from "./prose/judge.js";
 import { judgeFromEnv } from "./prose/judges.js";
-import { fsRepoSource } from "./blast/repo.js";
+import { fsRepoSource, type RepoSource } from "./blast/repo.js";
 import { planRemedy } from "./remedy/plan.js";
 import type { Remedy } from "./remedy/taxonomy.js";
 import { canClaimUnaffected } from "./blast/taxonomy.js";
@@ -19,6 +19,7 @@ import {
   buildLocalReport,
   buildManifestReport,
   buildReport,
+  countFindings,
   exitCodeFor,
   type BehaviourOptions,
   type Report,
@@ -26,6 +27,7 @@ import {
 } from "./report.js";
 import { assertionsFromContract, assertionsFromReport } from "./emit/assertions.js";
 import { emitTests, type EmitTarget, type WrittenFile } from "./emit/write.js";
+import { testFileName } from "./emit/vitest.js";
 import { hostReadiness, readinessNotes } from "./emit/host.js";
 import { extractFromModule } from "./extract/module.js";
 import { exportedSubpaths, fsPackageSource } from "./extract/package-source.js";
@@ -36,7 +38,20 @@ import { renderHtml } from "./verdict/html.js";
 import { publishableReport } from "./verdict/publish.js";
 import { AGENTS, agentById } from "./connect/agents.js";
 import { detectAgents, install, runAgent, type DetectedAgent, type InstallResult } from "./connect/install.js";
-import { contractDependencies, serveStdio } from "./serve/mcp.js";
+import { writeAgentsMd, type WriteAgentsResult } from "./connect/agents-md.js";
+import { serveStdio } from "./serve/mcp.js";
+import {
+  auditProject,
+  auditVerdict,
+  contractDependencies,
+  heldByRange,
+  isCurrent,
+  isUnreachable,
+  reachCount,
+  type AuditEntry,
+  type AuditResult,
+} from "./audit.js";
+import { watchProject, watchSummary } from "./watch.js";
 
 /**
  * Rung 1 — the whole product in one command, with nothing installed.
@@ -50,6 +65,9 @@ import { contractDependencies, serveStdio } from "./serve/mcp.js";
 const USAGE = `
 stantal — know whether an upgrade changes how a model uses your dependency
 
+  stantal                                  audit this project and say what to do
+  stantal pin --all                        protect every contract you depend on
+  stantal watch                            for a scheduled job: decide what to say
   stantal <package> <from> <to> [options]
   stantal history <package> [options]
   stantal manifest <before...> <after...> [options]
@@ -58,6 +76,19 @@ stantal — know whether an upgrade changes how a model uses your dependency
   stantal patch <package> <from> [options]
   stantal connect [options]
   stantal mcp
+
+Run it with no arguments in any repository. It finds which of your dependencies
+hand a model tools, checks what the upgrade waiting for each of them would
+change, works out which of your own files that reaches, and prints a short list
+of what to do in order. It reads and ranks; it writes nothing.
+
+Pinning is the step that writes. It reads the version you have installed right
+now, records what the package offers — which tools exist, which parameters they
+take, which of those are required — and leaves a Vitest suite that passes today
+and fails the day an upgrade takes any of it away. Nothing is fetched, the
+package is never executed, and the tests keep working whether or not you ever
+run this tool again. --all does it for every contract-bearing dependency at
+once, and never overwrites a suite that already exists.
 
 Comparing two versions tells you whether to take an upgrade.
 Walking the history tells you which release broke it, and the last one that
@@ -78,12 +109,6 @@ connecting connects the team, and it is four visible lines to delete if you want
 it gone. The "mcp" subcommand is the server itself, spoken over stdio; you
 rarely run it by hand.
 
-Pinning writes contract tests into your own repository. It reads the version you
-have installed right now, records what the package offers, and leaves a suite
-that passes today and fails the day an upgrade takes any of it away. Nothing is
-fetched, the package is never executed, and the tests keep working whether or
-not you ever run this tool again.
-
 Each side of the manifest form takes a comma-separated list of documents, catalog
 first, because a contract is often split - schemas generated from routes, prose
 kept where a person edits it. What a model receives is the merge.
@@ -99,7 +124,14 @@ Options
                         document only states. Repeatable.
   --repo <dir>          Layer 3: which of YOUR call sites a finding reaches.
                         Reads that directory only, never writes, never calls
-                        out. Off unless you pass it.
+                        out. Defaults to "." — pass "none" to turn it off.
+  --all                 pin: every contract-bearing dependency at once.
+                        Never overwrites a suite that already exists.
+  --write               watch: actually write the contract tests it planned.
+                        Off by default; deciding and doing are separate.
+  --text                watch: print for a person. Default is JSON, because
+                        the caller is usually a workflow.
+  --directory <dir>     Project root to read. Default: cwd
   --emit-tests          Write contract tests for what this comparison found,
                         pinning the older side so they fail on the upgrade.
   --out <dir>           Where emitted tests go. Default: stantal/
@@ -107,7 +139,6 @@ Options
   --run                 connect: also hand the setup prompt to that agent.
                         Off by default — starting your agent can edit files
                         and spend tokens, so it is never done on install.
-  --directory <dir>     connect: project root to write into. Default: cwd
   --apply               patch: actually write the edits into node_modules.
                         Off by default; the plan is printed instead.
   --html <file>         Also write the verdict as one self-contained HTML page.
@@ -580,8 +611,22 @@ function runConnect(
     }
   }
 
+  // The briefing, written next to the config that makes it actionable.
+  //
+  // Every agent looks for this file, including ones we do not detect and ones
+  // that do not exist yet, so it reaches further than any config we could
+  // write. It also travels with the repository: the next person to clone it is
+  // briefed without installing anything.
+  let briefing: WriteAgentsResult;
+  try {
+    briefing = writeAgentsMd(directory);
+  } catch (error) {
+    process.stderr.write(`stantal: could not write AGENTS.md: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
+
   if (values.json === true) {
-    process.stdout.write(`${JSON.stringify({ directory, version, installed }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ directory, version, installed, briefing }, null, 2)}\n`);
     return 0;
   }
 
@@ -599,6 +644,13 @@ function runConnect(
     out.push(`    ${result.agent.next}`);
     out.push("");
   }
+
+  out.push(
+    `  ${briefing.action}  ${briefing.file}` +
+      (briefing.preserved > 0 ? `  — ${dim(`${briefing.preserved} bytes of yours left alone`)}` : ""),
+  );
+  out.push(`    ${dim("what your agent reads before it does anything — delete the block to opt out")}`);
+  out.push("");
 
   // Something to read on the first run.
   //
@@ -618,7 +670,7 @@ function runConnect(
       out.push(`    ${dep.package}@${dep.version}  ${dep.tools} tool(s)  ${dep.subpaths.join(", ")}`);
     }
     out.push("");
-    out.push(`  Ask your agent:  pin my contract dependencies with stantal`);
+    out.push(`  Ask your agent:  read AGENTS.md and set up stantal`);
   }
   out.push("");
   out.push(`  No account, no key, no signup. Everything above ran on this machine.`);
@@ -859,6 +911,88 @@ async function runPatch(
 }
 
 /**
+ * `stantal pin` — one package, or every one that needs it.
+ *
+ * `--all` exists because the single-package form asks the user to already know
+ * which of their dependencies hand a model tools, and that is the one thing
+ * they have no way to know before running something. The audit names them; this
+ * protects all of them in one command.
+ *
+ * **`--all` never overwrites an existing suite.** A package pinned at 1.0 and
+ * upgraded to 1.1 would be re-recorded against 1.1, which erases the assertions
+ * that were about to fail and reports it as success — the tool quietly deleting
+ * the protection it was run to provide. A package already pinned is skipped and
+ * said out loud. Refreshing one on purpose is still `stantal pin <package>`.
+ */
+function runPin(
+  pkg: string | undefined,
+  values: {
+    surface?: string[] | undefined;
+    out?: string | undefined;
+    json?: boolean | undefined;
+    all?: boolean | undefined;
+    directory?: string | undefined;
+  },
+): number {
+  const root = values.directory ?? process.cwd();
+  if (values.all !== true) return pinOne(pkg, values, root);
+
+  if (pkg !== undefined) {
+    process.stderr.write(`stantal: pin takes a package name or --all, not both.\n`);
+    return 2;
+  }
+
+  const testDir = values.out ?? DEFAULT_TEST_DIR;
+  const deps = contractDependencies(root);
+
+  if (deps.length === 0) {
+    process.stderr.write(
+      `stantal: no installed dependency in ${root} exposes a tool contract to pin.\n` +
+        `That is a normal result. It is not a claim that every dependency was readable.\n`,
+    );
+    return 0;
+  }
+
+  const already: string[] = [];
+  const attempted: string[] = [];
+  let failures = 0;
+
+  for (const dep of deps) {
+    const pinned = dep.subpaths.every((subpath) =>
+      existsSync(join(root, testDir, testFileName(dep.package, subpath))),
+    );
+    if (pinned) {
+      already.push(dep.package);
+      continue;
+    }
+    attempted.push(dep.package);
+    if (pinOne(dep.package, values, root) !== 0) failures += 1;
+  }
+
+  if (already.length > 0) {
+    process.stdout.write(
+      `\n  already pinned, left alone: ${already.join(", ")}\n` +
+        `    ${dim(`re-record one against the version installed now with: stantal pin <package>`)}\n`,
+    );
+  }
+
+  // Counted against what was attempted, not against every dependency. "0 of 2
+  // pinned" is what this said when both were already protected, which reads as
+  // a failure and is the opposite of what happened.
+  process.stdout.write(
+    attempted.length === 0
+      ? `\n  ${bold(`nothing left to pin`)}  ${dim(`all ${deps.length} package(s) already have contract tests`)}\n\n`
+      : `\n  ${bold(`${attempted.length - failures} of ${attempted.length} package(s) pinned`)}` +
+          `${failures > 0 ? red(`, ${failures} could not be read`) : ""}` +
+          `${already.length > 0 ? dim(`, ${already.length} already had tests`) : ""}\n\n`,
+  );
+
+  // Nothing written and nothing already in place is a failure to do the job.
+  // Exiting 0 there would let a setup step pass while protecting nothing.
+  return attempted.length > 0 && attempted.length === failures ? 2 : 0;
+}
+
+/**
  * `stantal pin <package>` — write contract tests for what is installed now.
  *
  * The only command here that writes into the user's repository, and the only
@@ -870,23 +1004,27 @@ async function runPatch(
  * problem yet and have no second version in mind, and asking for one would make
  * the safe move the harder one.
  */
-function runPin(
+function pinOne(
   pkg: string | undefined,
   values: {
     surface?: string[] | undefined;
     out?: string | undefined;
     json?: boolean | undefined;
   },
+  // The project being written into, as distinct from the package being read.
+  // Passed rather than read back off the process, so that scanning one
+  // directory and writing into another is impossible rather than unlikely.
+  root: string,
 ): number {
   if (pkg === undefined) {
     process.stderr.write(`stantal: pin wants a package name.\n\n  stantal pin @scope/example-sdk\n\n`);
     return 2;
   }
 
-  const directory = packageDirectory(pkg);
+  const directory = packageDirectory(pkg, root);
   if (directory === null) {
     process.stderr.write(
-      `stantal: ${pkg} is not installed under any node_modules above ${process.cwd()}.\n` +
+      `stantal: ${pkg} is not installed under any node_modules above ${root}.\n` +
         `Contract tests pin the version you actually run, so install it first.\n`,
     );
     return 2;
@@ -901,9 +1039,6 @@ function runPin(
 
   const version = typeof manifest["version"] === "string" ? manifest["version"] : "unknown";
   const subpaths = values.surface ?? exportedSubpaths(manifest);
-
-  // The project being written into, as distinct from the package being read.
-  const root = process.cwd();
 
   const targets: EmitTarget[] = [];
   // Two different results, kept apart. "This entry point ships no tools" is a
@@ -936,7 +1071,7 @@ function runPin(
   }
 
   const written = emitTests({
-    directory: values.out ?? DEFAULT_TEST_DIR,
+    directory: join(root, values.out ?? DEFAULT_TEST_DIR),
     targets,
     generator: `stantal ${ownVersion()}`,
   });
@@ -1072,10 +1207,10 @@ async function runManifest(
     publish?: string | undefined;
     "fields-at"?: string | undefined;
     "exclude-when"?: string[] | undefined;
-    repo?: string | undefined;
   },
   judge: Judge | null,
   behaviour: BehaviourOptions | undefined,
+  repo: RepoSource | undefined,
 ): Promise<number> {
   if (beforePath === undefined || afterPath === undefined) {
     process.stderr.write(`stantal: manifest needs two files — a before and an after.\n\n${USAGE}\n`);
@@ -1137,7 +1272,7 @@ async function runManifest(
       judge,
       ...(values["fields-at"] !== undefined ? { fieldsKey: values["fields-at"] } : {}),
       ...(excludeWhen.length > 0 ? { excludeWhen } : {}),
-      ...(values.repo === undefined ? {} : { repo: fsRepoSource(values.repo) }),
+      ...(repo === undefined ? {} : { repo }),
       ...(behaviour === undefined ? {} : { behaviour }),
     });
 
@@ -1313,6 +1448,294 @@ export function applyReplay(env: NodeJS.ProcessEnv): void {
   env["STANTAL_BEHAVIOUR_CACHE"] = "replay";
 }
 
+// --- The no-argument command -------------------------------------------------
+
+/**
+ * `npx stantal`, with nothing after it.
+ *
+ * The other commands all assume the user already knows a package name and two
+ * versions. Almost nobody does before something has broken. This one starts
+ * from the only thing they reliably have — a directory — and ends with a short
+ * list of things to do, in order.
+ *
+ * **It writes nothing.** The plan names `stantal pin --all` as a step; that
+ * command is the one that writes, and it runs because somebody ran it.
+ */
+async function runAudit(
+  values: {
+    json?: boolean | undefined;
+    cache?: string | undefined;
+    directory?: string | undefined;
+    concurrency?: number | undefined;
+    repo?: RepoSource | undefined;
+    out?: string | undefined;
+  },
+  judge: Judge | null,
+): Promise<number> {
+  const directory = values.directory ?? process.cwd();
+  const quiet = values.json === true;
+
+  // Progress on stderr, never stdout. `--json` has to stay pipeable, and a
+  // progress line in the middle of a JSON document is the kind of small
+  // thoughtlessness that makes a tool unusable in a script.
+  if (!quiet) process.stderr.write(`  reading ${directory}\n`);
+
+  const result = await auditProject({
+    directory,
+    registry: pacoteRegistry(),
+    judge,
+    ...(values.repo === undefined ? {} : { repo: values.repo }),
+    ...(values.cache !== undefined ? { cacheRoot: values.cache } : {}),
+    ...(values.out !== undefined ? { testDir: values.out } : {}),
+    ...(values.concurrency !== undefined ? { concurrency: values.concurrency } : {}),
+    ...(quiet
+      ? {}
+      : {
+          onProgress: (done, total, pkg) => {
+            process.stderr.write(`  [${done}/${total}] ${pkg}\n`);
+          },
+        }),
+  });
+
+  const verdict = auditVerdict(result);
+
+  if (quiet) {
+    process.stdout.write(`${JSON.stringify({ verdict, ...result }, null, 2)}\n`);
+  } else {
+    process.stdout.write(renderAudit(result, verdict));
+  }
+
+  // `nothing-to-check` is a clean exit, not a failure. A repository with no
+  // contract-bearing dependency genuinely has nothing here that can go wrong,
+  // and a non-zero exit would teach people to stop running this in CI.
+  return verdict === "nothing-to-check" ? 0 : exitCodeFor(verdict);
+}
+
+function renderAudit(result: AuditResult, verdict: ReturnType<typeof auditVerdict>): string {
+  const out: string[] = ["", `  ${bold("stantal")}  ${dim(result.directory)}`, ""];
+
+  if (result.entries.length === 0) {
+    out.push(
+      `  ${dim(`${result.declared} dependency/ies, none of which hand a model tools`)}`,
+      "",
+      `  ${green("Nothing here can be affected by contract drift.")}`,
+      `  ${dim("A normal result. It is not a claim that every dependency was readable.")}`,
+      "",
+    );
+    return out.join("\n");
+  }
+
+  const color = verdict === "nothing-to-check" ? green : VERDICT_COLOR[verdict];
+  out.push(
+    `  ${bold(String(result.declared))} dependencies ${dim("·")} ${bold(
+      String(result.entries.length),
+    )} hand a model tools`,
+    `  ${dim("VERDICT")}  ${color(bold(verdict))}`,
+    "",
+  );
+
+  for (const entry of result.entries) out.push(...renderAuditEntry(entry));
+
+  const steps = nextSteps(result);
+  if (steps.length > 0) {
+    out.push(`  ${bold("DO THIS")}`);
+    steps.forEach((step, index) => {
+      out.push(`    ${index + 1}. ${step.action}`);
+      if (step.why !== null) out.push(`       ${dim(step.why)}`);
+    });
+    out.push("");
+  }
+
+  return out.join("\n");
+}
+
+function renderAuditEntry(entry: AuditEntry): string[] {
+  const out: string[] = [];
+  const move =
+    entry.latest === null
+      ? dim("could not resolve the latest release")
+      : isCurrent(entry)
+        ? `${entry.installed}  ${dim("current")}`
+        : `${entry.installed} ${dim("→")} ${bold(entry.latest)}`;
+
+  out.push(`  ${bold(entry.package)}  ${move}`);
+
+  if (entry.report !== null) {
+    const counts = countFindings(entry.report);
+    const total = counts.structural + counts.prose + counts.behavioural;
+    const paint = VERDICT_COLOR[entry.report.verdict];
+    out.push(`    ${paint(entry.report.verdict)}  ${dim(truncate(entry.report.headline, 88))}`);
+
+    const blast = entry.report.blast;
+    if (blast !== null && blast.reaches.length > 0) {
+      const first = blast.reaches[0];
+      const more = blast.reaches.length - 1;
+      out.push(
+        `    ${red(`reaches your code in ${blast.reaches.length} place(s)`)}  ${dim(
+          `${first?.evidence}${more > 0 ? ` and ${more} more` : ""}`,
+        )}`,
+      );
+    } else if (heldByRange(entry)) {
+      // The narrower, more useful version of "does not reach you": it does not
+      // reach you *yet*, and the thing keeping it out is a line you control.
+      out.push(
+        `    ${green("your declared range already excludes this")}  ${dim(
+          `${total} finding(s) in the package, none admitted`,
+        )}`,
+      );
+    } else if (blast !== null && canClaimUnaffected(blast)) {
+      out.push(`    ${green("nothing here reaches your code")}  ${dim(`${total} finding(s) in the package`)}`);
+    }
+  } else if (entry.note !== null) {
+    // An unreachable dependency is painted like a gap, never like a pass. This
+    // is the line where a silent failure would otherwise read as good news.
+    out.push(isUnreachable(entry) ? `    ${yellow("gap")}  ${dim(entry.note)}` : `    ${dim(entry.note)}`);
+  }
+
+  const unpinned = entry.subpaths.length - entry.pinnedSubpaths.length;
+  out.push(
+    unpinned === 0
+      ? `    ${dim(`${entry.tools} tool(s) pinned by contract tests`)}`
+      : `    ${dim(`${entry.tools} tool(s) across ${unpinned} unpinned entry point(s)`)}`,
+  );
+  out.push("");
+  return out;
+}
+
+type NextStep = { action: string; why: string | null };
+
+/**
+ * The ordered list at the bottom, which is the only part most people read.
+ *
+ * Ordered by what blocks what, not by severity. A test runner comes first
+ * because without one every later step writes files nothing will ever execute
+ * — and a suite nobody runs is worse than no suite, because it reads like
+ * protection.
+ */
+function nextSteps(result: AuditResult): NextStep[] {
+  const steps: NextStep[] = [];
+
+  if (result.readiness.missing.length > 0) {
+    steps.push({
+      action: `npm install -D ${result.readiness.missing.join(" ")}`,
+      why: "the contract tests import these, and nothing here can resolve them yet",
+    });
+  } else if (!result.readiness.hasRunner) {
+    steps.push({
+      action: "npm install -D vitest",
+      why: "nothing in this project can run a test suite, so nothing would run these either",
+    });
+  }
+
+  const unpinned = result.entries.filter((e) => e.pinnedSubpaths.length < e.subpaths.length);
+  if (unpinned.length > 0) {
+    const tools = unpinned.reduce((n, e) => n + e.tools, 0);
+    steps.push({
+      action: "stantal pin --all",
+      why: `writes contract tests for ${tools} tool(s) across ${unpinned.length} package(s), so the next upgrade fails a test instead of a customer`,
+    });
+  }
+
+  for (const entry of result.entries) {
+    if (entry.report === null || entry.latest === null) continue;
+    if (entry.report.verdict === "clean") continue;
+    if (entry.report.verdict === "unreadable") {
+      steps.push({
+        action: `stantal ${entry.package} ${entry.installed} ${entry.latest}`,
+        why: "we could not read enough of this pair to clear it — look before taking the upgrade",
+      });
+      continue;
+    }
+    if (heldByRange(entry)) {
+      // Nothing to do, and saying so is the point. This is the one entry where
+      // the general advice would be wrong.
+      steps.push({
+        action: `leave ${entry.package} alone — your range already excludes ${entry.latest}`,
+        why: "widening it is what would take the change, so do that deliberately rather than by habit",
+      });
+      continue;
+    }
+
+    const reaches = reachCount(entry);
+    steps.push({
+      action: `hold ${entry.package} at ${entry.installed}`,
+      why:
+        reaches > 0
+          ? `${entry.latest} changes what a model reads, in ${reaches} place(s) this repository touches`
+          : `${entry.latest} changes what a model reads — see: stantal ${entry.package} ${entry.installed} ${entry.latest}`,
+    });
+  }
+
+  for (const entry of result.entries) {
+    if (!isUnreachable(entry)) continue;
+    steps.push({
+      action: `re-run when the registry is reachable — ${entry.package} was not checked`,
+      why: "nothing is claimed about a dependency we could not read",
+    });
+  }
+
+  return steps;
+}
+
+/**
+ * `stantal watch` — the half that speaks up on its own.
+ *
+ * Built for a scheduled workflow rather than a terminal, so the default output
+ * is JSON and the human rendering is the opt-in. It decides what is worth
+ * saying and writes the files that say it; branch, commit and pull request are
+ * the workflow's job, where they can be read and audited by whoever runs them.
+ */
+async function runWatch(
+  values: {
+    json?: boolean | undefined;
+    cache?: string | undefined;
+    directory?: string | undefined;
+    concurrency?: number | undefined;
+    repo?: RepoSource | undefined;
+    out?: string | undefined;
+    write?: boolean | undefined;
+    text?: boolean | undefined;
+  },
+  judge: Judge | null,
+  behaviour: BehaviourOptions | undefined,
+): Promise<number> {
+  const directory = values.directory ?? process.cwd();
+
+  const plan = await watchProject({
+    directory,
+    registry: pacoteRegistry(),
+    judge,
+    ...(values.repo === undefined ? {} : { repo: values.repo }),
+    ...(values.cache !== undefined ? { cacheRoot: values.cache } : {}),
+    ...(values.out !== undefined ? { testDir: values.out } : {}),
+    ...(values.concurrency !== undefined ? { concurrency: values.concurrency } : {}),
+    ...(values.write === true ? { write: true } : {}),
+    // Layer 2 here and nowhere else in the automatic path. A scheduled run is
+    // the one place k calls per request per side is proportionate: it happens
+    // at most once per release, and the answer lands on a pull request
+    // somebody is deciding from rather than in a terminal somebody is skimming.
+    ...(behaviour === undefined ? {} : { behaviour }),
+  });
+
+  // JSON by default here, unlike everywhere else. The caller is a workflow, and
+  // making it pass a flag to get the only output it can use would be a small
+  // trap laid for every person who copies the template. `--text` is the way
+  // back to something a person reads, rather than `--json` being the way in.
+  if (values.text !== true) {
+    process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);
+  } else {
+    process.stdout.write(`\n  ${bold("stantal watch")}  ${dim(watchSummary(plan))}\n\n`);
+    if (plan.action !== "nothing") {
+      process.stdout.write(`  ${bold(plan.title)}\n  ${dim(plan.branch)}\n\n${plan.body}\n\n`);
+    }
+  }
+
+  // Exit 0 whatever it found. This runs on a schedule, and a red cron job that
+  // is red on purpose trains everyone to ignore it — the finding travels in the
+  // pull request, which is a thing a person reads, not in a status badge.
+  return 0;
+}
+
 // --- Entry point -------------------------------------------------------------
 
 export async function main(argv: readonly string[]): Promise<number> {
@@ -1341,6 +1764,9 @@ export async function main(argv: readonly string[]): Promise<number> {
         "fields-at": { type: "string" },
         "exclude-when": { type: "string", multiple: true },
         repo: { type: "string" },
+        all: { type: "boolean" },
+        write: { type: "boolean" },
+        text: { type: "boolean" },
         current: { type: "string" },
         against: { type: "string" },
         since: { type: "string" },
@@ -1447,17 +1873,61 @@ GEMINI_API_KEY). Continuing without Layer 2.
     }
   }
 
-  // Built once, before anything branches. Layer 3 reads private code, so it
-  // runs only when a directory was named -- never because one happened to be
-  // the working directory.
-  const repo = values.repo === undefined ? undefined : fsRepoSource(values.repo);
+  // Built once, before anything branches, so Layer 3 means the same thing on
+  // every command.
+  //
+  // **On by default, pointed at the working directory.** It was opt-in first,
+  // on the reasoning that this is the only layer that reads private code. That
+  // reasoning was wrong in one specific way: the caution belongs on sending
+  // something out, not on reading something in. Nothing here leaves the
+  // machine, the GitHub Action has defaulted it to "." since it shipped, and
+  // the effect of the old default was that the CI path answered "does this
+  // reach you" while the path a person actually types did not. `--repo none`
+  // turns it off; `--repo <dir>` still points it somewhere else.
+  const repoArg = values.repo ?? ".";
+  const repo = repoArg === "none" ? undefined : fsRepoSource(repoArg);
+
+  // No subcommand and no package: the question somebody standing in a
+  // repository actually has. This is the default because remembering a package
+  // name and two versions is a thing almost nobody can do before something has
+  // already broken.
+  if (positionals[0] === "watch") {
+    return runWatch(
+      {
+        ...(values.json === undefined ? {} : { json: values.json }),
+        ...(values.cache === undefined ? {} : { cache: values.cache }),
+        ...(values.directory === undefined ? {} : { directory: values.directory }),
+        ...(values.out === undefined ? {} : { out: values.out }),
+        ...(values.write === undefined ? {} : { write: values.write }),
+        ...(values.text === undefined ? {} : { text: values.text }),
+        ...(repo === undefined ? {} : { repo }),
+        ...(concurrency === undefined ? {} : { concurrency }),
+      },
+      judge,
+      behaviour,
+    );
+  }
+
+  if (positionals.length === 0 || positionals[0] === "audit") {
+    return runAudit(
+      {
+        ...(values.json === undefined ? {} : { json: values.json }),
+        ...(values.cache === undefined ? {} : { cache: values.cache }),
+        ...(values.directory === undefined ? {} : { directory: values.directory }),
+        ...(values.out === undefined ? {} : { out: values.out }),
+        ...(repo === undefined ? {} : { repo }),
+        ...(concurrency === undefined ? {} : { concurrency }),
+      },
+      judge,
+    );
+  }
 
   if (positionals[0] === "check") {
     return runCheck(positionals[1], values, judge, behaviour, repo);
   }
 
   if (positionals[0] === "manifest") {
-    return runManifest(positionals[1], positionals[2], values, judge, behaviour);
+    return runManifest(positionals[1], positionals[2], values, judge, behaviour, repo);
   }
 
   if (positionals[0] === "mcp") {

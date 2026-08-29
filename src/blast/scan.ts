@@ -2,6 +2,7 @@ import semver from "semver";
 import type { PackageJson } from "../extract/package-source.js";
 import type { RepoSource } from "./repo.js";
 import { compareReaches, type BlastNote, type BlastResult, type Filtered, type Reach } from "./taxonomy.js";
+import { GENERATED_MARKER } from "../emit/vitest.js";
 
 /**
  * One thing a finding is about, reduced to what a scan can look for.
@@ -117,7 +118,7 @@ export function blastRadius(options: BlastOptions): BlastResult {
     if (declared === null) {
       // Evidenced: there is a manifest and it does not name the package.
       for (const target of targets) {
-        filtered.push({ target: target.label, reason: `${pkg} is not a declared dependency` });
+        filtered.push({ target: target.label, kind: "not_a_dependency", reason: `${pkg} is not a declared dependency` });
       }
       return {
         reaches,
@@ -152,6 +153,7 @@ export function blastRadius(options: BlastOptions): BlastResult {
       for (const target of targets) {
         filtered.push({
           target: target.label,
+          kind: "range_excludes",
           reason: `"${declared.range}" admits no affected version`,
         });
       }
@@ -174,6 +176,17 @@ export function blastRadius(options: BlastOptions): BlastResult {
       notes.push({ where: path, detail: "listed but could not be read" });
       continue;
     }
+
+    // Our own emitted suite is not one of the consumer's call sites. It names
+    // every tool it pins, by construction, so scanning it turns one generated
+    // file into dozens of reaches and buries the handful that are real — the
+    // same failure as scanning a lockfile, found the same way, by running it.
+    //
+    // Not a note: a note means we could not read something, and would stop
+    // `canClaimUnaffected` from ever being true. We read this one and know
+    // exactly what it is.
+    if (text.lastIndexOf(GENERATED_MARKER, 200) !== -1) continue;
+
     files += 1;
     bytes += text.length;
 
@@ -208,6 +221,7 @@ export function blastRadius(options: BlastOptions): BlastResult {
     if (isSubpath && importedSubpaths.size > 0 && !importedSubpaths.has(target.surface)) {
       filtered.push({
         target: target.label,
+        kind: "subpath_not_imported",
         reason: `the repo does not import ${pkg}${target.surface === "." ? "" : target.surface.slice(1)}`,
       });
       continue;

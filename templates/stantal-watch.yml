@@ -1,0 +1,168 @@
+# Copy this to .github/workflows/stantal-watch.yml
+#
+# It watches the dependencies that hand a language model a tool contract, and
+# speaks up when one moves. Nothing else in your stack notices these changes:
+# semver, type-checking and your test suite all pass through them unchanged.
+#
+# What it does, in order:
+#
+#   1. Runs `stantal watch`, which reads your installed dependencies, compares
+#      each against the release waiting for it, and works out which of your own
+#      files the differences reach.
+#   2. If somebody has already opened a bump for an affected package — Renovate,
+#      Dependabot, a person — it comments the verdict on THAT pull request
+#      instead of opening a competing one.
+#   3. Otherwise it opens one pull request that adds contract tests recording
+#      what each package offers today.
+#
+# It ships the proof, not the fix. The tests it writes pass on your current
+# versions and fail the day an upgrade takes any of the contract away, so the
+# claim is checkable in one command without trusting the pull request body.
+#
+# No account and no API key. Everything runs on your runner.
+
+name: stantal — watch the contracts
+
+on:
+  schedule:
+    # Weekly. Contract drift arrives on release day, not on push day, so this is
+    # paced to releases rather than to commits. Daily is defensible on a project
+    # with many AI-facing dependencies; hourly is noise.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      # The contracts are read out of node_modules, so they have to be there.
+      # `npm ci` installs exactly what the lockfile says, which is the whole
+      # point: the audit is about the versions you actually run.
+      - run: npm ci
+
+      - name: Read the contracts and decide
+        id: watch
+        env:
+          # Pin the CLI. A new release of ours must not change a verdict under
+          # you between one Monday and the next.
+          STANTAL_VERSION: "0.4.0"
+
+          # Optional, and the only thing here that costs money.
+          #
+          # Set one of these as a repository secret to turn on Layer 2: the
+          # contract is put in front of a real model on both versions and what
+          # it does is compared. Everything else in this workflow is a
+          # prediction about what a caller *would* read. This is an observation
+          # — a model was shown both and did something different — and it is the
+          # only claim of its kind anywhere in your toolchain.
+          #
+          # A scheduled run is where that is worth paying for: it happens at
+          # most once per release, and the answer lands on a pull request
+          # somebody is deciding from. Leave them unset and the workflow still
+          # produces a full verdict, for free, with no account.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+          plan="${RUNNER_TEMP}/stantal-watch.json"
+
+          # `--behaviour` only when a key is actually present. Asking for it
+          # without one warns and carries on, which is correct behaviour and a
+          # confusing line to read in a log every week.
+          args=(watch --write)
+          if [ -n "${ANTHROPIC_API_KEY:-}${OPENAI_API_KEY:-}${GEMINI_API_KEY:-}" ]; then
+            args+=(--behaviour)
+          fi
+
+          npx --yes "stantal@${STANTAL_VERSION}" "${args[@]}" > "$plan"
+
+          action=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).action' "$plan")
+          echo "action=$action" >> "$GITHUB_OUTPUT"
+          echo "plan=$plan" >> "$GITHUB_OUTPUT"
+          node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).title' "$plan"
+
+      # Somebody else's bump is the better place to say this: the author is
+      # already reading that thread, and the change is already in front of them.
+      # Opening our own pull request beside theirs would split the conversation.
+      - name: Comment on an existing bump, if there is one
+        id: rode
+        if: steps.watch.outputs.action == 'warn'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLAN: ${{ steps.watch.outputs.plan }}
+        run: |
+          set -euo pipefail
+          commented=false
+
+          # One pull request per affected package, at most. `gh pr list` matches
+          # on the title, which is how both Renovate and Dependabot name theirs.
+          for pkg in $(node -p 'JSON.parse(require("fs").readFileSync(process.env.PLAN,"utf8")).packages.join("\n")'); do
+            number=$(gh pr list --state open --search "$pkg in:title" --limit 1 --json number --jq '.[0].number // empty')
+            [ -z "$number" ] && continue
+
+            # Idempotent. A weekly job that re-comments the same finding every
+            # Monday is a job somebody mutes in three weeks.
+            if gh pr view "$number" --json comments \
+                 --jq '.comments[].body' | grep -q "^\*\*stantal:\*\*"; then
+              echo "already commented on #$number"
+              commented=true
+              continue
+            fi
+
+            node -p 'JSON.parse(require("fs").readFileSync(process.env.PLAN,"utf8")).comment' > "${RUNNER_TEMP}/comment.md"
+            gh pr comment "$number" --body-file "${RUNNER_TEMP}/comment.md"
+            echo "commented on #$number about $pkg"
+            commented=true
+          done
+
+          echo "commented=$commented" >> "$GITHUB_OUTPUT"
+
+      # Only when nobody else has a pull request open for it. The tests it adds
+      # pass on your current versions, so this is safe to merge as-is.
+      - name: Open a pull request
+        if: steps.watch.outputs.action != 'nothing' && steps.rode.outputs.commented != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLAN: ${{ steps.watch.outputs.plan }}
+        run: |
+          set -euo pipefail
+          branch=$(node -p 'JSON.parse(require("fs").readFileSync(process.env.PLAN,"utf8")).branch' )
+          title=$(node -p 'JSON.parse(require("fs").readFileSync(process.env.PLAN,"utf8")).title' )
+          node -p 'JSON.parse(require("fs").readFileSync(process.env.PLAN,"utf8")).body' > "${RUNNER_TEMP}/body.md"
+
+          # `stantal watch --write` already wrote the test files into the
+          # working tree. Nothing else is staged — no upgrade, no source change.
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "nothing to commit"
+            exit 0
+          fi
+
+          git config user.name "stantal"
+          git config user.email "noreply@github.com"
+          git checkout -b "$branch"
+          git add --all
+          git commit -m "$title"
+          git push --force-with-lease origin "$branch"
+
+          # The branch name is derived from the finding, not from the date, so a
+          # second run about the same thing updates the open pull request rather
+          # than filing another one.
+          if gh pr view "$branch" --json number >/dev/null 2>&1; then
+            gh pr edit "$branch" --title "$title" --body-file "${RUNNER_TEMP}/body.md"
+          else
+            gh pr create --head "$branch" --title "$title" --body-file "${RUNNER_TEMP}/body.md"
+          fi
