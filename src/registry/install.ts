@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { fsPackageSource, type PackageJson, type PackageSource } from "../extract/package-source.js";
 import { assertRegistrySpec, RegistryError, type Registry } from "./npm.js";
@@ -34,7 +35,62 @@ export type Installed = {
   missing: string[];
 };
 
-export const DEFAULT_CACHE_ROOT = ".stantal/npm";
+/**
+ * Where unpacked tarballs live, and why it is not in the project.
+ *
+ * This directory holds **other people's code**, unpacked — it is `node_modules`
+ * shaped: large, disposable, and reconstructible from the registry. It used to
+ * default to `.stantal/npm` inside the repository, and a real install showed
+ * what that costs. In a project with 33 dependencies it reached 60MB, nothing
+ * ignored it, so the first `git add -A` staged an unpacked copy of every
+ * dependency — and because those tarballs carry the packages' own test files, a
+ * bare `vitest run` collected 153 test files instead of 7 and ended red on
+ * somebody else's suite.
+ *
+ * **The other `.stantal/` directories stay in the project on purpose.** The
+ * judge, behaviour and intent caches are recordings, and `--replay` exists so
+ * they can be committed and replayed by anyone. Those are project artifacts.
+ * This one never was.
+ *
+ * `--cache <dir>` still points it anywhere, including back inside the repo.
+ */
+export const DEFAULT_CACHE_ROOT = defaultCacheRoot();
+
+function defaultCacheRoot(): string {
+  const home = homedir();
+  if (process.platform === "win32") {
+    const local = process.env["LOCALAPPDATA"];
+    if (local !== undefined && local.length > 0) return join(local, "stantal", "npm");
+    return join(home, "AppData", "Local", "stantal", "npm");
+  }
+  // XDG where it is set, and its own documented default where it is not.
+  const xdg = process.env["XDG_CACHE_HOME"];
+  if (xdg !== undefined && xdg.length > 0) return join(xdg, "stantal", "npm");
+  return join(home, ".cache", "stantal", "npm");
+}
+
+/**
+ * A cache that ignores itself, wherever it is put.
+ *
+ * Belt and braces for the default above: `--cache` can still point this inside
+ * a repository, an existing install already has one there, and the failure mode
+ * is somebody committing 60MB of somebody else's source. `*` covers the
+ * `.gitignore` too, so the directory leaves no trace in `git status` at all.
+ *
+ * Written once when the root is created, never rewritten — a file the user has
+ * edited is theirs.
+ */
+function ensureIgnored(root: string): void {
+  const marker = join(root, ".gitignore");
+  if (existsSync(marker)) return;
+  try {
+    mkdirSync(root, { recursive: true });
+    writeFileSync(marker, "# Unpacked third-party tarballs. Disposable; never commit.\n*\n", "utf8");
+  } catch {
+    // A cache we could not mark is still a usable cache. This is housekeeping,
+    // and failing a read of a package over it would be the wrong trade.
+  }
+}
 
 /** `@scope/name` -> `@scope+name`, so one version is one directory on any OS. */
 function directoryName(name: string): string {
@@ -77,6 +133,7 @@ export async function installPackage(
   options: InstallOptions,
 ): Promise<Installed> {
   const root = options.root ?? DEFAULT_CACHE_ROOT;
+  ensureIgnored(root);
   const depth = options.depth ?? 1;
   const inFlight = new Map<string, Promise<PackageSource>>();
   const missing: string[] = [];

@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { AGENTS, serverEntry, type AgentTarget } from "./agents.js";
+import { packageDirectory } from "../testkit.js";
 
 /**
  * Installing the server into an agent's config.
@@ -90,6 +91,35 @@ export type InstallOptions = {
 };
 
 /**
+ * The installed CLI's entry point, when this project already has one.
+ *
+ * Resolved through `node_modules` rather than `require.resolve`, so a version
+ * installed for the project is found and one installed globally is not — a
+ * global copy is not pinned by the project and could be anything.
+ *
+ * Returns null rather than throwing on a manifest we cannot read: an entry we
+ * could not resolve falls back to `npx`, which is the behaviour that existed
+ * before and is never worse than not writing a config at all.
+ */
+function localEntry(directory: string): string | null {
+  const dir = packageDirectory("stantal", directory);
+  if (dir === null) return null;
+  try {
+    const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as {
+      bin?: unknown;
+    };
+    const bin = manifest.bin;
+    const relative =
+      typeof bin === "string" ? bin : typeof bin === "object" && bin !== null ? (bin as Record<string, unknown>)["stantal"] : undefined;
+    if (typeof relative !== "string") return null;
+    const entry = join(dir, relative);
+    return existsSync(entry) ? entry : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Write our entry into an agent's config, keeping everything else intact.
  *
  * Reads what is there, adds one key, writes it back. A file that exists but
@@ -130,7 +160,7 @@ export function install(options: InstallOptions): InstallResult {
 
   const preserved = Object.keys(servers).filter((k) => k !== name);
   const action: "added" | "updated" = name in servers ? "updated" : "added";
-  servers[name] = serverEntry(version);
+  servers[name] = serverEntry(version, localEntry(directory));
 
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify({ ...config, [agent.key]: servers }, null, 2)}\n`, "utf8");

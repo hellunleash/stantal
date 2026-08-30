@@ -1,9 +1,9 @@
-import { mkdtempSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { extractFromModule } from "../extract/module.js";
-import { installPackage } from "./install.js";
+import { DEFAULT_CACHE_ROOT, installPackage } from "./install.js";
 import { RegistryError, type Registry, type ResolvedManifest, type VersionInfo } from "./npm.js";
 
 /**
@@ -178,5 +178,40 @@ describe("installPackage", () => {
     await expect(
       installPackage("github:someone/repo", "2.0.0", { registry, root: cacheRoot() }),
     ).rejects.toThrow(/plain registry package name/);
+  });
+});
+
+describe("the cache does not become the user's problem", () => {
+  test("defaults outside the project", () => {
+    // It holds other people's code, unpacked. Inside a repository it reached
+    // 60MB on a real install, nothing ignored it, and the packages' own test
+    // files got collected by a bare `vitest run` — 153 files instead of 7.
+    expect(DEFAULT_CACHE_ROOT).not.toBe(".stantal/npm");
+    expect(isAbsolute(DEFAULT_CACHE_ROOT)).toBe(true);
+    expect(DEFAULT_CACHE_ROOT.replace(/\\/g, "/")).toContain("stantal/npm");
+  });
+
+  test("ignores itself wherever it is put", async () => {
+    // `--cache` can still point it inside a repository, and existing installs
+    // already have one there. The failure mode is committing 60MB of somebody
+    // else's source, so the guard travels with the directory.
+    const root = cacheRoot();
+    const { registry } = fakeRegistry({ "@example/tools@2.0.0": TOOLS_PACKAGE });
+    await installPackage("@example/tools", "2.0.0", { registry, root, depth: 0 });
+
+    const ignore = readFileSync(join(root, ".gitignore"), "utf8");
+    // `*` covers the .gitignore too, so the directory leaves no trace at all.
+    expect(ignore).toContain("*");
+  });
+
+  test("never overwrites one the user has edited", async () => {
+    const root = cacheRoot();
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, ".gitignore"), "# mine\n", "utf8");
+
+    const { registry } = fakeRegistry({ "@example/tools@2.0.0": TOOLS_PACKAGE });
+    await installPackage("@example/tools", "2.0.0", { registry, root, depth: 0 });
+
+    expect(readFileSync(join(root, ".gitignore"), "utf8")).toBe("# mine\n");
   });
 });

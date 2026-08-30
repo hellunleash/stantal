@@ -157,7 +157,9 @@ Options
                         separate a partial change; 8 is the measured floor.
   --replay              Answer only from recordings. Never calls out, so the
                         run is free and repeats identically.
-  --cache <dir>         Where unpacked versions live. Default .stantal/npm
+  --cache <dir>         Where unpacked tarballs live. Defaults outside your
+                        project (~/.cache/stantal/npm, or LOCALAPPDATA on
+                        Windows) — it is third-party code, not project state.
   --against <version>   check: the published release to compare the build against.
   --current <version>   history: the version you are on now, so the walk can say
                         which release to move to. Default: the oldest walked.
@@ -473,7 +475,7 @@ function renderHistory(result: HistoryResult): string {
  */
 const DEFAULT_TEST_DIR = "stantal";
 
-function renderWritten(written: readonly WrittenFile[], pinnedAt: string): string {
+function renderWritten(written: readonly WrittenFile[], pinnedAt: string, resolvable = true): string {
   if (written.length === 0) {
     return [
       ``,
@@ -495,7 +497,17 @@ function renderWritten(written: readonly WrittenFile[], pinnedAt: string): strin
   // question this cannot answer, and the readiness notes below answer it —
   // telling somebody to "run your test command" when they have none reads as
   // advice from a tool that did not look.
-  lines.push(`  They pass against ${pinnedAt}, and fail when an upgrade takes any of it away.`);
+  // Only claimed when this project can actually resolve what they import.
+  // Saying "they pass" three lines above a note explaining that nothing here
+  // can resolve `vitest` or `stantal` is a false claim, and it was reported by
+  // somebody who watched their type-check go from exit 0 to exit 2 right after
+  // reading it.
+  lines.push(
+    resolvable
+      ? `  They pass against ${pinnedAt}, and fail when an upgrade takes any of it away.`
+      : `  Once the imports below resolve, they pass against ${pinnedAt} and fail when an` +
+          `\n  upgrade takes any of it away. Until then nothing here can run or type-check them.`,
+  );
   lines.push(``);
   lines.push(``);
   return lines.join("\n");
@@ -619,7 +631,7 @@ function runConnect(
   // briefed without installing anything.
   let briefing: WriteAgentsResult;
   try {
-    briefing = writeAgentsMd(directory);
+    briefing = writeAgentsMd(directory, version);
   } catch (error) {
     process.stderr.write(`stantal: could not write AGENTS.md: ${error instanceof Error ? error.message : String(error)}\n`);
     return 2;
@@ -1090,7 +1102,7 @@ function pinOne(
   }
 
   process.stdout.write(`\n  ${pkg}@${version}\n`);
-  process.stdout.write(renderWritten(written, `${pkg}@${version}`));
+  process.stdout.write(renderWritten(written, `${pkg}@${version}`, readiness.missing.length === 0));
 
   const notes = readinessNotes(readiness, root);
   if (notes.length > 0) {

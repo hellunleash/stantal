@@ -37,9 +37,15 @@ export type WriteAgentsResult = {
  * is a question the person has to work out how to dismiss — and two of those
  * and they stop reading.
  */
-export function agentsSection(): string {
+export function agentsSection(version = "0.0.0"): string {
   return [
     BEGIN,
+    // Stamped so a later run can tell that this block is older than the CLI
+    // that would write it. Nothing versions this file otherwise: it is written
+    // once and frozen, and if a release renames a tool the file starts lying
+    // about it — which is the drift problem this product sells against,
+    // occurring in this product's own artifact.
+    `<!-- stantal: written by ${version}. Re-run \`npx stantal connect\` to refresh. -->`,
     "",
     "## Contract drift (stantal)",
     "",
@@ -60,6 +66,14 @@ export function agentsSection(): string {
     "Do not call `list_contract_dependencies` and `check_upgrade` separately to work",
     "this out. They exist for going deeper on one package after `audit_project` has",
     "named it.",
+    "",
+    "**If `audit_project` is not available to you, the MCP server has not started yet.**",
+    "This file and the server's config are written by the same command, and the server",
+    "does not load until the agent restarts — so the first read of this file is exactly",
+    "the moment the tool is most likely to be missing. Do not fall back to the other",
+    "tools; they will be missing too. Run `npx stantal --json` in the terminal instead —",
+    "it is the same audit, and the fields below are the fields it returns. If you cannot",
+    "run commands either, say the server needs a restart and stop.",
     "",
     "### Then ask about what it actually found",
     "",
@@ -108,9 +122,9 @@ export function agentsSection(): string {
  * tool that appends its own block every time it runs turns a useful file into
  * an unreadable one within a month.
  */
-export function writeAgentsMd(directory: string, filename = "AGENTS.md"): WriteAgentsResult {
+export function writeAgentsMd(directory: string, version = "0.0.0", filename = "AGENTS.md"): WriteAgentsResult {
   const file = join(directory, filename);
-  const section = agentsSection();
+  const section = agentsSection(version);
 
   if (!existsSync(file)) {
     writeFileSync(file, `# Agent notes\n\n${section}\n`, "utf8");

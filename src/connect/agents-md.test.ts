@@ -66,6 +66,25 @@ describe("the briefing itself", () => {
     expect(section).toContain("Do not call `list_contract_dependencies` and `check_upgrade` separately");
   });
 
+  test("tells the agent what to do when the tool it mandates is not loaded yet", () => {
+    // connect writes this file and the server's config in the same run, and the
+    // server does not load until a restart. So the very first read of this file
+    // is the moment audit_project is most likely to be missing — and the
+    // fallback it would otherwise reach for is forbidden two lines above.
+    expect(section).toContain("If `audit_project` is not available to you");
+    expect(section).toContain("has not started yet");
+    expect(section).toContain("npx stantal --json");
+    expect(section).toContain("they will be missing too");
+  });
+
+  test("stamps the version that wrote it", () => {
+    // Nothing else versions this file. Written once and frozen, it starts lying
+    // the day a release renames a tool — the drift problem this product sells
+    // against, in this product's own artifact.
+    expect(agentsSection("1.2.3")).toContain("written by 1.2.3");
+    expect(agentsSection("1.2.3")).toContain("npx stantal connect");
+  });
+
   test("makes every question conditional on something the audit reported", () => {
     // A question the data does not support is one the person has to work out
     // how to dismiss, and two of those and they stop reading.

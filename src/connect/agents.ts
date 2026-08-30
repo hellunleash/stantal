@@ -81,10 +81,29 @@ export function agentById(id: string): AgentTarget | null {
  * we publish change somebody's verdict without them taking an upgrade, which is
  * precisely the thing this product exists to warn people about. Doing it to our
  * own users would be indefensible.
+ *
+ * **A local install wins, and that is a correctness fix rather than a
+ * preference.** Measured on a cleared npm cache, `npx -y stantal@0.3.0 mcp`
+ * takes **50.7s** to first byte; every MCP client tested gives it 30. So the
+ * very first attach after `connect` times out, the server never appears, and
+ * the agent is left following an `AGENTS.md` that tells it to call a tool that
+ * is not there. The same command warm is 3.5s, which is why the failure looks
+ * intermittent and gets blamed on the client.
+ *
+ * Running the installed binary skips the resolve entirely. `stantal` becomes a
+ * dependency as step 1 of our own audit's plan, so by the time most people run
+ * this a local copy is already there — and where it is not, npx stays the
+ * fallback and the version pin still holds.
  */
-export function serverEntry(version: string): {
+export function serverEntry(version: string, localEntry?: string | null): {
   command: string;
   args: string[];
 } {
+  if (localEntry !== undefined && localEntry !== null) {
+    // `node <path>` rather than the `.bin` shim: the shim is a shell script on
+    // POSIX and a `.cmd` on Windows, and an MCP client spawning without a shell
+    // cannot run the second one.
+    return { command: process.execPath, args: [localEntry, "mcp"] };
+  }
   return { command: "npx", args: ["-y", `stantal@${version}`, "mcp"] };
 }
