@@ -58,7 +58,7 @@ jobs:
         env:
           # Pin the CLI. A new release of ours must not change a verdict under
           # you between one Monday and the next.
-          STANTAL_VERSION: "0.4.0"
+          STANTAL_VERSION: "0.5.0"
 
           # Optional, and the only thing here that costs money.
           #

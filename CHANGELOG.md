@@ -11,6 +11,97 @@ upgrade needs a full re-run.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-29
+
+Every command used to need something you already knew: a package name, two
+versions, which entry point. Almost nobody knows those before something has
+broken, and by then it is not a warning, it is an incident.
+
+**Upgrade if you are on 0.4.0.** That release writes its unpacked-tarball cache
+into your repository — see the first item under Fixed.
+
+### Added
+
+- **`npx stantal`, with nothing after it.** In any repository: it finds which
+  dependencies hand a model tools, compares each against the release waiting for
+  it, works out which of your own files that reaches, and prints a short ranked
+  list of what to do. It reads and ranks; it never writes. A repository with no
+  contract-bearing dependency exits `0` — there is genuinely nothing there to go
+  wrong, and a non-zero exit teaches people to stop running it.
+- **`stantal pin --all`** pins every contract-bearing dependency at once. It
+  **never overwrites a suite that already exists**: a package pinned at 1.0 and
+  upgraded to 1.1 would be re-recorded against 1.1, erasing the assertions that
+  were about to fail and reporting it as success.
+- **`stantal watch`**, plus a copy-paste workflow in `templates/`. On a schedule
+  it reads your contracts and, when one moves, comments the verdict on an
+  existing Renovate or Dependabot bump — or opens one pull request of its own
+  when there is none. It ships the proof, not the fix: the tests it writes pass
+  on your current versions and fail the day an upgrade takes any of the contract
+  away. The branch name is derived from the finding, never the date, so a second
+  run updates the open pull request instead of filing another.
+- **`audit_project`**, one MCP tool that returns the whole ranked plan. The
+  server used to hand an agent four tools and leave it to sequence them, which
+  meant holding our mental model of the problem. The other four remain, for
+  going deeper on a package this has already named.
+- **`connect` writes an `AGENTS.md` section** — a decision procedure rather than
+  a script. Every question in it is conditional on a field the audit returned, so
+  in a repository with nothing to report the agent says so and stops. Merged into
+  an existing file, never replacing it, and carrying a version stamp.
+
+### Changed
+
+- **`--repo` now defaults to `.`**, with `--repo none` to turn it off. It was
+  opt-in because Layer 3 is the only layer that reads private code — but the
+  caution belongs on sending something out, not on reading something in, and
+  nothing leaves the machine. The GitHub Action has defaulted it to `.` since it
+  shipped, so the automated path was answering a stronger question than the one a
+  person types.
+- **The `.mcp.json` entry prefers the installed binary** when the project has
+  one, spawned as `node <entry> mcp`. Measured on a cleared cache, a cold
+  `npx -y stantal@<version> mcp` takes **50.7s** to first byte and MCP clients
+  allow 30 — so the first attach after `connect` timed out and the server never
+  appeared. Warm it is 3.5s, which is why the failure looked intermittent. Where
+  no local copy exists, `npx` remains the fallback and the version pin still
+  holds.
+- The setup prompt is now one line pointing at `AGENTS.md`, instead of four fixed
+  steps that said the same thing in a repository with one contract dependency and
+  in one with twelve.
+
+### Fixed
+
+- **The unpacked-tarball cache no longer lands in your repository.** It defaulted
+  to `.stantal/npm` inside the project. Measured on a real install: 60MB, no
+  `.gitignore`, and the first `git add -A` staged an unpacked copy of every
+  dependency. Worse, those tarballs carry the packages' own test files, so a bare
+  `vitest run` after following this tool's own advice collected **153 test files
+  instead of 7** and failed on an unrelated suite. It now defaults outside the
+  project — `%LOCALAPPDATA%\stantal\npm` on Windows, `$XDG_CACHE_HOME` or
+  `~/.cache/stantal/npm` elsewhere — and writes a self-ignoring `.gitignore` into
+  whatever root is used, because `--cache` can still point it back inside.
+  The other `.stantal/` directories are unchanged and stay in the project: the
+  judge, behaviour and intent caches are recordings, and `--replay` exists so
+  they can be committed.
+- **`AGENTS.md` no longer opens by mandating a tool that cannot exist yet.**
+  `connect` writes that file and the server's config in the same run, and the
+  server does not load until the agent restarts — so the first read of the file
+  was exactly when `audit_project` was most likely to be missing, and the
+  fallback was forbidden two lines above. It now says so and names the CLI as the
+  same audit.
+- **Layer 3 no longer counts our own generated suite as your call sites.** A
+  suite that pins a contract names every tool in it by construction; in a
+  two-file project that turned 3 real reaches into 37. Generated files are
+  matched on their header, so it survives `--out`.
+- **The plan no longer tells you to hold a package your own range already
+  holds.** `Filtered` carries a machine-readable `kind`, so
+  "your declared range admits no affected version" is distinguishable from
+  "nothing in your code touches it" — the advice is opposite.
+- **`pin` no longer claims the tests pass when nothing can resolve their
+  imports.** It printed "They pass against …" two lines above the note explaining
+  that `vitest` and `stantal` were missing.
+- **`watch` reports test paths repo-relative**, with forward slashes. They go
+  into a pull request body other people read, where an absolute path is
+  meaningless and publishes the layout of whatever machine the runner was.
+
 ## [0.4.0] - 2026-08-27
 
 Three things a real install found, all in `pin`.
@@ -383,7 +474,11 @@ These are properties of the tool, not features, and breaking one is a bug:
   `.omit()`, `.partial()` and `.extend()` produce a note carrying a path instead
   of a contract nobody can trust.
 
-[Unreleased]: https://github.com/hellunleash/stantal/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/hellunleash/stantal/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/hellunleash/stantal/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/hellunleash/stantal/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/hellunleash/stantal/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/hellunleash/stantal/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/hellunleash/stantal/compare/v0.0.1...v0.1.0
 [0.0.1]: https://github.com/hellunleash/stantal/compare/v0.0.0...v0.0.1
 [0.0.0]: https://github.com/hellunleash/stantal/releases/tag/v0.0.0
