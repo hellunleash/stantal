@@ -1,8 +1,11 @@
 <h1 align="center">Stantal</h1>
 
 <p align="center">
-  <b>They didn't file a ticket. They just left.</b><br/>
-  Find the release that broke how an AI calls your dependency.
+  <b>Self-maintaining dependencies for AI agents.</b><br/>
+  Contract testing for the dependencies your AI calls. When the caller is a
+  model, the docs <i>are</i> the contract, and a deleted sentence is a breaking
+  change with no version number.<br/>
+  Stantal finds it, proves it, and puts it back.
 </p>
 
 <p align="center">
@@ -11,6 +14,62 @@
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" />
   <img alt="node" src="https://img.shields.io/badge/node-%3E%3D20-339933?style=flat-square&logo=nodedotjs&logoColor=white" />
 </p>
+
+---
+
+## What it is
+
+Your agent calls a tool. Everything it knows about that tool is a name, a
+description and a list of parameters: plain text, shipped inside one of your
+dependencies.
+
+That text is the contract. A patch release rewrites one sentence of it and the
+model starts calling the tool wrong. Nothing errors, nothing changes type, no
+test fails, and the version number still says patch.
+
+Stantal reads that text out of every version of a package, diffs it, and tells
+you what a model would now read differently. It does three things, in order.
+
+1. Finds it: which release changed it, and whether it reaches your code.
+2. Proves it: a test in your repo that passes today and fails the day it moves.
+3. Puts it back: when no released version is clean, it restores the deleted
+   sentence into the copy you actually run, so you are not waiting on the
+   provider.
+
+## Why this is new
+
+An API contract used to be the part a compiler could check: names, types,
+shapes. Documentation sat beside the contract. You could rewrite every word of
+it in a patch release and break nobody.
+
+That is over. When the caller is a model, the documentation is the dispatch
+logic. The model picks the tool from its description, and fills a parameter from
+its description. Delete the sentence that explains a parameter and the call goes
+wrong on a green build, under a patch version number.
+
+Half of this already has a name: schema drift, meaning a renamed field or a new
+required parameter. Stantal reports that too, and it is the easy half, because
+something somewhere eventually throws. The half nothing checks is the prose, and
+that is where the damage is:
+
+> 22 popular packages. 487 releases. 168 changes a model would read
+> differently, and 145 of them had no structural signal at all. There was
+> nothing to type-check, nothing to fail, and nothing in the changelog.
+
+The case that started this: a package dropped the one sentence saying when to
+pass an optional parameter. Everything else about that parameter stayed: the
+name, the type, its siblings' guidance. The model filled it in anyway, every
+time. 37 tool calls, 37 validation errors, nothing created. The explanation
+still exists, in a code comment directly above the line that depends on it. It
+just never reaches the model. That was 53 releases ago and it is still there
+today.
+
+What makes this kind of break invisible also makes it repairable. Nobody can
+safely edit a stranger's schema under their runtime. A sentence is different,
+because no caller branches on a description. Only a model reads it. So `stantal
+patch` puts the sentence back into your installed copy and the tool works again,
+on a version the provider never fixed. Prose only, never a schema or a required
+field, and it refuses unless it finds the text exactly once.
 
 ---
 
@@ -23,15 +82,15 @@
 > It needs no account and no API key.
 
 That is the whole setup. `connect` registers the MCP server and writes an
-`AGENTS.md` section — a short decision procedure, not a script. Your agent makes
-one call, then asks you about **what that call actually found**: which packages
-to protect, which upgrade to hold, which of your files a change reaches. In a
-repo with nothing to report it says so and stops.
+`AGENTS.md` section, which is a short decision procedure rather than a script.
+Your agent makes one call, then asks you about what that call actually found:
+which packages to protect, which upgrade to hold, which of your files a change
+reaches. In a repo with nothing to report it says so and stops.
 
 The file stays in your repository, so the next person to clone it is briefed
 without installing anything. Delete the block to opt out.
 
-**Prefer a terminal?** No arguments, no setup:
+Prefer a terminal? There are no arguments and no setup:
 
 ```bash
 npx stantal
@@ -71,21 +130,6 @@ have.
 
 ---
 
-## What this is for
-
-An update changes one sentence in a package's tool descriptions. No error. No
-failed build. No version marked breaking. The AI calling it starts getting it
-wrong, a feature quietly stops working, and nobody tells you.
-
-Types don't catch it. Tests don't catch it. Semver doesn't describe it. When the
-thing calling an API is a model, **the descriptions are the contract**, and
-deleting a sentence is a breaking change with no signature.
-
-We checked 22 popular packages across 487 releases: **168 changes** a model would
-read differently, and **145** of them broke nothing you could have tested for.
-
----
-
 ## The four things you will actually use
 
 ### 1. Lock in what your packages do today
@@ -94,12 +138,12 @@ read differently, and **145** of them broke nothing you could have tested for.
 npx stantal pin --all
 ```
 
-**Pinning here is not version pinning.** It does not touch your `package.json`
-and it does not stop you upgrading. It writes a test file into your repo
-recording what each package offers a model right now — which tools exist, which
-parameters they take, which of those are required. The suite passes today and
-fails the day an update takes any of it away. Nothing to maintain: you own the
-files, and they keep working whether or not you ever run this tool again.
+Pinning here is not version pinning. It does not touch your `package.json` and
+it does not stop you upgrading. It writes a test file into your repo recording
+what each package offers a model right now: which tools exist, which parameters
+they take, and which of those are required. The suite passes today and fails the
+day an update takes any of it away. There is nothing to maintain, because you own
+the files and they keep working whether or not you ever run this tool again.
 
 `--all` does every contract-bearing dependency at once and never overwrites a
 suite that already exists. `npx stantal pin @acme/sdk` does one, and re-records
@@ -119,7 +163,7 @@ npx stantal @acme/sdk 1.4.0 1.5.0
 
 Exit `0` clean · `1` something to look at · `2` could not read enough to say.
 
-It already reports which of **your** files a finding touches. Pass `--repo none`
+It already reports which of your own files a finding touches. Pass `--repo none`
 to turn that off, or `--repo <dir>` to point it at a different directory.
 
 ### 3. Which release broke it, and where can I go?
@@ -148,7 +192,7 @@ npx stantal patch @acme/sdk 1.4.0 --apply
 ```
 
 When no released version is clean, this restores the prose into your installed
-copy. Descriptions only — never a schema, a type or a required field. It has to
+copy. Descriptions only, never a schema, a type or a required field. It has to
 find the text exactly once or it refuses.
 
 <details>
@@ -172,14 +216,14 @@ call · `--repo none` skips reading your own files.
 
 ## Using your own model
 
-**You do not need one.** Everything above runs with no key and no account. That
-is the default, and CI checks it on every commit.
+You do not need one. Everything above runs with no key and no account. That is
+the default, and CI checks it on every commit.
 
-A model adds exactly one thing. Some findings are judgement calls — *does this
-sentence really explain this input?* Without a key those are reported as
+A model adds exactly one thing. Some findings are judgement calls: does this
+sentence really explain this input? Without a key those are reported as
 `unconfirmed` leads. With one, they get confirmed or dropped.
 
-Set **any one** of these and it is picked up automatically:
+Set any one of these and it is picked up automatically:
 
 ```bash
 export ANTHROPIC_API_KEY=...
@@ -187,7 +231,7 @@ export OPENAI_API_KEY=...
 export GEMINI_API_KEY=...
 ```
 
-Or put one in a `.env` file in your project — it is read automatically.
+Or put one in a `.env` file in your project, which is read automatically.
 [`.env.example`](.env.example) lists every option with comments.
 
 | provider | judge | behaviour runner |
@@ -201,7 +245,7 @@ Or put one in a `.env` file in your project — it is read automatically.
 - `STANTAL_VERTEX_PROJECT=my-project` routes Gemini or Claude through Google
   Cloud instead, so it bills to your cloud account rather than an API key.
 
-**What gets sent:** one closed question per finding, carrying a tool name, a
+What gets sent is one closed question per finding, carrying a tool name, a
 parameter name, and that tool's description *as published in the package*. Never
 your source, your file names, or anything about your repository.
 
@@ -210,8 +254,8 @@ your source, your file names, or anything about your repository.
 
 `--behaviour` goes further: it shows a model both versions and compares the tool
 calls it makes. Off unless you ask, because it costs several calls per request
-per version. Nothing is executed — no credentials and no side effects, just the
-call the model would have made.
+per version. Nothing is executed, so there are no credentials and no side
+effects, just the call the model would have made.
 
 </details>
 
@@ -251,7 +295,7 @@ comment on every push. No key required.
 | `replay` | `false` | Answer only from committed recordings. Cannot spend. |
 | `version` | pinned | Which release of the CLI to run. |
 
-**Start with `fail-on: unreadable`.** On an existing dependency the first run
+Start with `fail-on: unreadable`. On an existing dependency the first run
 usually finds real things, and a check that blocks every pull request on day one
 gets switched off by Friday.
 
@@ -260,27 +304,27 @@ gets switched off by Friday.
 ## Let it watch on its own
 
 The check above runs when somebody opens a pull request. Contract drift does not
-wait for that — it arrives on release day, in a dependency nobody was thinking
+wait for that. It arrives on release day, in a dependency nobody was thinking
 about.
 
 Copy [`templates/stantal-watch.yml`](templates/stantal-watch.yml) into
 `.github/workflows/`. Once a week it reads your contracts and, when one moves:
 
-- **If a bump is already open** — Renovate, Dependabot, a person — it comments
-  the verdict on **that** pull request. It does not open a competing one.
-- **Otherwise** it opens one pull request that adds contract tests recording what
+- If a bump is already open, whether from Renovate, Dependabot or a person, it
+  comments the verdict on that pull request instead of opening a competing one.
+- Otherwise it opens one pull request that adds contract tests recording what
   each package offers today.
 
-**It ships the proof, not the fix.** The tests it writes pass on your current
+It ships the proof, not the fix. The tests it writes pass on your current
 versions and fail the moment an upgrade takes any of the contract away, so the
 claim is checkable in one command by somebody who has never heard of us. It
 never upgrades anything and never touches your source.
 
 It runs with no account and no key. Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or
 `GEMINI_API_KEY` as a repository secret and it also puts both contracts in front
-of a real model and compares what it does — a scheduled run is the one place
-that is worth paying for, because it happens at most once per release and lands
-where someone is deciding.
+of a real model and compares what it does. A scheduled run is the one place
+worth paying for, because it happens at most once per release and lands where
+someone is deciding.
 
 ---
 
@@ -303,20 +347,20 @@ to go.
 
 ## Privacy
 
-- **Nothing leaves your machine unless you ask.** No account, no telemetry.
-- **It never runs the package it reads.** Contracts are parsed out of published
+- Nothing leaves your machine unless you ask. There is no account and no
+  telemetry.
+- It never runs the package it reads. Contracts are parsed out of published
   files, so nothing from an untrusted package executes on your machine.
-- **The scan of your files never calls out.** It reads the directory you are in,
-  matches findings against it, and stops there — no network, no upload. Turn it
-  off entirely with `--repo none`.
-- **Private registries already work.** Fetching uses `pacote`, which is what npm
+- The scan of your files never calls out. It reads the directory you are in,
+  matches findings against it, and stops there, with no network and no upload.
+  Turn it off entirely with `--repo none`.
+- Private registries already work. Fetching uses `pacote`, which is what npm
   itself uses, so your `.npmrc`, auth token and proxy are handled.
-- **`--publish` strips your file paths** before sending, and prints what it
-  removed.
+- `--publish` strips your file paths before sending, and prints what it removed.
 
 It also withholds claims it cannot support. Where a package could not be fully
 read, the affected findings are listed as withheld rather than reported or
-quietly dropped.
+dropped without saying so.
 
 ---
 
