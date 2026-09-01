@@ -19,8 +19,36 @@
   }
 }
 
+html {
+  /* The nav is sticky and 3.5rem tall. Without this, every anchor link lands
+     with its heading hidden underneath the bar. */
+  scroll-behavior: smooth;
+  scroll-padding-top: 5rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  /* Was Arial, which silently threw away the Geist font loaded in layout.tsx. */
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+::selection {
+  background: color-mix(in oklab, #8b5cf6 28%, transparent);
+}
+
+/* The hero backdrop: a faint grid that fades out before it reaches the text.
+   Kept in CSS rather than an image so it costs nothing and stays sharp. */
+.grid-backdrop {
+  background-image:
+    linear-gradient(to right, color-mix(in oklab, currentColor 7%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in oklab, currentColor 7%, transparent) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 30%, transparent 78%);
 }

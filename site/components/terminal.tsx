@@ -136,7 +136,10 @@ export function Terminal({
 
       {/* Fixed height, so the page does not reflow under the reader as output
           arrives and push whatever they were reading down the screen. */}
-      <div className="h-[24rem] overflow-y-auto px-5 py-4 font-mono text-[13px] leading-[1.75] sm:h-[26rem]">
+      {/* `overflow-x` as well as `y`: the lines are `whitespace-pre`, and on a
+          phone the longest package name runs past the edge. Without this the
+          outer `overflow-hidden` clips it with no way to reach the rest. */}
+      <div className="h-[24rem] overflow-auto px-5 py-4 font-mono text-[13px] leading-[1.75] sm:h-[26rem]">
         {visible.map((f, i) => (
           <Block key={i} command={f.command} lines={f.output} />
         ))}

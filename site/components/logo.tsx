@@ -1,0 +1,45 @@
+/**
+ * The mark.
+ *
+ * Three bars rising, the way a contract accumulates over releases. The tallest
+ * one has a gap cut out of it, because that is the whole product: the thing
+ * that should be standing tallest is the one with a piece missing, and nothing
+ * about its outline tells you so.
+ *
+ * Geometric on purpose. It has to stay legible at 20px in a nav bar and inside
+ * a favicon, where anything with detail turns to mush.
+ */
+export function Logo({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden
+      className={className}
+    >
+      <rect x="2.5" y="14" width="4.5" height="7.5" rx="1.4" />
+      <rect x="9.75" y="9.5" width="4.5" height="12" rx="1.4" />
+      {/* The tall bar, split. The gap is the deleted sentence. */}
+      <rect x="17" y="2.5" width="4.5" height="7" rx="1.4" />
+      <rect x="17" y="13" width="4.5" height="8.5" rx="1.4" opacity="0.45" />
+    </svg>
+  );
+}
+
+/** GitHub's mark, inlined. lucide dropped its brand icons, so this is not one. */
+export function GitHubMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden className={className}>
+      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
+    </svg>
+  );
+}
+
+/** npm's mark, inlined for the same reason. */
+export function NpmMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden className={className}>
+      <path d="M0 3.5h16v9H8v-1.5H5.5V12.5H0v-9Zm1.5 1.5v6H4V6.5h1.5v4.5H7V5H1.5Zm7 0v6H11V6.5h1.5v4.5H14V5H8.5Z" />
+    </svg>
+  );
+}

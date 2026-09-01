@@ -22,62 +22,6 @@
 
 ---
 
-## What it is
-
-Your agent calls a tool. Everything it knows about that tool is a name, a
-description and a list of parameters: plain text, shipped inside one of your
-dependencies.
-
-That text is the contract. A patch release rewrites one sentence of it and the
-model starts calling the tool wrong. Nothing errors, nothing changes type, no
-test fails, and the version number still says patch.
-
-Stantal reads that text out of every version of a package, diffs it, and tells
-you what a model would now read differently. It does three things, in order.
-
-1. Finds it: which release changed it, and whether it reaches your code.
-2. Proves it: a test in your repo that passes today and fails the day it moves.
-3. Puts it back: when no released version is clean, it restores the deleted
-   sentence into the copy you actually run, so you are not waiting on the
-   provider.
-
-## Why this is new
-
-An API contract used to be the part a compiler could check: names, types,
-shapes. Documentation sat beside the contract. You could rewrite every word of
-it in a patch release and break nobody.
-
-That is over. When the caller is a model, the documentation is the dispatch
-logic. The model picks the tool from its description, and fills a parameter from
-its description. Delete the sentence that explains a parameter and the call goes
-wrong on a green build, under a patch version number.
-
-Half of this already has a name: schema drift, meaning a renamed field or a new
-required parameter. Stantal reports that too, and it is the easy half, because
-something somewhere eventually throws. The half nothing checks is the prose, and
-that is where the damage is:
-
-> 22 popular packages. 487 releases. 168 changes a model would read
-> differently, and 145 of them had no structural signal at all. There was
-> nothing to type-check, nothing to fail, and nothing in the changelog.
-
-The case that started this: a package dropped the one sentence saying when to
-pass an optional parameter. Everything else about that parameter stayed: the
-name, the type, its siblings' guidance. The model filled it in anyway, every
-time. 37 tool calls, 37 validation errors, nothing created. The explanation
-still exists, in a code comment directly above the line that depends on it. It
-just never reaches the model. That was 53 releases ago and it is still there
-today.
-
-What makes this kind of break invisible also makes it repairable. Nobody can
-safely edit a stranger's schema under their runtime. A sentence is different,
-because no caller branches on a description. Only a model reads it. So `stantal
-patch` puts the sentence back into your installed copy and the tool works again,
-on a version the provider never fixed. Prose only, never a schema or a required
-field, and it refuses unless it finds the text exactly once.
-
----
-
 ## Start here
 
 **Paste this into Claude Code, Cursor or Codex:**
@@ -132,6 +76,62 @@ npx stantal connect
 
 Nothing to install, no config to write, no signup. It reads what you already
 have.
+
+---
+
+## What it is
+
+Your agent calls a tool. Everything it knows about that tool is a name, a
+description and a list of parameters: plain text, shipped inside one of your
+dependencies.
+
+That text is the contract. A patch release rewrites one sentence of it and the
+model starts calling the tool wrong. Nothing errors, nothing changes type, no
+test fails, and the version number still says patch.
+
+Stantal reads that text out of every version of a package, diffs it, and tells
+you what a model would now read differently. It does three things, in order.
+
+1. Finds it: which release changed it, and whether it reaches your code.
+2. Proves it: a test in your repo that passes today and fails the day it moves.
+3. Puts it back: when no released version is clean, it restores the deleted
+   sentence into the copy you actually run, so you are not waiting on the
+   provider.
+
+## Why this is new
+
+An API contract used to be the part a compiler could check: names, types,
+shapes. Documentation sat beside the contract. You could rewrite every word of
+it in a patch release and break nobody.
+
+That is over. When the caller is a model, the documentation is the dispatch
+logic. The model picks the tool from its description, and fills a parameter from
+its description. Delete the sentence that explains a parameter and the call goes
+wrong on a green build, under a patch version number.
+
+Half of this already has a name: schema drift, meaning a renamed field or a new
+required parameter. Stantal reports that too, and it is the easy half, because
+something somewhere eventually throws. The half nothing checks is the prose, and
+that is where the damage is:
+
+> 22 popular packages. 487 releases. 168 changes a model would read
+> differently, and 145 of them had no structural signal at all. There was
+> nothing to type-check, nothing to fail, and nothing in the changelog.
+
+The case that started this: a package dropped the one sentence saying when to
+pass an optional parameter. Everything else about that parameter stayed: the
+name, the type, its siblings' guidance. The model filled it in anyway, every
+time. 37 tool calls, 37 validation errors, nothing created. The explanation
+still exists, in a code comment directly above the line that depends on it. It
+just never reaches the model. That was 53 releases ago and it is still there
+today.
+
+What makes this kind of break invisible also makes it repairable. Nobody can
+safely edit a stranger's schema under their runtime. A sentence is different,
+because no caller branches on a description. Only a model reads it. So `stantal
+patch` puts the sentence back into your installed copy and the tool works again,
+on a version the provider never fixed. Prose only, never a schema or a required
+field, and it refuses unless it finds the text exactly once.
 
 ---
 
