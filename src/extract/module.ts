@@ -44,7 +44,16 @@ import { looksLikeZod, readZodSchema, zodNamespaces, type ZodContext } from "./z
  */
 
 /** Key names under which the ecosystems put a tool's JSON Schema. */
-const SCHEMA_KEYS = ["inputSchema", "input_schema", "parameters", "schema"] as const;
+const SCHEMA_KEYS = ["inputSchema", "input_schema", "parameters", "schema", "input"] as const;
+
+/**
+ * The keys a *bare* object literal must carry to count as a descriptor.
+ *
+ * `input` is deliberately absent. It is a real schema key — `defineTool` uses
+ * it — but only where a registration call vouches for the object. On its own,
+ * `{ name, input }` describes a form field as readily as a tool.
+ */
+const LITERAL_SCHEMA_KEYS = SCHEMA_KEYS.filter((key) => key !== "input");
 
 export type ModuleExtractOptions = {
   package: string;
@@ -141,7 +150,10 @@ function isDescriptor(node: AnyNode): node is ObjectExpression {
   if (node.type !== "ObjectExpression") return false;
   const keys = propertyMap(node);
   if (!keys.has("name")) return false;
-  return SCHEMA_KEYS.some((key) => keys.has(key));
+  // The stricter set on purpose. A bare object literal has no registration call
+  // vouching for it, and `{ name, input }` is an ordinary shape for things that
+  // are not tools at all — a form field, a test case, a CLI argument.
+  return LITERAL_SCHEMA_KEYS.some((key) => keys.has(key));
 }
 
 /**
@@ -156,6 +168,25 @@ const REGISTRATION_METHODS = new Set(["registerTool", "tool", "addTool", "define
 
 function callSite(node: AnyNode, module: ParsedModule): DescriptorSite | null {
   if (node.type !== "CallExpression") return null;
+
+  // `defineTool({ name, description, input })` — a wrapper helper, called bare
+  // rather than on a server object. The declaration is its argument, exactly as
+  // it is for `zodToJsonSchema(ArgsSchema)`; the wrapper only reshapes it at
+  // runtime. Missing this made every `@vendoai/*` surface that uses the helper
+  // read as unnameable descriptors — 7 of the 18 gaps in the coverage census.
+  if (node.callee.type === "Identifier") {
+    if (!REGISTRATION_METHODS.has(node.callee.name)) return null;
+    const [only] = node.arguments;
+    if (only === undefined || only.type !== "ObjectExpression") return null;
+    const keys = propertyMap(only);
+    // The object has to name itself and describe itself. A bare identifier is a
+    // much weaker signal than a member call, so this is the strict end of it:
+    // without both, it is some other function that happens to share a name.
+    if (!keys.has("name")) return null;
+    const describes = keys.has("description") || SCHEMA_KEYS.some((k) => keys.has(k));
+    return describes ? { node: only, module } : null;
+  }
+
   if (node.callee.type !== "MemberExpression" || node.callee.computed) return null;
   if (node.callee.property.type !== "Identifier") return null;
   if (!REGISTRATION_METHODS.has(node.callee.property.name)) return null;
@@ -188,21 +219,189 @@ function callSite(node: AnyNode, module: ParsedModule): DescriptorSite | null {
   return null;
 }
 
+/** The identifier a member chain hangs off: `tool.name` -> `tool`, `this.name` -> null. */
+function rootIdentifier(node: Expression | undefined): string | null {
+  let current: AnyNode | undefined = node;
+  while (current !== undefined) {
+    if (current.type === "Identifier") return current.name;
+    if (current.type === "MemberExpression") {
+      current = current.object as AnyNode;
+      continue;
+    }
+    return null;
+  }
+  return null;
+}
+
+function isFunctionNode(node: AnyNode): boolean {
+  return (
+    node.type === "FunctionDeclaration" ||
+    node.type === "FunctionExpression" ||
+    node.type === "ArrowFunctionExpression"
+  );
+}
+
+/** Parameter names a function binds, for the simple shapes that matter here. */
+function boundParameters(node: AnyNode): string[] {
+  const params = (node as { params?: unknown }).params;
+  if (!Array.isArray(params)) return [];
+  const names: string[] = [];
+  for (const param of params) {
+    if (!isNode(param)) continue;
+    if (param.type === "Identifier") names.push(param.name);
+    else if (param.type === "AssignmentPattern" && param.left.type === "Identifier") names.push(param.left.name);
+    else if (param.type === "RestElement" && param.argument.type === "Identifier") names.push(param.argument.name);
+  }
+  return names;
+}
+
+/**
+ * Is this object a declaration, or a factory building one from its input?
+ *
+ * ```js
+ * export function defineTool(tool) {
+ *   return { name: tool.name, description: tool.description, inputSchema };
+ * }
+ * ```
+ *
+ * That is descriptor-shaped and is not a descriptor. It is the wrapper every
+ * caller passes a real declaration to, and its `name` is whatever it is handed
+ * at runtime. Reading it as a tool produced an unresolvable name and reported
+ * the whole surface as unreadable — so a package that declares its tools
+ * perfectly legibly at the call sites looked like one that builds them
+ * dynamically.
+ *
+ * The same shape appears in renderers. `@vendoai/ui` builds
+ * `{ name: part.tool, ... }` from a tool call that already happened; that
+ * entry point renders contracts rather than declaring any, and calling it a
+ * reading gap told a real user their most-used surface was unprotected when
+ * there was nothing there to protect.
+ *
+ * The test is narrow on purpose: the name has to hang off a binding the
+ * enclosing function itself takes as a parameter. `this.name` is not this —
+ * that is a class instance property, a real declaration spread across a
+ * hierarchy, and it stays an honest gap.
+ */
+function isFactory(site: DescriptorSite, params: ReadonlySet<string>): boolean {
+  const nameNode = site.nameNode ?? propertyMap(site.node).get("name");
+  if (nameNode === undefined) return false;
+  const root = rootIdentifier(nameNode);
+  return root !== null && params.has(root);
+}
+
+/** The walk, carrying the parameter names bound by each enclosing function. */
+function walkScoped(root: AnyNode, visit: (node: AnyNode, params: ReadonlySet<string>) => void): void {
+  const stack: Array<{ node: AnyNode; params: ReadonlySet<string> }> = [{ node: root, params: new Set() }];
+  while (stack.length > 0) {
+    const frame = stack.pop();
+    if (frame === undefined) continue;
+    const { node } = frame;
+    visit(node, frame.params);
+
+    let params = frame.params;
+    if (isFunctionNode(node)) {
+      const bound = boundParameters(node);
+      if (bound.length > 0) params = new Set([...frame.params, ...bound]);
+    }
+
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) {
+        for (const item of value) if (isNode(item)) stack.push({ node: item, params });
+      } else if (isNode(value)) {
+        stack.push({ node: value, params });
+      }
+    }
+  }
+}
+
+/**
+ * A file that imported a tool-registration helper, and where from.
+ *
+ * Matched on the **imported** name rather than the local one, so a bundler's
+ * `import { tool as Ro }` still counts — the same reason the zod reader matches
+ * a namespace by fingerprint instead of by the letter `z`.
+ */
+function registrationImport(modules: readonly ParsedModule[]): string | null {
+  for (const module of modules) {
+    for (const statement of module.program.body) {
+      if (statement.type !== "ImportDeclaration") continue;
+      for (const specifier of statement.specifiers) {
+        if (specifier.type !== "ImportSpecifier") continue;
+        const imported =
+          specifier.imported.type === "Identifier"
+            ? specifier.imported.name
+            : typeof specifier.imported.value === "string"
+              ? specifier.imported.value
+              : null;
+        if (imported !== null && REGISTRATION_METHODS.has(imported)) {
+          const from = typeof statement.source.value === "string" ? statement.source.value : "?";
+          return `${module.path} imports \`${imported}\` from \`${from}\``;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/** Zod calls whose argument is a shape, not a value. */
+const ZOD_SHAPE_METHODS = new Set(["object", "strictObject", "looseObject", "interface"]);
+
+/**
+ * The object handed to `z.object(...)`, when this call is one.
+ *
+ * A schema *describing* descriptors is descriptor-shaped:
+ *
+ * ```js
+ * export const toolDescriptorSchema = z.object({
+ *   name: z.string().regex(TOOL_NAME_PATTERN),
+ *   description: z.string(),
+ *   inputSchema: jsonSchemaSchema,
+ * });
+ * ```
+ *
+ * Read as a tool, its name is `z.string().regex(...)`, which folds to nothing —
+ * so a package that validates its own contract got reported as one whose
+ * descriptors cannot be named. The shape is a type, not an instance.
+ */
+function zodShapeArgument(node: AnyNode, isNamespace: (name: string) => boolean): ObjectExpression | null {
+  if (node.type !== "CallExpression") return null;
+  if (node.callee.type !== "MemberExpression" || node.callee.computed) return null;
+  if (node.callee.property.type !== "Identifier") return null;
+  if (!ZOD_SHAPE_METHODS.has(node.callee.property.name)) return null;
+
+  const root = rootIdentifier(node.callee.object as Expression);
+  if (root === null || !isNamespace(root)) return null;
+
+  const [only] = node.arguments;
+  return only !== undefined && only.type === "ObjectExpression" ? only : null;
+}
+
 function descriptorSites(modules: readonly ParsedModule[]): DescriptorSite[] {
   const sites: DescriptorSite[] = [];
   for (const module of modules) {
     const found: DescriptorSite[] = [];
     const claimed = new Set<ObjectExpression>();
-    walk(module.program as AnyNode, (node) => {
+    const namespaces = namespacesFor(module);
+    const isNamespace = (name: string): boolean => namespaces.has(name);
+
+    walkScoped(module.program as AnyNode, (node, params) => {
+      // Claimed before the descriptor branch can see it. The walk visits a
+      // parent before its children, which is what makes claiming work at all.
+      const shape = zodShapeArgument(node, isNamespace);
+      if (shape !== null) claimed.add(shape);
+
       const call = callSite(node, module);
       if (call !== null) {
-        found.push(call);
         claimed.add(call.node);
+        if (!isFactory(call, params)) found.push(call);
         return;
       }
       // A config object already claimed by its registration call must not be
       // counted twice, once named and once anonymous.
-      if (isDescriptor(node) && !claimed.has(node)) found.push({ node, module });
+      if (isDescriptor(node) && !claimed.has(node)) {
+        const site: DescriptorSite = { node, module };
+        if (!isFactory(site, params)) found.push(site);
+      }
     });
     // The walk is a stack, so it finds them out of order. Source order is what
     // makes "the first declaration wins" a rule rather than an accident.
@@ -491,8 +690,27 @@ export function extractFromModule(options: ModuleExtractOptions): SurfaceResult 
     // Finding descriptors and failing to name them is not the same as finding
     // none. The first is our blind spot and must not be reported as the
     // package having no surface here.
-    const checked = sites.length > 0 ? sites.map(evidenceAt) : modules.map((m) => m.path);
-    return absent(sites.length > 0 ? "descriptors_unreadable" : "no_descriptors", checked);
+    if (sites.length > 0) {
+      return absent("descriptors_unreadable", sites.map(evidenceAt));
+    }
+
+    // Nor is "we found none here" the same as "there are none", in a file that
+    // imported a tool-registration helper in order to use it.
+    //
+    // `@supabase/mcp-server-supabase` is the case that proves it. It does
+    // `import { tool } from "@supabase/mcp-utils"` and then returns
+    // `{ search_docs: tool({...}) }` from a factory — a record keyed by tool
+    // name, with an async description. Nothing in that shape is descriptor
+    // shaped, so this reader sees no candidates at all and would otherwise
+    // report a server with a dozen tools as shipping none. The import is the
+    // package saying, in its own source, that this file is about declaring
+    // tools.
+    const helper = registrationImport(modules);
+    if (helper !== null) {
+      return absent("descriptors_unreadable", [helper]);
+    }
+
+    return absent("no_descriptors", modules.map((m) => m.path));
   }
 
   const contract: Contract = {

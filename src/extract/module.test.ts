@@ -305,3 +305,97 @@ describe("a JSON entry point", () => {
     expect(isEvidencedAbsence(result.absence.reason)).toBe(true);
   });
 });
+
+describe("what is a declaration, and what only looks like one", () => {
+  test("reads a tool declared through a bare wrapper helper", () => {
+    // `defineTool({...})` is called on nothing — the declaration is its
+    // argument, and the wrapper only reshapes it at runtime.
+    const result = extract({
+      "dist/pack.js": `
+        import { defineTool } from "@example/core";
+        export const build = defineTool({
+          name: "build",
+          description: "Build a screen from a request.",
+          input: { type: "object", properties: { request: { type: "string" } }, required: ["request"] },
+        });
+      `,
+    });
+
+    if (!result.present) throw new Error(`expected a contract, got ${result.absence.reason}`);
+    expect(result.contract.tools.map((t) => t.name)).toEqual(["build"]);
+  });
+
+  test("does not read the wrapper's own return statement as a tool", () => {
+    // The helper builds a descriptor out of whatever it is handed. Reading it
+    // as a declaration produced an unresolvable name and reported the whole
+    // surface as unreadable, so a package that declares its tools perfectly
+    // legibly at the call sites looked like one that builds them dynamically.
+    const result = extract({
+      "dist/pack.js": `
+        export function defineTool(tool) {
+          return { name: tool.name, description: tool.description, inputSchema: tool.input };
+        }
+      `,
+    });
+
+    expect(result.present).toBe(false);
+    if (result.present) return;
+    // Nothing tool-shaped was declared here, and nothing claims otherwise.
+    expect(result.absence.reason).toBe("no_descriptors");
+  });
+
+  test("does not read a renderer that rebuilds a descriptor from a past call", () => {
+    const result = extract({
+      "dist/pack.js": `
+        export function buildApprovalRequest(part, tools) {
+          return { name: part.tool, description: tools[part.tool].description, inputSchema: {} };
+        }
+      `,
+    });
+
+    expect(result.present).toBe(false);
+    if (result.present) return;
+    expect(result.absence.reason).toBe("no_descriptors");
+  });
+
+  test("does not read a zod schema describing descriptors as a descriptor", () => {
+    // A schema for tools is descriptor-shaped and is a type, not an instance.
+    // Its `name` is `z.string()`, which folds to nothing.
+    const result = extract({
+      "dist/pack.js": `
+        import { z } from "zod";
+        export const toolDescriptorSchema = z.object({
+          name: z.string(),
+          description: z.string(),
+          inputSchema: z.unknown(),
+        });
+      `,
+    });
+
+    expect(result.present).toBe(false);
+    if (result.present) return;
+    expect(result.absence.reason).toBe("no_descriptors");
+  });
+
+  test("a file that imports a tool helper and yields nothing is a gap, not an empty surface", () => {
+    // The shape here declares tools as a record keyed by tool name, which is
+    // not descriptor-shaped at all — so there are no candidates to decline and
+    // nothing to notice. The import is the package saying, in its own source,
+    // that this file is about declaring tools. Without this, a server with a
+    // dozen tools reports as shipping none.
+    const result = extract({
+      "dist/pack.js": `
+        import { tool as makeTool } from "@example/mcp-utils";
+        export function tools({ client }) {
+          return { search_docs: makeTool({ description: async () => await client.schema() }) };
+        }
+      `,
+    });
+
+    expect(result.present).toBe(false);
+    if (result.present) return;
+    expect(result.absence.reason).toBe("descriptors_unreadable");
+    expect(isEvidencedAbsence(result.absence.reason)).toBe(false);
+    expect(result.absence.checked[0]).toContain("imports `tool`");
+  });
+});
