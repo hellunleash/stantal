@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="286" viewBox="0 0 860 286" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.5">
+  <rect width="860" height="286" rx="10" fill="#1e1e2e"/>
+  <rect width="860" height="34" rx="10" fill="#181825"/>
+  <rect y="24" width="860" height="10" fill="#181825"/>
+  <circle cx="20" cy="17" r="5.5" fill="#f38ba8"/>
+  <circle cx="39" cy="17" r="5.5" fill="#f9e2af"/>
+  <circle cx="58" cy="17" r="5.5" fill="#a6e3a1"/>
+  <text x="430" y="21.5" fill="#6c7086" font-size="12" text-anchor="middle">your-project</text>
+
+  <text x="22" y="68" fill="#a6e3a1">$</text>
+  <text x="38" y="68" fill="#cdd6f4">npx stantal history @acme/sdk --current 1.4.0</text>
+
+  <text x="38" y="112" fill="#fab387">undocumented_optional</text>
+  <text x="228" y="112" fill="#cdd6f4">build.target</text>
+  <text x="54" y="134" fill="#bac2de">introduced in 1.5.0, last clean 1.4.0</text>
+  <text x="54" y="156" fill="#bac2de">31 release(s) affected, still present</text>
+
+  <text x="38" y="200" fill="#f38ba8">WHAT TO DO</text>
+  <text x="140" y="200" fill="#f38ba8">stuck</text>
+  <text x="62" y="222" fill="#bac2de">1.4.0 is clean, but every release after it carries 1 finding</text>
+  <text x="62" y="244" fill="#bac2de">there is nowhere to upgrade to</text>
+</svg>

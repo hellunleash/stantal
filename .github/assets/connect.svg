@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="446" viewBox="0 0 860 446" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.5">
+  <rect width="860" height="446" rx="10" fill="#1e1e2e"/>
+  <rect width="860" height="34" rx="10" fill="#181825"/>
+  <rect y="24" width="860" height="10" fill="#181825"/>
+  <circle cx="20" cy="17" r="5.5" fill="#f38ba8"/>
+  <circle cx="39" cy="17" r="5.5" fill="#f9e2af"/>
+  <circle cx="58" cy="17" r="5.5" fill="#a6e3a1"/>
+  <text x="430" y="21.5" fill="#6c7086" font-size="12" text-anchor="middle">your-project</text>
+
+  <text x="22" y="68" fill="#a6e3a1">$</text>
+  <text x="38" y="68" fill="#cdd6f4">npx stantal connect</text>
+
+  <text x="38" y="110" fill="#a6e3a1">connected</text>
+  <text x="128" y="110" fill="#cdd6f4">Claude Code</text>
+  <text x="54" y="132" fill="#bac2de">.mcp.json</text>
+  <text x="152" y="132" fill="#6c7086">this project already has .mcp.json</text>
+  <text x="54" y="154" fill="#6c7086">left alone: github</text>
+  <text x="54" y="176" fill="#bac2de">Restart Claude Code and approve the server when it asks</text>
+
+  <text x="38" y="216" fill="#a6e3a1">created</text>
+  <text x="112" y="216" fill="#cdd6f4">AGENTS.md</text>
+  <text x="54" y="238" fill="#6c7086">what your agent reads before it does anything</text>
+  <text x="54" y="260" fill="#6c7086">delete the block to opt out</text>
+
+  <text x="38" y="300" fill="#cdd6f4">2 of your dependencies hand a model a tool contract (19 tools):</text>
+  <text x="54" y="322" fill="#89b4fa">@modelcontextprotocol/server-filesystem</text>
+  <text x="392" y="322" fill="#cdd6f4">14 tool(s)</text>
+  <text x="490" y="322" fill="#6c7086">bin:mcp-server-filesystem</text>
+  <text x="54" y="344" fill="#89b4fa">tavily-mcp</text>
+  <text x="392" y="344" fill="#cdd6f4"> 5 tool(s)</text>
+  <text x="490" y="344" fill="#6c7086">bin:tavily-mcp</text>
+
+  <text x="38" y="384" fill="#cba6f7">Ask your agent:</text>
+  <text x="176" y="384" fill="#cdd6f4">read AGENTS.md and set up stantal</text>
+
+  <text x="38" y="422" fill="#6c7086">No account, no key, no signup. Everything above ran on this machine.</text>
+</svg>

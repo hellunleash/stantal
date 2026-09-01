@@ -15,6 +15,11 @@
   <img alt="node" src="https://img.shields.io/badge/node-%3E%3D20-339933?style=flat-square&logo=nodedotjs&logoColor=white" />
 </p>
 
+<p align="center">
+  <img src=".github/assets/connect.svg" width="830"
+       alt="Terminal running npx stantal connect. It reports that Claude Code is connected and .mcp.json was left alone, that AGENTS.md was created, and that 2 dependencies hand a model a tool contract: @modelcontextprotocol/server-filesystem with 14 tools and tavily-mcp with 5. It ends with: no account, no key, no signup, everything above ran on this machine." />
+</p>
+
 ---
 
 ## What it is
@@ -172,15 +177,8 @@ to turn that off, or `--repo <dir>` to point it at a different directory.
 npx stantal history @acme/sdk --current 1.4.0
 ```
 
-```
-  undocumented_optional  build.target
-    introduced in 1.5.0, last clean 1.4.0
-    31 release(s) affected, still present
-
-  WHAT TO DO  stuck
-     1.4.0 is clean, but every release after it carries 1 finding
-     — there is nowhere to upgrade to
-```
+<img src=".github/assets/verdict.svg" width="830"
+     alt="Terminal running npx stantal history @acme/sdk --current 1.4.0. It reports an undocumented_optional finding on build.target, introduced in 1.5.0, last clean 1.4.0, with 31 releases affected and still present. The verdict is: what to do, stuck. 1.4.0 is clean, but every release after it carries 1 finding, so there is nowhere to upgrade to." />
 
 It names the nearest clean release, never just the latest. If none exists it
 says so rather than inventing one.
