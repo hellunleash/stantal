@@ -91,7 +91,7 @@ describe("locating the text as shipped", () => {
   test("finds a plain description exactly once", () => {
     write("dist/pack.js", `export const tools = [{ name: "build", description: "${NEW}" }];`);
     const found = locate(NEW, dir, codeFiles(dir));
-    expect(found).toMatchObject({ found: true, file: "dist/pack.js", encoding: "raw" });
+    expect(found).toMatchObject({ found: true, hits: [{ file: "dist/pack.js", encoding: "raw" }] });
   });
 
   test("refuses when the text appears twice", () => {
@@ -99,6 +99,19 @@ describe("locating the text as shipped", () => {
     // someone's dependency is worse than doing nothing.
     write("dist/pack.js", `const a = "${NEW}"; const b = "${NEW}";`);
     expect(locate(NEW, dir, codeFiles(dir))).toMatchObject({ found: false, reason: "ambiguous" });
+  });
+
+  test("one hit each in several files is not a guess", () => {
+    // MCP servers routinely ship the same bundle once per transport. Both are
+    // contracts a consumer can load, so restoring one and not the other would
+    // leave the package saying two different things. Refusing outright left
+    // the most common shape of MCP package unpatchable.
+    write("dist/stdio.js", `const d = "${NEW}";`);
+    write("dist/http.js", `const d = "${NEW}";`);
+    const found = locate(NEW, dir, codeFiles(dir));
+    expect(found).toMatchObject({ found: true });
+    if (!found.found) throw new Error("expected a hit");
+    expect(found.hits.map((h) => h.file).sort()).toEqual(["dist/http.js", "dist/stdio.js"]);
   });
 
   test("refuses when the text is nowhere", () => {
@@ -114,7 +127,7 @@ describe("locating the text as shipped", () => {
     const text = 'Builds it.\nSay "yes" to continue.';
     write("dist/pack.js", `const d = ${JSON.stringify(text)};`);
     const found = locate(text, dir, codeFiles(dir));
-    expect(found).toMatchObject({ found: true, encoding: "escaped" });
+    expect(found).toMatchObject({ found: true, hits: [{ encoding: "escaped" }] });
   });
 });
 
@@ -147,6 +160,40 @@ describe("planning a restoration", () => {
 
     expect(canApply(plan)).toBe(true);
     expect(plan.edits[0]).toMatchObject({ file: "dist/pack.js", find: NEW, replace: OLD, tool: "build" });
+  });
+
+  test("refuses a second time when the restoration is already in place", () => {
+    // The deleted sentence is usually a *trailing* one, so the newer text is a
+    // prefix of the older. Searching for it still finds it inside text that has
+    // already been restored, and a second run would append the sentence twice.
+    // Found by running it against exa-mcp-server 3.1.2 -> 3.1.3.
+    const shorter = "Searches the web.";
+    const longer = "Searches the web. Pass extra queries for better results.";
+    write("dist/pack.js", `const d = "${longer}";`);
+
+    const plan = planPatch({
+      report: report([tool("build", longer)], [tool("build", shorter)], [finding("build")]),
+      packageDir: dir,
+    });
+
+    expect(plan.edits).toEqual([]);
+    expect(plan.refused[0]).toMatchObject({ tool: "build", reason: "unchanged" });
+    expect(plan.refused[0]?.detail).toContain("already restored");
+  });
+
+  test("edits every copy of a bundle, not one of them", () => {
+    // Both are contracts a consumer can load. Restoring one and not the other
+    // would leave the package saying two different things.
+    write("dist/stdio.js", `const d = "${NEW}";`);
+    write("dist/http.js", `const d = "${NEW}";`);
+
+    const plan = planPatch({
+      report: report([tool("build", OLD)], [tool("build", NEW)], [finding("build")]),
+      packageDir: dir,
+    });
+
+    expect(canApply(plan)).toBe(true);
+    expect(plan.edits.map((e) => e.file).sort()).toEqual(["dist/http.js", "dist/stdio.js"]);
   });
 
   test("re-encodes the replacement to match what it replaces", () => {

@@ -13,9 +13,15 @@ import { encodings, type PatchEdit, type PatchPlan, type PatchRefusal } from "./
  * means finding the literal, and the only honest way to do that without
  * re-parsing every file is an exact search that must hit exactly once.
  *
- * Exactly once is the whole safety story. Zero hits means we cannot locate it
- * and must say so. More than one means the choice of which to edit is a guess,
- * and a guess that edits somebody's dependency is worse than doing nothing.
+ * Exactly once **per file** is the safety story. Zero hits means we cannot
+ * locate it and must say so. Twice in one file means the choice of which to
+ * edit is a guess, and a guess that edits somebody's dependency is worse than
+ * doing nothing. Once each in several files is neither: it is one package
+ * shipping the same bundle per transport, and all of them are the contract.
+ *
+ * A file that already carries the restoration is dropped before an edit is
+ * planned, because the newer description is often a prefix of the older one and
+ * would otherwise be restored on top of itself.
  */
 
 /** Rules whose repair is a restoration of deleted prose. */
@@ -67,19 +73,30 @@ export function codeFiles(packageDir: string, limit = 5000): string[] {
   return out.sort();
 }
 
+export type LocatedHit = { file: string; find: string; encoding: "raw" | "escaped" };
+
 type Located =
-  | { found: true; file: string; find: string; encoding: "raw" | "escaped" }
+  | { found: true; hits: LocatedHit[] }
   | { found: false; reason: "not_found" | "ambiguous"; detail: string };
 
 /**
- * Where does this exact text live, and does it live in exactly one place?
+ * Where does this exact text live, and is each place unambiguous?
  *
- * Both encodings are tried across every file. Two matches anywhere — the same
- * file twice, two files, or one file under each encoding — is ambiguous, and
- * ambiguous is refused.
+ * **Exactly once per file, in any number of files.** The safety rule is about
+ * whether the choice of what to edit is a guess, and it is only a guess when
+ * one file holds the text twice, or holds it under both encodings — there is
+ * no way to know which occurrence the descriptor was read from.
+ *
+ * The same description appearing once each in several files is not that. MCP
+ * servers routinely ship the same bundle twice, once per transport, and
+ * `exa-mcp-server` does exactly this: `.smithery/shttp/index.cjs` and
+ * `.smithery/stdio/index.cjs`. Both are contracts a consumer can load, so
+ * restoring one and not the other would leave the package saying two different
+ * things. Refusing outright, which is what this used to do, left the most
+ * common shape of MCP package unpatchable.
  */
 export function locate(text: string, packageDir: string, files: readonly string[]): Located {
-  const hits: Array<{ file: string; find: string; encoding: "raw" | "escaped" }> = [];
+  const hits: LocatedHit[] = [];
 
   for (const file of files) {
     let contents: string;
@@ -88,29 +105,49 @@ export function locate(text: string, packageDir: string, files: readonly string[
     } catch {
       continue;
     }
+
+    const inThisFile: LocatedHit[] = [];
     for (const { encoding, text: needle } of encodings(text)) {
       let from = 0;
       for (;;) {
         const at = contents.indexOf(needle, from);
         if (at < 0) break;
-        hits.push({ file, find: needle, encoding });
-        if (hits.length > 1) {
-          return {
-            found: false,
-            reason: "ambiguous",
-            detail: `appears in more than one place (${hits.map((h) => h.file).join(", ")})`,
-          };
-        }
+        inThisFile.push({ file, find: needle, encoding });
         from = at + needle.length;
       }
     }
+
+    if (inThisFile.length > 1) {
+      return {
+        found: false,
+        reason: "ambiguous",
+        detail: `appears ${inThisFile.length} times in ${file}, so which one the descriptor reads is a guess`,
+      };
+    }
+    if (inThisFile[0] !== undefined) hits.push(inThisFile[0]);
   }
 
-  const only = hits[0];
-  if (only === undefined) {
+  if (hits.length === 0) {
     return { found: false, reason: "not_found", detail: `no file in the package contains the text as shipped` };
   }
-  return { found: true, ...only };
+  return { found: true, hits };
+}
+
+
+/**
+ * Does this file already carry the older text?
+ *
+ * Checked in both encodings, the same way it is searched for, because a file
+ * that already holds the restoration must not receive it twice.
+ */
+function alreadyRestored(packageDir: string, file: string, old: string): boolean {
+  let contents: string;
+  try {
+    contents = readFileSync(join(packageDir, file), "utf8");
+  } catch {
+    return false;
+  }
+  return encodings(old).some(({ text }) => contents.includes(text));
 }
 
 function toolsByName(contract: Contract): Map<string, Tool> {
@@ -181,20 +218,42 @@ export function planPatch(options: PlanOptions): PatchPlan {
         continue;
       }
 
-      // The replacement is encoded the same way the text it replaces was, so a
-      // literal stays a valid literal. Restoring raw text into an escaped
-      // string would end the literal early and break the file it was meant to
-      // repair — the worst possible outcome for a tool that edits node_modules.
-      const replacement = where.encoding === "raw" ? old : JSON.stringify(old).slice(1, -1);
+      // Files that already carry the restoration are dropped before any edit is
+      // planned.
+      //
+      // The two contracts both come from the registry, so `now` is always the
+      // published newer text however many times this has been run. When the
+      // newer description is a *prefix* of the older one — a deleted trailing
+      // sentence, which is the single most common shape this restores — the
+      // search still finds it inside text that was already restored, and a
+      // second run appends the sentence again. Found by running it twice
+      // against `exa-mcp-server` 3.1.2 -> 3.1.3.
+      const pending = where.hits.filter((hit) => !alreadyRestored(packageDir, hit.file, old));
+      if (pending.length === 0) {
+        refused.push({
+          ...scope,
+          reason: "unchanged",
+          detail: `already restored in ${where.hits.length} file(s) — nothing left to do`,
+        });
+        continue;
+      }
 
-      edits.push({
-        file: where.file,
-        find: where.find,
-        replace: replacement,
-        encoding: where.encoding,
-        why: `restores the description this tool shipped at ${report.subject.from}`,
-        ...scope,
-      });
+      // One edit per file the text was found in. The replacement is encoded the
+      // same way the text it replaces was, so a literal stays a valid literal.
+      // Restoring raw text into an escaped string would end the literal early
+      // and break the file it was meant to repair — the worst possible outcome
+      // for a tool that edits somebody's dependency.
+      const spread = pending.length > 1 ? ` (${pending.length} copies of this bundle)` : "";
+      for (const hit of pending) {
+        edits.push({
+          file: hit.file,
+          find: hit.find,
+          replace: hit.encoding === "raw" ? old : JSON.stringify(old).slice(1, -1),
+          encoding: hit.encoding,
+          why: `restores the description this tool shipped at ${report.subject.from}${spread}`,
+          ...scope,
+        });
+      }
     }
   }
 

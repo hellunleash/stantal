@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
@@ -33,6 +33,7 @@ import { extractFromModule } from "./extract/module.js";
 import { exportedSubpaths, fsPackageSource } from "./extract/package-source.js";
 import { packageDirectory } from "./testkit.js";
 import { applyPatch, planPatch } from "./patch/plan.js";
+import { renderPatchFile } from "./patch/emit.js";
 import { canApply } from "./patch/taxonomy.js";
 import { renderHtml } from "./verdict/html.js";
 import { publishableReport } from "./verdict/publish.js";
@@ -134,13 +135,19 @@ Options
   --directory <dir>     Project root to read. Default: cwd
   --emit-tests          Write contract tests for what this comparison found,
                         pinning the older side so they fail on the upgrade.
-  --out <dir>           Where emitted tests go. Default: stantal/
+  --out <dir>           Where emitted tests go (default stantal/), or where
+                        --emit-patch writes (default patches/).
   --agent <id>          connect: which agent to configure. Detected by default.
   --run                 connect: also hand the setup prompt to that agent.
                         Off by default — starting your agent can edit files
                         and spend tokens, so it is never done on install.
-  --apply               patch: actually write the edits into node_modules.
-                        Off by default; the plan is printed instead.
+  --emit-patch          patch: write the restoration as a patch file in
+                        patches/, which survives npm install and is
+                        reviewable as a diff. This is the durable form.
+  --apply               patch: also write the edits into node_modules now.
+                        Off by default; the plan is printed instead. A fresh
+                        install throws these away, so it checks a fix rather
+                        than keeping one.
   --html <file>         Also write the verdict as one self-contained HTML page.
                         Nothing is fetched when it is opened, so it can be
                         forwarded to someone who will not run what you send.
@@ -474,6 +481,9 @@ function renderHistory(result: HistoryResult): string {
  * stop using the feature.
  */
 const DEFAULT_TEST_DIR = "stantal";
+
+/** Where a restoration goes.  is where patch-package looks. */
+const DEFAULT_PATCH_DIR = "patches";
 
 function renderWritten(written: readonly WrittenFile[], pinnedAt: string, resolvable = true): string {
   if (written.length === 0) {
@@ -818,6 +828,9 @@ async function runPatch(
     apply?: boolean | undefined;
     surface?: string[] | undefined;
     cache?: string | undefined;
+    "emit-patch"?: boolean | undefined;
+    directory?: string | undefined;
+    out?: string | undefined;
   },
   judge: Judge | null,
 ): Promise<number> {
@@ -829,10 +842,11 @@ async function runPatch(
     return 2;
   }
 
-  const directory = packageDirectory(pkg);
+  const root = values.directory ?? process.cwd();
+  const directory = packageDirectory(pkg, root);
   if (directory === null) {
     process.stderr.write(
-      `stantal: ${pkg} is not installed under any node_modules above ${process.cwd()}.\n` +
+      `stantal: ${pkg} is not installed under any node_modules above ${root}.\n` +
         `A patch edits the copy you actually run, so there has to be one.\n`,
     );
     return 2;
@@ -895,13 +909,53 @@ async function runPatch(
     }
     out.push("");
 
+    // The durable half. `--apply` edits node_modules, which is the right way to
+    // check a restoration and is erased by the next install. This writes the
+    // same edits as a patch file that lives in the repository, is reviewable as
+    // a diff, and is reapplied on every install by patch-package.
+    let emitted: string | null = null;
+    if (values["emit-patch"] === true) {
+      const rendered = renderPatchFile(plan, directory);
+      if (rendered === null) {
+        out.push(`  no patch written — none of the planned edits could be rendered against the files on disk`);
+        out.push("");
+        process.stdout.write(out.join("\n") + "\n");
+        return 1;
+      }
+      const patchDir = join(root, values.out ?? DEFAULT_PATCH_DIR);
+      emitted = join(patchDir, rendered.name);
+      mkdirSync(patchDir, { recursive: true });
+      writeFileSync(emitted, rendered.text, "utf8");
+
+      out.push(`  wrote ${rendered.name}  ${dim(`${rendered.files.length} file(s)`)}`);
+      out.push(`    ${emitted}`);
+      out.push("");
+      out.push(`  It is a plain diff — read it before you commit it.`);
+      // Named rather than assumed. The file alone changes nothing; something
+      // has to reapply it after each install, and if that step is skipped the
+      // restoration disappears exactly as quietly as the sentence it restores.
+      if (packageDirectory("patch-package", root) === null) {
+        out.push(`  Nothing here reapplies it yet:`);
+        out.push(`      npm install -D patch-package`);
+        out.push(`      npm pkg set scripts.postinstall="patch-package"`);
+      } else {
+        out.push(`  patch-package is installed, so this reapplies on every install.`);
+      }
+      out.push("");
+    }
+
     if (values.apply !== true) {
-      // Printed, never written, unless asked. Editing a dependency is a side
-      // effect nobody should get from a command they ran to look at something.
-      out.push(`  nothing was written — re-run with --apply to make these edits`);
+      // Printed, never written into the dependency unless asked. Editing
+      // somebody's node_modules is a side effect nobody should get from a
+      // command they ran to look at something.
+      out.push(
+        emitted === null
+          ? `  nothing was written — re-run with --emit-patch to keep these, or --apply to edit node_modules`
+          : `  node_modules was left alone — add --apply to also edit it in place now`,
+      );
       out.push("");
       process.stdout.write(out.join("\n") + "\n");
-      return 1;
+      return emitted === null ? 1 : 0;
     }
 
     const results = applyPatch(plan, directory);
@@ -1777,6 +1831,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         "exclude-when": { type: "string", multiple: true },
         repo: { type: "string" },
         all: { type: "boolean" },
+        "emit-patch": { type: "boolean" },
         write: { type: "boolean" },
         text: { type: "boolean" },
         current: { type: "string" },
