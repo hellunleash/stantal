@@ -11,6 +11,9 @@ PROJECT="${STANTAL_GCP_PROJECT:-stantal-506811}"
 REGION="${STANTAL_GCP_REGION:-us-central1}"
 SERVICE="${STANTAL_SERVICE_NAME:-stantal}"
 BUCKET="${STANTAL_VERDICT_BUCKET:-${PROJECT}-verdicts}"
+# The public origin, for the absolute URLs in link previews. Override once a
+# different domain points at this service.
+SITE_URL="${STANTAL_SITE_URL:-https://stantal.cloud}"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "${here}/.." && pwd)"
@@ -29,7 +32,10 @@ mv "${here}/vendor/"stantal-*.tgz "${here}/vendor/stantal.tgz"
 #     committed so the page and the code that serves it can never disagree.
 echo "==> building the landing page"
 rm -rf "${here}/site"
-( cd "${repo}/site" && npm run build >/dev/null )
+# Baked in at build time: the export has no request-time anything to read it
+# later. Only affects the absolute URLs in link previews, so a wrong value
+# costs a bad preview card rather than a broken page.
+( cd "${repo}/site" && STANTAL_SITE_URL="${SITE_URL}" npm run build >/dev/null )
 cp -r "${repo}/site/out" "${here}/site"
 
 # 2. The bucket. Uniform access, no public reads: pages are served through the

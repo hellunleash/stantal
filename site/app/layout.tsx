@@ -17,15 +17,33 @@ const TITLE = "Stantal — self-maintaining dependencies for AI agents";
 const DESCRIPTION =
   "When the caller is a model, the docs are the contract. Stantal finds the release that changed what a model reads, proves it with a test, and puts the deleted sentence back. No account, no API key.";
 
+/**
+ * Where this site is served from.
+ *
+ * Only used to turn the relative URLs in link previews into absolute ones, so
+ * getting it wrong breaks nothing that a person clicking around would see. It
+ * is an env var rather than a literal because the domain is a deployment
+ * decision, and a deployment decision that lives in a source file means moving
+ * host is a code change, a review and a release.
+ *
+ * Read at build time. This site is a static export, so there is no request-time
+ * anything to read it later.
+ */
+const SITE_URL = process.env.STANTAL_SITE_URL ?? "https://stantal.cloud";
+
 export const metadata: Metadata = {
   title: TITLE,
   description: DESCRIPTION,
-  metadataBase: new URL("https://stantal.dev"),
+  metadataBase: new URL(SITE_URL),
+  alternates: { canonical: "/" },
   openGraph: {
     title: TITLE,
     description: DESCRIPTION,
     type: "website",
     siteName: "Stantal",
+    // Relative on purpose. `metadataBase` makes it absolute, which is the one
+    // thing that variable is for.
+    url: "/",
   },
   twitter: { card: "summary_large_image", title: TITLE, description: DESCRIPTION },
 };
