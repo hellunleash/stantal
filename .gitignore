@@ -18,24 +18,20 @@ dist/
 .env
 .env.local
 
-# The unpacked tarball cache. Disposable, and since 0.5.0 it is written outside
-# the project entirely; this only covers older checkouts that still have one.
-.stantal/npm/
-
-# pacote's own HTTP cache. Thousands of files, entirely reconstructible.
-.stantal/http-cache/
-
-# Behaviour cassettes: 14MB and growing. Committing them would let anyone
-# reproduce a Layer 2 run offline, which is what --replay is for, but the size
-# is a real repo-weight decision and it is not one to make silently.
-.stantal/behaviour/
-
-# Judge cassettes and seed corpora ARE committed, on purpose. action.yml tells
-# users the recordings are "committed to the repository", and the 168-finding
-# headline replays from these with an invalid key — a claim nobody can check if
-# the evidence is only ever on one laptop. They are public package text and
-# model answers; no keys, nothing private.
-
+# Everything stantal writes into a project: the unpacked tarball cache, the
+# judge and behaviour cassettes, and the seed corpora.
+#
+# All of it, and this is the correction to a mistake made on 2026-08-30.
+# action.yml tells users the recordings are "committed to the repository", so
+# committing ours looked like practising what we preach. It is not the same
+# situation. A seed corpus is generated FROM a contract, and the ones here were
+# generated from a private host: the files carried its internal tool names into
+# a public repository. A recording is only as public as the contract it came
+# from, and this directory mixes both.
+#
+# If our own recordings are ever published, it has to be by choosing specific
+# files, not by un-ignoring a directory.
+.stantal/
 # Editor / OS
 .DS_Store
 .idea/
