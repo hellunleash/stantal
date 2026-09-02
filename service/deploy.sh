@@ -89,6 +89,13 @@ URL="$(gcloud run services describe "${SERVICE}" --project "${PROJECT}" --region
 # The service builds its own links, so it has to be told its own address. Known
 # only after the first deploy, which is why this is a second pass rather than
 # part of the first.
+#
+# Defaults to the run.app URL rather than to SITE_URL, because a verdict link is
+# handed to a stranger and has to resolve the moment it is written. SITE_URL can
+# name a domain that is bought but not yet pointed here, which is fine for an
+# og:url and useless for a link somebody clicks. Set STANTAL_PUBLIC_ORIGIN once
+# the custom domain actually serves.
+URL="${STANTAL_PUBLIC_ORIGIN:-${URL}}"
 echo "==> setting PUBLIC_ORIGIN=${URL}"
 gcloud run services update "${SERVICE}" \
   --project "${PROJECT}" \
