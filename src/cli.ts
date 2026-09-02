@@ -116,8 +116,9 @@ first, because a contract is often split - schemas generated from routes, prose
 kept where a person edits it. What a model receives is the merge.
 
 Options
-  --surface <subpath>   Read one door only, e.g. "." or "./ai-sdk".
+  --subpath <path>      Read one entry point only, e.g. "." or "./ai-sdk".
                         Repeatable. Default: every subpath the package exports.
+                        (--surface is the old name for this and still works.)
   --name <label>        manifest: what to call the subject. Default: the filename.
   --fields-at <key>     manifest: where a descriptor's fields live, when a
                         document nests them under a wrapper.
@@ -304,6 +305,66 @@ function renderBlast(blast: Report["blast"]): string[] {
   return out;
 }
 
+/**
+ * What the verdict is derived from, and what it could not say.
+ *
+ * A real report read `structurally-breaking` with `structural: 0`, `prose: 11`
+ * and `withheld: 30`, and a user could not square the headline with the counts.
+ * The headline is what they act on, so an unexplainable headline is worse than
+ * a quiet one.
+ *
+ * Two lines fix it. The first names the layer the verdict came from and shows
+ * the counts behind it, so `structurally-breaking` with no structural findings
+ * is either explained or visibly wrong. The second breaks the withheld total
+ * down by *kind*: a suppressed structural change and a skipped prose candidate
+ * are withheld for different reasons and mean different things, and a single
+ * number invites the reading that thirty problems were hidden.
+ */
+function renderAccounting(report: Report): string[] {
+  const counts = countFindings(report);
+  const breaking = report.surfaces
+    .flatMap((s) => s.comparison.diff?.changes ?? [])
+    .filter((c) => c.breaking).length;
+  const structural = report.surfaces.flatMap((s) => s.comparison.diff?.changes ?? []).length;
+
+  const from: string[] = [];
+  if (structural > 0) from.push(`${structural} structural (${breaking} breaking)`);
+  if (counts.prose > 0) from.push(`${counts.prose} prose`);
+  if (counts.behavioural > 0) from.push(`${counts.behavioural} behavioural`);
+
+  const out: string[] = [];
+  if (from.length > 0) {
+    out.push(`  ${dim("FROM")}      ${from.join(dim("  ·  "))}`);
+  }
+
+  // Split by kind. "We could not compare the tool set" and "we could not read
+  // one tool's text" are different admissions, and only the first makes an
+  // added-or-removed claim unsafe.
+  const suppressed = report.surfaces.reduce((n, s) => n + s.comparison.suppressed.length, 0);
+  const skipped = report.surfaces.reduce((n, s) => n + s.prose.skipped.length, 0);
+  if (suppressed > 0 || skipped > 0) {
+    const parts: string[] = [];
+    if (suppressed > 0) parts.push(`${suppressed} structural claim(s) extraction could not earn`);
+    if (skipped > 0) parts.push(`${skipped} prose candidate(s) whose text could not be read`);
+    out.push(`  ${yellow("WITHHELD")}  ${dim(parts.join(dim("  ·  ")))}`);
+    out.push(`            ${dim("withheld is a claim we declined to make, not a finding we hid")}`);
+  }
+
+  // Unconfirmed is the shape of what a key would buy. Reported as a count so
+  // "no account, no key" does not quietly mean "two thirds of the answer is
+  // blank" without saying which two thirds.
+  const unconfirmed = report.surfaces
+    .flatMap((s) => s.prose.findings)
+    .filter((f) => f.confidence === "unconfirmed").length;
+  if (unconfirmed > 0 && report.judge === "none") {
+    out.push(
+      `  ${dim(`${unconfirmed} of ${counts.prose} prose finding(s) are unconfirmed leads — a model key would settle them`)}`,
+    );
+  }
+
+  return out.length > 0 ? [...out, ""] : out;
+}
+
 function renderSurface(surface: SurfaceReport): string[] {
   const lines: string[] = [];
   const changes = surface.comparison.diff?.changes ?? [];
@@ -389,6 +450,8 @@ function render(report: Report): string {
     `           ${report.headline}`,
     "",
   ];
+
+  out.push(...renderAccounting(report));
 
   const body = report.surfaces.flatMap(renderSurface);
   if (body.length > 0) out.push(...body);
@@ -1832,6 +1895,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       args: [...argv],
       allowPositionals: true,
       options: {
+        subpath: { type: "string", multiple: true },
         surface: { type: "string", multiple: true },
         json: { type: "boolean" },
         "emit-tests": { type: "boolean" },
@@ -1870,6 +1934,16 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
 
   const { values, positionals } = parsed;
+
+  // `--surface` takes a subpath and sets `subpaths`, which is a collision in a
+  // published CLI: `Surface` is also the four-value enum of contract kinds, and
+  // a reader who hears three words for one concept assumes three concepts.
+  // `--subpath` is the accurate name. `--surface` keeps working and is no
+  // longer documented, because breaking a published flag to fix our own
+  // vocabulary would be charging users for our mistake.
+  if (values.subpath !== undefined) {
+    values.surface = [...(values.surface ?? []), ...values.subpath];
+  }
 
   if (values.help) {
     process.stdout.write(`${USAGE}\n`);

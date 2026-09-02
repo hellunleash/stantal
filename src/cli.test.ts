@@ -574,3 +574,95 @@ describe("the no-argument command", () => {
     expect(code).toBe(2);
   });
 });
+
+describe("--subpath", () => {
+  let stdout: string;
+  let dir: string;
+
+  beforeEach(() => {
+    stdout = "";
+    dir = mkdtempSync(join(tmpdir(), "stantal-subpath-"));
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      stdout += String(chunk);
+      return true;
+    });
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("is the documented name, and --surface still works", async () => {
+    // `--surface` sets `subpaths` while `Surface` is a different thing
+    // entirely. Renaming the flag fixes our vocabulary; breaking the old one
+    // would charge users for our mistake.
+    const usage = await main(["--help"]);
+    expect(usage).toBe(0);
+    expect(stdout).toContain("--subpath <path>");
+    expect(stdout).toContain("--surface is the old name");
+  });
+});
+
+describe("the verdict adds up", () => {
+  let stdout: string;
+  let dir: string;
+
+  const CATALOG2 = {
+    tools: [
+      { name: "remove_member", description: "Remove a member. Pass role only when demoting.",
+        inputSchema: { type: "object", properties: { id: { type: "string" }, role: { type: "string" } }, required: ["id"] } },
+    ],
+  };
+  const NARROWED2 = {
+    tools: [
+      { name: "remove_member", description: "Remove a member.",
+        inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
+    ],
+  };
+
+  function write(name: string, body: unknown): string {
+    const path = join(dir, name);
+    writeFileSync(path, JSON.stringify(body));
+    return path;
+  }
+
+  beforeEach(() => {
+    stdout = "";
+    dir = mkdtempSync(join(tmpdir(), "stantal-acct-"));
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      stdout += String(chunk);
+      return true;
+    });
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("shows what the verdict was derived from", async () => {
+    // A real report read structurally-breaking with structural 0, prose 11 and
+    // withheld 30, and the reader could not square the headline with the
+    // counts. The headline is what they act on.
+    await main(["manifest", write("a.json", CATALOG2), write("b.json", NARROWED2), "--no-judge", "--repo", "none"]);
+
+    expect(stdout).toContain("FROM");
+    // The breaking count sits beside the structural one, so a
+    // `structurally-breaking` verdict with no breaking changes would be
+    // visibly wrong rather than merely unexplainable.
+    expect(stdout).toContain("VERDICT");
+    expect(stdout).toMatch(/\d+ structural \(\d+ breaking\)/);
+    expect(stdout).toContain("1 structural (1 breaking)");
+  });
+
+  it("does not call a settled finding an unconfirmed lead", async () => {
+    await main(["manifest", write("a.json", CATALOG2), write("b.json", NARROWED2), "--no-judge", "--repo", "none"]);
+    // A sentence that was there and is gone is a fact, not a judgement, so no
+    // key is needed to settle it. Offering one here would advertise a purchase
+    // that buys nothing.
+    expect(stdout).not.toContain("a model key would settle them");
+  });
+});
