@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "judge": "gemini:gemini-3.6-flash",
+  "kind": "is_parameter_documented",
+  "question": "Tool: get_config\nParameter: origin\n\nTool description as shipped:\n---\n\n                        Get the complete server configuration as JSON. Config includes fields for:\n                        - blockedCommands (array of blocked shell commands)\n                        - defaultShell (shell to use for commands)\n                        - allowedDirectories (paths the server can access)\n                        - fileReadLineLimit (max lines for read_file, default 1000)\n                        - fileWriteLineLimit (max lines per write_file call, default 50)\n                        - telemetryEnabled (boolean for telemetry opt-in/out)\n                        - currentClient (information about the currently connected MCP client)\n                        - clientHistory (history of all clients that have connected)\n                        - version (version of the DesktopCommander)\n                        - systemInfo (operating system and environment details)\n                        This command can be referenced as \"DC: ...\" or \"use Desktop Commander to ...\" in your instructions.\n---\n\nDoes this description tell a caller when or whether to pass `origin`?\nAnswer yes only if the description gives guidance a caller could act on for that\nspecific parameter. A passing mention of the word is not guidance.\nIf yes, quote the exact sentence from the description that does it.",
+  "answer": {
+    "verdict": "no",
+    "quote": null
+  },
+  "recordedAt": "2026-08-23T14:30:29.893Z"
+}

@@ -29,6 +29,7 @@ import { assertionsFromContract, assertionsFromReport } from "./emit/assertions.
 import { emitTests, type EmitTarget, type WrittenFile } from "./emit/write.js";
 import { testFileName } from "./emit/vitest.js";
 import { hostReadiness, readinessNotes } from "./emit/host.js";
+import { setupRunner, CONTRACT_SCRIPT } from "./emit/runner.js";
 import { extractFromModule } from "./extract/module.js";
 import { exportedSubpaths, fsPackageSource } from "./extract/package-source.js";
 import { packageDirectory } from "./testkit.js";
@@ -1146,17 +1147,37 @@ function pinOne(
   // whether anything here would ever run them. Checked after writing rather
   // than before, because the answer is advice rather than a veto — the files
   // were asked for.
+  // The suite is written; now make something able to run it. Done before
+  // readiness is measured, because adding the script is exactly what changes
+  // the answer to "can anything here run these". Skipped when nothing was
+  // written, so a run that pinned nothing changes no files at all.
+  const runner =
+    written.length > 0
+      ? setupRunner({ root, testDir: values.out ?? DEFAULT_TEST_DIR, generator: `stantal ${ownVersion()}` })
+      : null;
+
   const readiness = hostReadiness(root);
 
   if (values.json === true) {
     process.stdout.write(
-      `${JSON.stringify({ package: pkg, version, written, empty, unreadable, readiness }, null, 2)}\n`,
+      `${JSON.stringify({ package: pkg, version, written, empty, unreadable, readiness, runner }, null, 2)}\n`,
     );
     return written.length === 0 ? 2 : 0;
   }
 
   process.stdout.write(`\n  ${pkg}@${version}\n`);
   process.stdout.write(renderWritten(written, `${pkg}@${version}`, readiness.missing.length === 0));
+
+  if (runner !== null) {
+    if (runner.config !== null || runner.script) {
+      const parts: string[] = [];
+      if (runner.config !== null) parts.push(runner.config);
+      if (runner.script) parts.push(`the ${CONTRACT_SCRIPT} script`);
+      process.stdout.write(`  also wrote ${parts.join(" and ")}\n`);
+      process.stdout.write(`    ${dim(`run them with: npm run ${CONTRACT_SCRIPT}`)}\n\n`);
+    }
+    for (const note of runner.notes) process.stdout.write(`    ${dim(note)}\n`);
+  }
 
   const notes = readinessNotes(readiness, root);
   if (notes.length > 0) {

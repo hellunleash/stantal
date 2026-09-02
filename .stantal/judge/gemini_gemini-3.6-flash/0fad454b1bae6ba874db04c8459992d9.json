@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "judge": "gemini:gemini-3.6-flash",
+  "kind": "is_parameter_documented",
+  "question": "Tool: firecrawl_monitor_create\nParameter: webhookUrl\n\nTool description as shipped:\n---\n\nCreate a recurring scrape, crawl, or search monitor that compares each check with its retained predecessor. The simple form accepts `page`/`pages` or `queries` plus a plain-language `goal`; the advanced `body` form controls targets, schedule, change-tracking formats, judging, retention, webhook, and notifications.\n\nIn the simple form, a `goal` is required. If `queries` contains one or more non-empty values and is supplied with `page`/`pages`, `queries` create the search target and page targets are ignored. A monitor schedules future network checks and can send configured email or webhook notifications. Returns the created monitor.\n\n---\n\nDoes this description tell a caller when or whether to pass `webhookUrl`?\nAnswer yes only if the description gives guidance a caller could act on for that\nspecific parameter. A passing mention of the word is not guidance.\nIf yes, quote the exact sentence from the description that does it.",
+  "answer": {
+    "verdict": "no",
+    "quote": null
+  },
+  "recordedAt": "2026-08-23T10:33:18.286Z"
+}

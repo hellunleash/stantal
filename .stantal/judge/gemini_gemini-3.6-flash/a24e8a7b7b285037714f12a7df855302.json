@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "judge": "gemini:gemini-3.6-flash",
+  "kind": "is_parameter_documented",
+  "question": "Tool: firecrawl_research_search_github\nParameter: k\n\nTool description as shipped:\n---\nSearch GitHub issue/PR history and repository readmes. Returns ranked matches with repo, url, a short snippet, and (when available) the full matched content in markdown.\n---\n\nDoes this description tell a caller when or whether to pass `k`?\nAnswer yes only if the description gives guidance a caller could act on for that\nspecific parameter. A passing mention of the word is not guidance.\nIf yes, quote the exact sentence from the description that does it.",
+  "answer": {
+    "verdict": "no",
+    "quote": null
+  },
+  "recordedAt": "2026-08-23T10:32:04.799Z"
+}

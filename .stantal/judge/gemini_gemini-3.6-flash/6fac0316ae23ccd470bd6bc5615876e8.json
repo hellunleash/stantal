@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "judge": "gemini:gemini-3.6-flash",
+  "kind": "is_parameter_documented",
+  "question": "Tool: firecrawl_feedback\nParameter: querySuggestions\n\nTool description as shipped:\n---\n\nSubmit concise quality feedback for a completed search, scrape, parse, or map job. Provide the endpoint, job ID, rating, and relevant issue codes or small contextual fields; omit large page contents and raw outputs.\n\nReturns submission status, feedback ID, and accounting fields.\n\n---\n\nDoes this description tell a caller when or whether to pass `querySuggestions`?\nAnswer yes only if the description gives guidance a caller could act on for that\nspecific parameter. A passing mention of the word is not guidance.\nIf yes, quote the exact sentence from the description that does it.",
+  "answer": {
+    "verdict": "no",
+    "quote": null
+  },
+  "recordedAt": "2026-08-23T10:33:18.214Z"
+}

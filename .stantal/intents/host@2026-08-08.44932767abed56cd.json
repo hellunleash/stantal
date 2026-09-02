@@ -1,0 +1,481 @@
+{
+  "version": 1,
+  "intents": [
+    {
+      "id": "seed-1",
+      "text": "Remove candidate 403 from our system.",
+      "slice": [
+        "host_candidate_delete"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-2",
+      "text": "Run an evaluation on candidate 209.",
+      "slice": [
+        "host_candidate_evaluate_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-3",
+      "text": "Pull up the profile for candidate 893.",
+      "slice": [
+        "host_candidate_get"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-4",
+      "text": "Update the title inflation review for candidate 201.",
+      "slice": [
+        "host_candidate_inflation_review_update"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-5",
+      "text": "Send an outreach email to candidate 584.",
+      "slice": [
+        "host_candidate_outreach"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-6",
+      "text": "Fetch the resume for candidate 105.",
+      "slice": [
+        "host_candidate_resume_list"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-7",
+      "text": "Move candidate 329 to the onsite interview stage.",
+      "slice": [
+        "host_candidate_stage_update"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-8",
+      "text": "Create a developer grant for my account.",
+      "slice": [
+        "host_dev_grant_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-9",
+      "text": "Claim my free trial credits.",
+      "slice": [
+        "host_free_claim_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-10",
+      "text": "Schedule an intro call for interview ID 992.",
+      "slice": [
+        "host_interview_introcall_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-11",
+      "text": "Send an interview invite to the candidate for interview 304.",
+      "slice": [
+        "host_interview_invite_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-12",
+      "text": "Get the feedback report for interview 1029.",
+      "slice": [
+        "host_interview_report_get"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-13",
+      "text": "Set up a screening interview for interview 485.",
+      "slice": [
+        "host_interview_screen_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-14",
+      "text": "Retrieve the screening details for interview 485.",
+      "slice": [
+        "host_interview_screen_get"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-15",
+      "text": "Create a system design interview for interview ID 582.",
+      "slice": [
+        "host_interview_systemdesign_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-16",
+      "text": "Get the system design interview information for ID 582.",
+      "slice": [
+        "host_interview_systemdesign_get"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-17",
+      "text": "Assign a take-home test for interview 102.",
+      "slice": [
+        "host_interview_takehome_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-18",
+      "text": "Fetch the take-home test details for interview 102.",
+      "slice": [
+        "host_interview_takehome_get"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-19",
+      "text": "Mark the job description for the product manager role as closed.",
+      "slice": [
+        "host_jd_close_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-20",
+      "text": "Delete job description 8032.",
+      "slice": [
+        "host_jd_delete"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-21",
+      "text": "Show me job description 1092.",
+      "slice": [
+        "host_jd_get"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-22",
+      "text": "List all interviews for job description 402.",
+      "slice": [
+        "host_jd_interviews_list"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-23",
+      "text": "Show me all our active job descriptions.",
+      "slice": [
+        "host_jd_list_list"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-24",
+      "text": "Run a candidate match for job description 993.",
+      "slice": [
+        "host_jd_match_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-25",
+      "text": "Show me the matched candidates for our open roles.",
+      "slice": [
+        "host_jd_match_list"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-26",
+      "text": "Extract the details from this job description text I pasted.",
+      "slice": [
+        "host_jd_parse_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-27",
+      "text": "Save the draft job description for the data scientist position.",
+      "slice": [
+        "host_jd_save_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-28",
+      "text": "Show me our hiring KPIs for this quarter.",
+      "slice": [
+        "host_kpi_list"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-29",
+      "text": "Submit a backfill request for the engineering team.",
+      "slice": [
+        "host_org_backfill_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-30",
+      "text": "Bootstrap a new organization profile for Acme Corp.",
+      "slice": [
+        "host_org_bootstrap_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-31",
+      "text": "Accept the organization invite sent to my email.",
+      "slice": [
+        "host_org_invite_accept_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-32",
+      "text": "Invite jane@example.com to join our organization.",
+      "slice": [
+        "host_org_invite_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-33",
+      "text": "List all the organizations I belong to.",
+      "slice": [
+        "host_org_list_list"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-34",
+      "text": "Show me all the members in our organization.",
+      "slice": [
+        "host_org_members_list"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-35",
+      "text": "Update the access levels for members in our organization.",
+      "slice": [
+        "host_org_members_manage_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-36",
+      "text": "Change our organization's name to Tech Innovations Inc.",
+      "slice": [
+        "host_org_rename_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-37",
+      "text": "Switch my active workspace to the StartupCo organization.",
+      "slice": [
+        "host_org_switch_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-38",
+      "text": "What are our organization's hiring targets for this year?",
+      "slice": [
+        "host_org_targets_list"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-39",
+      "text": "Update our org hiring target to 50 engineers.",
+      "slice": [
+        "host_org_targets_update"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-40",
+      "text": "Generate a checkout link for a new billing subscription.",
+      "slice": [
+        "host_paddle_checkout_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-41",
+      "text": "Check our billing integration configuration.",
+      "slice": [
+        "host_paddle_config_list"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-42",
+      "text": "Process a new webhook payload from our payment provider.",
+      "slice": [
+        "host_paddle_webhook_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-43",
+      "text": "Handle the incoming event payload from our chat app.",
+      "slice": [
+        "host_slack_events_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-44",
+      "text": "Get the installation URL to add the app to our workspace.",
+      "slice": [
+        "host_slack_install_list"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-45",
+      "text": "Process the interactive button click from the chat app.",
+      "slice": [
+        "host_slack_interactivity_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-46",
+      "text": "Check the OAuth status for our chat integration.",
+      "slice": [
+        "host_slack_oauth_list"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-47",
+      "text": "Is our chat app integration currently active?",
+      "slice": [
+        "host_slack_status_list"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-48",
+      "text": "Show my account profile details.",
+      "slice": [
+        "host_user_me_list"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-49",
+      "text": "Trigger a new background evaluation task.",
+      "slice": [
+        "host_worker_evaluate_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-50",
+      "text": "Check the status of the background evaluation tasks.",
+      "slice": [
+        "host_worker_evaluate_list"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-51",
+      "text": "Actually, let's delete that one.",
+      "history": [
+        {
+          "role": "user",
+          "text": "Show me job description 849."
+        },
+        {
+          "role": "call",
+          "tool": "host_jd_get",
+          "arguments": {
+            "jobId": "849"
+          },
+          "result": "Job description 849 is for a Backend Engineer."
+        }
+      ],
+      "slice": [
+        "host_jd_delete"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-52",
+      "text": "Can you pull up her resume?",
+      "history": [
+        {
+          "role": "user",
+          "text": "Who is candidate 902?"
+        },
+        {
+          "role": "call",
+          "tool": "host_candidate_get",
+          "arguments": {
+            "id": "902"
+          },
+          "result": "Candidate 902 is Alice Smith, applying for Data Engineer."
+        }
+      ],
+      "slice": [
+        "host_candidate_resume_list"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-53",
+      "text": "Let's add eve@example.com to the team.",
+      "history": [
+        {
+          "role": "user",
+          "text": "Who is currently in our organization?"
+        },
+        {
+          "role": "call",
+          "tool": "host_org_members_list",
+          "arguments": {},
+          "result": "Your organization has 3 members: Bob, Charlie, and Diana."
+        }
+      ],
+      "slice": [
+        "host_org_invite_create"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-54",
+      "text": "What's the weather like in Seattle today?",
+      "slice": [],
+      "expectsNoCall": true
+    },
+    {
+      "id": "seed-55",
+      "text": "Can you translate this resume from French to English?",
+      "slice": [],
+      "expectsNoCall": true
+    }
+  ]
+}

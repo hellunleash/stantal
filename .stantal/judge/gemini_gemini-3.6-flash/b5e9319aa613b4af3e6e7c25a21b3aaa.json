@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "judge": "gemini:gemini-3.6-flash",
+  "kind": "is_parameter_documented",
+  "question": "Tool: firecrawl_map\nParameter: limit\n\nTool description as shipped:\n---\n\nEnumerate URLs indexed under one website through Firecrawl without fetching each page's content. Use this when the request asks for a site's URL inventory, when several relevant pages must be located, or when the desired page URL is unknown. An optional `search` term narrows the URL list, while sitemap, subdomain, query-parameter, and result-limit options control coverage.\n\nReturns matching URLs rather than page bodies. Retrieve one page with `firecrawl_scrape`; collect content across multiple pages with `firecrawl_crawl`.\n\n---\n\nDoes this description tell a caller when or whether to pass `limit`?\nAnswer yes only if the description gives guidance a caller could act on for that\nspecific parameter. A passing mention of the word is not guidance.\nIf yes, quote the exact sentence from the description that does it.",
+  "answer": {
+    "verdict": "no",
+    "quote": null
+  },
+  "recordedAt": "2026-08-23T10:33:18.231Z"
+}

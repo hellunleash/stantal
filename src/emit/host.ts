@@ -67,9 +67,13 @@ export function hostReadiness(directory: string): HostReadiness {
   const placeholder = raw !== null && /no test specified/i.test(raw);
   const testScript = placeholder ? null : raw;
 
-  // A runner counts if a script would invoke one, or if one is installed —
-  // somebody may run `npx vitest` directly without a script for it.
-  const scriptRuns = testScript !== null && RUNNERS.some((r) => testScript.includes(r));
+  // A runner counts if *any* script would invoke one, or if one is installed —
+  // somebody may run `npx vitest` directly without a script for it. Any script
+  // rather than `test` alone, because `pin` adds a `test:contract` of its own
+  // and a project is free to name its suite whatever it likes.
+  const scriptRuns = Object.values(scripts).some(
+    (value) => typeof value === "string" && RUNNERS.some((r) => value.includes(r)),
+  );
   const installed = RUNNERS.some((r) => r !== "node:test" && packageDirectory(r, directory) !== null);
 
   return { missing, hasRunner: scriptRuns || installed, testScript };

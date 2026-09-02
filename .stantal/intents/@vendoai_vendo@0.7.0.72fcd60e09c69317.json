@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "intents": [
+    {
+      "id": "seed-1",
+      "text": "Create an e-commerce app for my new clothing line.",
+      "slice": [
+        "vendo_create_app"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-2",
+      "text": "Build a simple app for tracking fitness activities.",
+      "slice": [
+        "vendo_create_app"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-3",
+      "text": "I need an app to manage our restaurant's reservations and orders.",
+      "slice": [
+        "vendo_create_app"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-4",
+      "text": "Delegate all the marketing tasks for my small business.",
+      "slice": [
+        "vendo_delegate"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-5",
+      "text": "Can you manage the entire project for launching my app?",
+      "slice": [
+        "vendo_delegate"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-6",
+      "text": "Handle customer support queries for my online store.",
+      "slice": [
+        "vendo_delegate"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-7",
+      "text": "What's the weather like in New York today?",
+      "slice": [],
+      "expectsNoCall": true
+    },
+    {
+      "id": "seed-8",
+      "text": "Could you recommend a good recipe for pasta?",
+      "slice": [],
+      "expectsNoCall": true
+    }
+  ]
+}

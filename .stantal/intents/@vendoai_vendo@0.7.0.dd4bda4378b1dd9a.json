@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "intents": [
+    {
+      "id": "seed-1",
+      "text": "Can you build me a simple dashboard to track my daily water intake and workout habits?",
+      "slice": [
+        "vendo_create_app"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-2",
+      "text": "Create an interactive calculator app where I can input my monthly income and expenses to see budget breakdown charts.",
+      "slice": [
+        "vendo_create_app"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-3",
+      "text": "Generate a UI for an event RSVP app where users can fill in their name, dietary restrictions, and plus-one details.",
+      "slice": [
+        "vendo_create_app"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-4",
+      "text": "Please have Vendo's agent handle processing all pending customer refund requests end-to-end and give me a summary.",
+      "slice": [
+        "vendo_delegate"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-5",
+      "text": "Delegate the task of auditing our inventory discrepancies and generating any required approvals to the Vendo agent.",
+      "slice": [
+        "vendo_delegate"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-6",
+      "text": "I need Vendo to run a full store data cleanup task autonomously from start to finish and report back when it's done.",
+      "slice": [
+        "vendo_delegate"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-7",
+      "text": "What is the capital city of France and what are its top three tourist attractions?",
+      "slice": [],
+      "expectsNoCall": true
+    },
+    {
+      "id": "seed-8",
+      "text": "Can you explain the difference between synchronous and asynchronous programming in Python?",
+      "slice": [],
+      "expectsNoCall": true
+    }
+  ]
+}

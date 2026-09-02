@@ -1,0 +1,181 @@
+{
+  "version": 1,
+  "intents": [
+    {
+      "id": "seed-1",
+      "text": "Can you create a new Vendo app for tracking my workout routines?",
+      "slice": [
+        "vendo_create_app"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-2",
+      "text": "I need an app to manage my book collection. Can you make one for me?",
+      "slice": [
+        "vendo_create_app"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-3",
+      "text": "I want to delegate the process of organizing my travel itinerary with Vendo.",
+      "slice": [
+        "vendo_delegate"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-4",
+      "text": "Can Vendo handle ordering supplies for my office? Please set it up.",
+      "slice": [
+        "vendo_delegate"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-5",
+      "text": "Can you add a feature to the workout tracker app for setting daily goals?",
+      "history": [
+        {
+          "role": "user",
+          "text": "Can you create a new Vendo app for tracking my workout routines?"
+        },
+        {
+          "role": "call",
+          "tool": "vendo_create_app",
+          "arguments": {
+            "prompt": "Create a Vendo app for tracking workout routines."
+          },
+          "result": "The app build was accepted and is now streaming."
+        }
+      ],
+      "slice": [
+        "vendo_create_app"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-6",
+      "text": "Could you also include a section for tracking reading progress in the book app?",
+      "history": [
+        {
+          "role": "user",
+          "text": "I need an app to manage my book collection. Can you make one for me?"
+        },
+        {
+          "role": "call",
+          "tool": "vendo_create_app",
+          "arguments": {
+            "prompt": "Create a Vendo app to manage book collection."
+          },
+          "result": "The app build was accepted and is now streaming."
+        }
+      ],
+      "slice": [
+        "vendo_create_app"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-7",
+      "text": "Delegate another task with Vendo for booking hotels for my trip.",
+      "history": [
+        {
+          "role": "user",
+          "text": "I want to delegate the process of organizing my travel itinerary with Vendo."
+        },
+        {
+          "role": "call",
+          "tool": "vendo_delegate",
+          "arguments": {
+            "task": "Organize travel itinerary."
+          },
+          "result": "Task completed with status and summary available."
+        }
+      ],
+      "slice": [
+        "vendo_delegate"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-8",
+      "text": "For the office supplies ordering, include a reorder reminder feature using Vendo.",
+      "history": [
+        {
+          "role": "user",
+          "text": "Can Vendo handle ordering supplies for my office? Please set it up."
+        },
+        {
+          "role": "call",
+          "tool": "vendo_delegate",
+          "arguments": {
+            "task": "Ordering office supplies."
+          },
+          "result": "Task completed with status and summary available."
+        }
+      ],
+      "slice": [
+        "vendo_delegate"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-9",
+      "text": "Add a payment tracking option to the workout app.",
+      "history": [
+        {
+          "role": "user",
+          "text": "Can you create a new Vendo app for tracking my workout routines?"
+        },
+        {
+          "role": "call",
+          "tool": "vendo_create_app",
+          "arguments": {
+            "prompt": "Create a Vendo app for tracking workout routines."
+          },
+          "result": "The app build was accepted and is now streaming."
+        }
+      ],
+      "slice": [
+        "vendo_create_app"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-10",
+      "text": "Is it possible to integrate with Goodreads in the book app?",
+      "history": [
+        {
+          "role": "user",
+          "text": "I need an app to manage my book collection. Can you make one for me?"
+        },
+        {
+          "role": "call",
+          "tool": "vendo_create_app",
+          "arguments": {
+            "prompt": "Create a Vendo app to manage book collection."
+          },
+          "result": "The app build was accepted and is now streaming."
+        }
+      ],
+      "slice": [
+        "vendo_create_app"
+      ],
+      "expectsNoCall": false
+    },
+    {
+      "id": "seed-11",
+      "text": "Can you let me know if it's raining in Paris today?",
+      "slice": [],
+      "expectsNoCall": true
+    },
+    {
+      "id": "seed-12",
+      "text": "What's the best way to make a chocolate cake?",
+      "slice": [],
+      "expectsNoCall": true
+    }
+  ]
+}

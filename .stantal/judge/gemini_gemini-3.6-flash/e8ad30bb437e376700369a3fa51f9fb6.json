@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "judge": "gemini:gemini-3.6-flash",
+  "kind": "is_parameter_documented",
+  "question": "Tool: get_recent_tool_calls\nParameter: since\n\nTool description as shipped:\n---\n\n                        Get recent tool call history with their arguments and outputs.\n                        Returns chronological list of tool calls made during this session.\n                        \n                        Useful for:\n                        - Onboarding new chats about work already done\n                        - Recovering context after chat history loss\n                        - Debugging tool call sequences\n                        \n                        Note: Does not track its own calls or other meta/query tools.\n                        History kept in memory (last 1000 calls, lost on restart).\n                        \n                        This command can be referenced as \"DC: ...\" or \"use Desktop Commander to ...\" in your instructions.\n---\n\nDoes this description tell a caller when or whether to pass `since`?\nAnswer yes only if the description gives guidance a caller could act on for that\nspecific parameter. A passing mention of the word is not guidance.\nIf yes, quote the exact sentence from the description that does it.",
+  "answer": {
+    "verdict": "no",
+    "quote": null
+  },
+  "recordedAt": "2026-08-23T14:30:24.406Z"
+}

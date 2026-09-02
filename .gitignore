@@ -18,8 +18,23 @@ dist/
 .env
 .env.local
 
-# Extraction sandbox scratch + the permanent contract cache
-.stantal/
+# The unpacked tarball cache. Disposable, and since 0.5.0 it is written outside
+# the project entirely; this only covers older checkouts that still have one.
+.stantal/npm/
+
+# pacote's own HTTP cache. Thousands of files, entirely reconstructible.
+.stantal/http-cache/
+
+# Behaviour cassettes: 14MB and growing. Committing them would let anyone
+# reproduce a Layer 2 run offline, which is what --replay is for, but the size
+# is a real repo-weight decision and it is not one to make silently.
+.stantal/behaviour/
+
+# Judge cassettes and seed corpora ARE committed, on purpose. action.yml tells
+# users the recordings are "committed to the repository", and the 168-finding
+# headline replays from these with an invalid key — a claim nobody can check if
+# the evidence is only ever on one laptop. They are public package text and
+# model answers; no keys, nothing private.
 
 # Editor / OS
 .DS_Store

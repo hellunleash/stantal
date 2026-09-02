@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "judge": "gemini:gemini-3.6-flash",
+  "kind": "is_parameter_documented",
+  "question": "Tool: vendo_make\nParameter: context\n\nTool description as shipped:\n---\nCreate a Vendo app (generated UI) from a plain-language request. Returns fast with a vendo/app-ref@1 envelope carrying status \"building\" — the build was only ACCEPTED and is still streaming; you have not seen its contents and do not know yet whether it will succeed. Say only that you're building it (present tense, no specifics) and stop there. Never say it is created/ready/done, and never describe, list, or invent anything it will contain (no tables, no numbers, no chart data) — the embed shows real build progress and the true final result, including a build failure, and it will contradict anything you claim. If the build later fails, you will not be told in this reply; do not assume or claim success in a later turn either — check with the user or a read tool before describing this app again. Pass `slot` only when the request names a particular place on the user's page for it to land — the host publishes those slot ids, so pass one you were told rather than one you invented, and whatever held that place is replaced. `slot` is for something NEW. Pass `component` when the user is asking to change one of the HOST'S OWN pieces of the page they are looking at — the conversation's context says which one (\"The view being remixed is the \\\"NetWorthCard\\\" component on the host's page\"), so pass that name exactly as it is written there and never one you invented; it makes the user their own copy of that piece, carrying their request, and puts it on the page where the original was.\n---\n\nDoes this description tell a caller when or whether to pass `context`?\nAnswer yes only if the description gives guidance a caller could act on for that\nspecific parameter. A passing mention of the word is not guidance.\nIf yes, quote the exact sentence from the description that does it.",
+  "answer": {
+    "verdict": "no",
+    "quote": null
+  },
+  "recordedAt": "2026-08-23T09:52:15.212Z"
+}

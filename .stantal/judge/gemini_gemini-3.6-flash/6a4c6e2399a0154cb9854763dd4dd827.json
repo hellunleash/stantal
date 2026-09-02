@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "judge": "gemini:gemini-3.6-flash",
+  "kind": "is_parameter_documented",
+  "question": "Tool: firecrawl_browser_create\nParameter: streamWebView\n\nTool description as shipped:\n---\n\nCreate a browser session for code execution via CDP (Chrome DevTools Protocol).\n\n**Best for:** Running code (Python/JS) that interacts with a live browser page, multi-step browser automation, sessions with profiles that survive across multiple tool calls.\n**Not recommended for:** Simple page scraping (use firecrawl_scrape instead).\n\n**Arguments:**\n- ttl: Total session lifetime in seconds (30-3600, optional)\n- activityTtl: Idle timeout in seconds (10-3600, optional)\n- streamWebView: Whether to enable live view streaming (optional)\n- profile: Save and reuse browser state (cookies, localStorage) across sessions (optional)\n  - name: Profile name (sessions with the same name share state)\n  - saveChanges: Whether to save changes back to the profile (default: true)\n\n**Usage Example:**\n```json\n{\n  \"name\": \"firecrawl_browser_create\",\n  \"arguments\": {\n    \"profile\": { \"name\": \"my-profile\", \"saveChanges\": true }\n  }\n}\n```\n**Returns:** Session ID, CDP URL, and live view URL.\n\n---\n\nDoes this description tell a caller when or whether to pass `streamWebView`?\nAnswer yes only if the description gives guidance a caller could act on for that\nspecific parameter. A passing mention of the word is not guidance.\nIf yes, quote the exact sentence from the description that does it.",
+  "answer": {
+    "verdict": "yes",
+    "quote": "- streamWebView: Whether to enable live view streaming (optional)"
+  },
+  "recordedAt": "2026-08-23T10:31:14.956Z"
+}
