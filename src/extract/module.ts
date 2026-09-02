@@ -69,8 +69,17 @@ export type ModuleExtractOptions = {
 };
 
 type DescriptorSite = {
-  node: ObjectExpression;
+  /** The node the evidence points at. An object literal, or a class body. */
+  node: AnyNode;
   module: ParsedModule;
+  /**
+   * A descriptor assembled from somewhere other than one object literal.
+   *
+   * Set for class-based tools, where the name is a static assignment after the
+   * class and the description is set on `this` in the constructor. Nothing is
+   * one object there, so the reader is handed the merged map instead.
+   */
+  properties?: Map<string, Expression>;
   /**
    * Set when the tool's name is a sibling argument rather than a key in the
    * descriptor — `server.registerTool(name, config, handler)`. The object alone
@@ -88,6 +97,12 @@ type DescriptorSite = {
    */
   schemaNode?: Expression;
 };
+
+/** The descriptor's keys, however they were assembled. */
+function propertiesOf(site: DescriptorSite): Map<string, Expression> {
+  if (site.properties !== undefined) return site.properties;
+  return site.node.type === "ObjectExpression" ? propertyMap(site.node) : new Map();
+}
 
 /** `pack.js:412`, or just the file when the parser gave no location. */
 function evidenceAt(site: DescriptorSite): string {
@@ -283,7 +298,7 @@ function boundParameters(node: AnyNode): string[] {
  * hierarchy, and it stays an honest gap.
  */
 function isFactory(site: DescriptorSite, params: ReadonlySet<string>): boolean {
-  const nameNode = site.nameNode ?? propertyMap(site.node).get("name");
+  const nameNode = site.nameNode ?? propertiesOf(site).get("name");
   if (nameNode === undefined) return false;
   const root = rootIdentifier(nameNode);
   return root !== null && params.has(root);
@@ -343,6 +358,127 @@ function registrationImport(modules: readonly ParsedModule[]): string | null {
   return null;
 }
 
+/**
+ * The key a class-based tool uses for its name. `toolName`, and only that.
+ *
+ * A class already has a `name`, and `Error` subclasses set `this.name` as a
+ * matter of course. Accepting it read zod's `$ZodError` as a tool and reported
+ * `@notionhq/notion-mcp-server` — whose real tools are built from an OpenAPI
+ * spec at runtime and cannot be read at all — as a package shipping exactly one
+ * tool called `$ZodError`. That is worse than the gap it replaced.
+ *
+ * Any library that declares tools as classes has the same collision to avoid,
+ * which is why the ones that do this pick a distinct key.
+ */
+const CLASS_NAME_KEYS = ["toolName"] as const;
+
+/**
+ * Tools declared as a class, assembled from three places at once.
+ *
+ * ```js
+ * export class ListDatabasesTool extends MongoDBToolBase {
+ *   constructor() {
+ *     super(...arguments);
+ *     this.description = "List all databases for a MongoDB connection";
+ *     this.argsShape = { ...ConnectionIdArgs };
+ *   }
+ * }
+ * ListDatabasesTool.toolName = "list-databases";
+ * ```
+ *
+ * Nothing here is an object literal, and the base class registers every
+ * subclass with `server.registerTool(this.name, {...})` — a call site whose
+ * name is an instance property and can never be folded. So the whole of
+ * `mongodb-mcp-server`, 66 tool files, read as unnameable descriptors.
+ *
+ * The declaration is real and it is static; it is just spread across a class
+ * body, a constructor, and a static assignment that follows the class. This
+ * gathers the three and hands the reader one merged descriptor.
+ */
+function classSites(module: ParsedModule): DescriptorSite[] {
+  const byClass = new Map<string, { node: AnyNode; properties: Map<string, Expression> }>();
+
+  const record = (name: string, node: AnyNode): { properties: Map<string, Expression> } => {
+    const existing = byClass.get(name);
+    if (existing !== undefined) return existing;
+    const created = { node, properties: new Map<string, Expression>() };
+    byClass.set(name, created);
+    return created;
+  };
+
+  // Two passes, because the walk is a stack and visits children in reverse
+  // source order. `ListDatabasesTool.toolName = "list-databases"` sits *after*
+  // the class it names, so a single pass reaches the assignment first, finds no
+  // class recorded under that identifier, and drops every tool name in the file.
+  walk(module.program as AnyNode, (node) => {
+    // `class X { ... }`, including what the constructor sets on `this`.
+    if (node.type === "ClassDeclaration" || node.type === "ClassExpression") {
+      const id = node.id;
+      if (id === null || id === undefined) return;
+      const entry = record(id.name, node);
+      for (const member of node.body.body) {
+        // A class field: `description = "..."`.
+        if (member.type === "PropertyDefinition" && !member.computed && member.key.type === "Identifier") {
+          if (member.value !== null && member.value !== undefined) {
+            entry.properties.set(member.key.name, member.value as Expression);
+          }
+          continue;
+        }
+        if (member.type !== "MethodDefinition" || member.kind !== "constructor") continue;
+        walk(member.value as AnyNode, (inner) => {
+          if (inner.type !== "AssignmentExpression" || inner.operator !== "=") return;
+          const target = inner.left;
+          if (target.type !== "MemberExpression" || target.computed) return;
+          if (target.object.type !== "ThisExpression") return;
+          if (target.property.type !== "Identifier") return;
+          entry.properties.set(target.property.name, inner.right as Expression);
+        });
+      }
+    }
+  });
+
+  // `ListDatabasesTool.toolName = "list-databases"` — a static assignment after
+  // the class body, which is how a compiler emits a static field.
+  walk(module.program as AnyNode, (node) => {
+    if (node.type !== "AssignmentExpression" || node.operator !== "=") return;
+    const target = node.left;
+    if (target.type !== "MemberExpression" || target.computed) return;
+    if (target.object.type !== "Identifier" || target.property.type !== "Identifier") return;
+    const entry = byClass.get(target.object.name);
+    if (entry === undefined) return;
+    entry.properties.set(target.property.name, node.right as Expression);
+  });
+
+  const sites: DescriptorSite[] = [];
+  for (const { node, properties } of byClass.values()) {
+    const nameKey = CLASS_NAME_KEYS.find((key) => properties.has(key));
+    if (nameKey === undefined) continue;
+
+    // **An argument schema is required here, not merely a description.**
+    //
+    // A bare literal is vouched for by its shape and a call site is vouched for
+    // by the call; a class has neither, and "named and documented" describes
+    // most classes in a codebase. `mongodb-mcp-server` proved it: accepting a
+    // description alone read its `exported-data` *resource* class as a tool,
+    // and a one-tool contract for a server with forty of them is worse than
+    // admitting the surface could not be read — it diffs as every other tool
+    // having been removed.
+    const shapeKey = [...SCHEMA_KEYS, "argsShape"].find((key) => properties.has(key));
+    if (shapeKey === undefined) continue;
+
+    const merged = new Map(properties);
+    merged.set("name", properties.get(nameKey) as Expression);
+    // `argsShape` holds the zod shape itself rather than a JSON Schema, and the
+    // zod reader already knows what to do with one.
+    if (shapeKey === "argsShape" && !SCHEMA_KEYS.some((key) => merged.has(key))) {
+      merged.set("inputSchema", properties.get("argsShape") as Expression);
+    }
+
+    sites.push({ node, module, properties: merged });
+  }
+  return sites;
+}
+
 /** Zod calls whose argument is a shape, not a value. */
 const ZOD_SHAPE_METHODS = new Set(["object", "strictObject", "looseObject", "interface"]);
 
@@ -380,7 +516,7 @@ function descriptorSites(modules: readonly ParsedModule[]): DescriptorSite[] {
   const sites: DescriptorSite[] = [];
   for (const module of modules) {
     const found: DescriptorSite[] = [];
-    const claimed = new Set<ObjectExpression>();
+    const claimed = new Set<AnyNode>();
     const namespaces = namespacesFor(module);
     const isNamespace = (name: string): boolean => namespaces.has(name);
 
@@ -403,6 +539,11 @@ function descriptorSites(modules: readonly ParsedModule[]): DescriptorSite[] {
         if (!isFactory(site, params)) found.push(site);
       }
     });
+    // Class-declared tools, which are assembled rather than written as one
+    // literal. Added after the walk because they are gathered from three places
+    // and there is no single node to claim.
+    found.push(...classSites(module));
+
     // The walk is a stack, so it finds them out of order. Source order is what
     // makes "the first declaration wins" a rule rather than an accident.
     found.sort((a, b) => a.node.start - b.node.start);
@@ -517,7 +658,7 @@ function readZodDescriptor(
 }
 
 function readDescriptor(site: DescriptorSite, graph: ModuleGraph): ReadDescriptor {
-  const properties = propertyMap(site.node);
+  const properties = propertiesOf(site);
   const resolve = graph.resolverFor(site.module);
   const evidence = evidenceAt(site);
   const notes: ExtractionNote[] = [];

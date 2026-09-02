@@ -399,3 +399,81 @@ describe("what is a declaration, and what only looks like one", () => {
     expect(result.absence.checked[0]).toContain("imports `tool`");
   });
 });
+
+describe("tools declared as a class", () => {
+  test("assembles the name, description and schema from three places", () => {
+    // The name is a static assignment after the class, the rest is set on
+    // `this` in the constructor, and the base class registers every subclass
+    // with `registerTool(this.name, ...)` — a call whose name can never fold.
+    const result = extract({
+      "dist/pack.js": `
+        import { z } from "zod";
+        export class ListDatabasesTool extends ToolBase {
+          constructor() {
+            super(...arguments);
+            this.description = "List all databases for a connection";
+            this.argsShape = { connectionId: z.string().describe("Which connection") };
+          }
+        }
+        ListDatabasesTool.toolName = "list-databases";
+      `,
+    });
+
+    if (!result.present) throw new Error(`expected a contract, got ${result.absence.reason}`);
+    expect(result.contract.tools.map((t) => t.name)).toEqual(["list-databases"]);
+    expect(result.contract.tools[0]?.description).toBe("List all databases for a connection");
+    expect(result.contract.tools[0]?.params.map((p) => p.name)).toEqual(["connectionId"]);
+  });
+
+  test("finds the name even though it is assigned after the class", () => {
+    // The AST walk is a stack and visits children in reverse source order, so a
+    // single pass reaches the static assignment before the class it names and
+    // silently drops every tool name in the file.
+    const result = extract({
+      "dist/pack.js": `
+        export class A extends ToolBase {
+          constructor() { super(); this.description = "First"; this.argsShape = {}; }
+        }
+        export class B extends ToolBase {
+          constructor() { super(); this.description = "Second"; this.argsShape = {}; }
+        }
+        A.toolName = "first";
+        B.toolName = "second";
+      `,
+    });
+
+    if (!result.present) throw new Error(`expected a contract, got ${result.absence.reason}`);
+    expect(result.contract.tools.map((t) => t.name).sort()).toEqual(["first", "second"]);
+  });
+
+  test("a named, documented class with no argument schema is not a tool", () => {
+    // `mongodb-mcp-server` ships an `exported-data` *resource* class shaped
+    // exactly like this. Reading it gave a one-tool contract for a server with
+    // fifty, which diffs as every other tool having been removed — worse than
+    // admitting the surface could not be read.
+    const result = extract({
+      "dist/pack.js": `
+        export class ExportedData extends ResourceBase {
+          constructor() { super(); this.description = "Data files exported in this session"; }
+        }
+        ExportedData.toolName = "exported-data";
+      `,
+    });
+
+    expect(result.present).toBe(false);
+  });
+
+  test("an Error subclass is not a tool", () => {
+    // `this.name` is `Error.prototype.name`. Accepting it read zod's `$ZodError`
+    // as a tool and turned an honest gap into a wrong contract.
+    const result = extract({
+      "dist/pack.js": `
+        export class $ZodError extends Error {
+          constructor(issues) { super(); this.name = "$ZodError"; this.issues = issues; this.schema = {}; }
+        }
+      `,
+    });
+
+    expect(result.present).toBe(false);
+  });
+});
