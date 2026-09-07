@@ -1,4 +1,5 @@
 import { toolFrom } from "../contract/from-json-schema.js";
+import { openApiToolList } from "./openapi.js";
 import {
   fidelityOf,
   type ExtractionNote,
@@ -110,6 +111,12 @@ function isObject(value: unknown): value is Record<string, unknown> {
 function toolList(root: unknown): unknown[] | null {
   if (isObject(root)) {
     if (Array.isArray(root["tools"])) return root["tools"];
+    // An OpenAPI document. Checked early because it says what it is in its
+    // first key, and because nothing else here would recognise it: a spec has
+    // no `tools` anywhere, and its operations are the contract a generator
+    // hands a model.
+    const operations = openApiToolList(root);
+    if (operations !== null) return operations;
     // A map of name -> descriptor. Common wherever a document is meant to be
     // looked up by tool rather than iterated, which is how annotation files are
     // usually written. The key is the identity, so it wins over any `name`

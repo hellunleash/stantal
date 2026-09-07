@@ -234,3 +234,139 @@ describe("generated files are not call sites", () => {
     expect(result.scanned.files).toBe(2);
   });
 });
+
+describe("when the caller is the model", () => {
+  // The failure this kind exists for: a repo imports the package and Layer 3
+  // says nothing, because the tools the findings sit on appear in no source
+  // line. That is the ordinary case for a contract a model consumes, so the
+  // sharpest evidence the layer has goes missing exactly when the product's
+  // central claim is most true.
+  const MOUNTS = 'import { makePack } from "@acme/tools/ai-sdk";\nexport const tools = makePack();\n';
+
+  it("reports the mount as a reach when no file names the tool", () => {
+    const result = scan({ "package.json": manifest("^0.24.0"), "src/agent.ts": MOUNTS });
+    const model = result.reaches.find((r) => r.kind === "model_consumer");
+    expect(model?.target).toBe("make_thing");
+    expect(model?.evidence).toBe("src/agent.ts:1");
+    expect(canClaimUnaffected(result)).toBe(false);
+  });
+
+  it("gives way to a real call site", () => {
+    // A line naming the tool is better evidence and is checkable. Reporting
+    // both would say the same thing twice, once vaguely.
+    const result = scan({ "package.json": manifest("^0.24.0"), "src/a.ts": USES });
+    expect(result.reaches.some((r) => r.kind === "tool_reference")).toBe(true);
+    expect(result.reaches.some((r) => r.kind === "model_consumer")).toBe(false);
+  });
+
+  it("needs a mount, and never stands in for one", () => {
+    // Declared, and no import found anywhere. That is "we did not see how you
+    // use it", which the dependency reach already says. Claiming a model
+    // consumer here would turn a gap into a positive claim about usage.
+    const result = scan({ "package.json": manifest("^0.24.0"), "src/a.ts": "export const x = 1;\n" });
+    expect(result.reaches.some((r) => r.kind === "model_consumer")).toBe(false);
+    expect(result.reaches.map((r) => r.kind)).toEqual(["dependency"]);
+  });
+
+  it("is still filtered out by a door the repo never opens", () => {
+    const result = blastRadius({
+      repo: repo({ "package.json": manifest("^0.24.0"), "src/agent.ts": MOUNTS }),
+      package: PKG,
+      affectedVersions: ["0.24.0"],
+      targets: [OTHER_DOOR],
+    });
+    expect(result.reaches.some((r) => r.kind === "model_consumer")).toBe(false);
+    expect(result.filtered[0]?.kind).toBe("subpath_not_imported");
+  });
+
+  it("ranks below the lines that name a tool", () => {
+    const result = scan(
+      { "package.json": manifest("^0.24.0"), "src/a.ts": USES },
+      [APP, { label: "second.thing", surface: "./ai-sdk", tool: "other_tool" }],
+    );
+    const kinds = result.reaches.map((r) => r.kind);
+    expect(kinds.indexOf("model_consumer")).toBe(kinds.length - 1);
+  });
+});
+
+describe("one line, said once", () => {
+  it("does not repeat a reach that two findings share", () => {
+    // Two findings on the same tool reach a consumer at the same line. Printing
+    // it twice adds nothing and pushes the reaches that differ off the list.
+    const result = scan({ "package.json": manifest("^0.24.0"), "src/a.ts": USES }, [
+      APP,
+      { label: "make.other", surface: "./ai-sdk", tool: "make_thing", param: "other" },
+    ]);
+    const surfaces = result.reaches.filter((r) => r.kind === "surface_import");
+    expect(surfaces).toHaveLength(1);
+    const tools = result.reaches.filter((r) => r.kind === "tool_reference");
+    expect(tools).toHaveLength(1);
+  });
+});
+
+describe("observed calls", () => {
+  const MOUNTS = 'import { makePack } from "@acme/tools/ai-sdk";\nexport const tools = makePack();\n';
+
+  function withCalls(files: Record<string, string>, calls: number) {
+    return blastRadius({
+      repo: repo(files),
+      package: PKG,
+      affectedVersions: ["0.24.0"],
+      targets: [APP],
+      usage: {
+        source: "traces.json",
+        spans: calls,
+        notes: [],
+        byTool: calls === 0 ? {} : { make_thing: { tool: "make_thing", calls, params: {} } },
+      },
+    });
+  }
+
+  it("reports a tool the traces show being called, and ranks it first", () => {
+    const result = withCalls({ "package.json": manifest("^0.24.0"), "src/agent.ts": MOUNTS }, 12);
+    expect(result.reaches[0]?.kind).toBe("observed_call");
+    expect(result.reaches[0]?.detail).toContain("12 time(s)");
+  });
+
+  it("stands in for the mount, which is the weaker version of the same claim", () => {
+    const result = withCalls({ "package.json": manifest("^0.24.0"), "src/agent.ts": MOUNTS }, 3);
+    expect(result.reaches.some((r) => r.kind === "model_consumer")).toBe(false);
+  });
+
+  it("adds evidence and never removes a finding", () => {
+    // A tool absent from a trace window is a tool nobody called in that window.
+    // Treating it as unused would let a short export clear a real finding.
+    const files = { "package.json": manifest("^0.24.0"), "src/a.ts": USES };
+    const withoutTraces = scan(files);
+    const withEmptyTraces = withCalls(files, 0);
+    expect(withEmptyTraces.filtered).toEqual(withoutTraces.filtered);
+    expect(withEmptyTraces.reaches.map((r) => r.kind)).toEqual(withoutTraces.reaches.map((r) => r.kind));
+  });
+});
+
+describe("the trace file is not a call site", () => {
+  it("never reports the export the user handed us", () => {
+    // It names every tool the agent called, by construction. Scanning it turns
+    // one supplied file into a reference per span and buries the real ones —
+    // the lockfile mistake again, found the same way, by running it.
+    const result = blastRadius({
+      repo: repo({
+        "package.json": manifest("^0.24.0"),
+        "src/agent.ts": 'import { makePack } from "@acme/tools/ai-sdk";\n',
+        "traces.json": JSON.stringify({ spans: [{ name: "t", attributes: { "tool.name": "make_thing" } }] }),
+      }),
+      package: PKG,
+      affectedVersions: ["0.24.0"],
+      targets: [APP],
+      usage: {
+        source: "traces.json",
+        spans: 1,
+        notes: [],
+        byTool: { make_thing: { tool: "make_thing", calls: 1, params: {} } },
+      },
+    });
+
+    expect(result.reaches.some((r) => r.kind === "tool_reference")).toBe(false);
+    expect(result.reaches.some((r) => r.kind === "observed_call")).toBe(true);
+  });
+});

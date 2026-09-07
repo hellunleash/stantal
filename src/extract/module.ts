@@ -89,6 +89,14 @@ type DescriptorSite = {
   /** Set when the description is a bare argument, as in the older `tool()` signature. */
   descriptionNode?: Expression;
   /**
+   * Set when the tool's name is the key it is filed under rather than a field.
+   *
+   * `{ list_projects: { description, parameters } }` — the key is the identity
+   * and the value never repeats it. Nothing in the value is an expression that
+   * evaluates to the name, so the name arrives as a string.
+   */
+  nameLiteral?: string;
+  /**
    * Set when the schema *is* an argument rather than a key inside a descriptor.
    *
    * `server.tool(name, description, schema, ...)` passes the shape directly.
@@ -512,6 +520,57 @@ function zodShapeArgument(node: AnyNode, isNamespace: (name: string) => boolean)
   return only !== undefined && only.type === "ObjectExpression" ? only : null;
 }
 
+/**
+ * Tools filed under their own names, in one record.
+ *
+ * ```js
+ * var TOOLS = {
+ *   list_projects: { description: "Lists all projects...", parameters: z.object({}) },
+ *   get_project:   { description: "Gets details for a project.", parameters: Lt },
+ * };
+ * ```
+ *
+ * `@supabase/mcp-server-supabase` ships exactly this, and it was the last real
+ * gap in the coverage census. Nothing here is descriptor-shaped by the rule
+ * above: no value carries a `name`, because the key already is the name. So
+ * there was nothing to decline and nothing to notice, and the surface read as
+ * shipping no tools at all — the dangerous kind of wrong, since a contract that
+ * reads as empty diffs as every tool removed.
+ *
+ * Three conditions, and they are strict on purpose. This is the only pattern
+ * here that takes its names from keys, so a loose version would turn any
+ * dictionary of things-with-descriptions into a tool contract:
+ *
+ * 1. **Every** value is an object literal. One stray entry and this is a
+ *    dictionary of something else.
+ * 2. Every value carries a readable `description`, and at least one carries a
+ *    schema. A record of `{ description }` alone is how people write help text.
+ * 3. At least two entries. A one-key object is far too ordinary a shape to
+ *    claim on this evidence, and missing a single-tool record is a gap we
+ *    report rather than a contract we invent.
+ */
+function recordSites(node: AnyNode, module: ParsedModule): DescriptorSite[] | null {
+  if (node.type !== "ObjectExpression") return null;
+
+  const entries = propertyMap(node);
+  if (entries.size < 2) return null;
+
+  const sites: DescriptorSite[] = [];
+  let withSchema = 0;
+  for (const [key, value] of entries) {
+    if (value.type !== "ObjectExpression") return null;
+    const fields = propertyMap(value);
+    // A value that names itself is an ordinary descriptor and is read as one.
+    // Two rules claiming the same object would report the tool twice.
+    if (fields.has("name")) return null;
+    if (!fields.has("description")) return null;
+    if (LITERAL_SCHEMA_KEYS.some((schema) => fields.has(schema))) withSchema += 1;
+    sites.push({ node: value, module, nameLiteral: key });
+  }
+
+  return withSchema > 0 ? sites : null;
+}
+
 function descriptorSites(modules: readonly ParsedModule[]): DescriptorSite[] {
   const sites: DescriptorSite[] = [];
   for (const module of modules) {
@@ -537,6 +596,15 @@ function descriptorSites(modules: readonly ParsedModule[]): DescriptorSite[] {
       if (isDescriptor(node) && !claimed.has(node)) {
         const site: DescriptorSite = { node, module };
         if (!isFactory(site, params)) found.push(site);
+        return;
+      }
+
+      const record = claimed.has(node) ? null : recordSites(node, module);
+      if (record !== null) {
+        // Each value is claimed, so the walk does not then read them again as
+        // anonymous descriptors on their way down.
+        for (const site of record) claimed.add(site.node);
+        found.push(...record.filter((site) => !isFactory(site, params)));
       }
     });
     // Class-declared tools, which are assembled rather than written as one
@@ -664,7 +732,8 @@ function readDescriptor(site: DescriptorSite, graph: ModuleGraph): ReadDescripto
   const notes: ExtractionNote[] = [];
 
   const nameNode = site.nameNode ?? properties.get("name");
-  const name = nameNode === undefined ? undefined : evaluate(nameNode as AnyNode, resolve).value;
+  const name =
+    site.nameLiteral ?? (nameNode === undefined ? undefined : evaluate(nameNode as AnyNode, resolve).value);
   if (typeof name !== "string" || name.length === 0) {
     // Without a name there is no tool to report, and no way to say which one is
     // missing. It still has to be recorded: it means the tool set may be larger

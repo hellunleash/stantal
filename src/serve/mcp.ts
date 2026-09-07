@@ -121,6 +121,20 @@ export function createServer(options: ServerOptions = {}): McpServer {
         contract_dependencies: result.entries.length,
         can_run_tests: result.readiness.hasRunner,
         missing_for_tests: result.readiness.missing,
+        // Contracts written here rather than installed. On a real application
+        // the dependency list covered 1 of 35, because the rest of what a model
+        // reads was generated in the repo. An agent that only ever saw the
+        // dependencies would confidently report a repo as covered when most of
+        // its contract was never looked at.
+        authored_contracts: result.authored.map((contract) => ({
+          catalog: contract.catalog,
+          documents: contract.sources,
+          tools: contract.tools,
+          // False means nothing is watching it: there is no saved copy, so a
+          // regeneration cannot be compared against anything.
+          has_baseline: contract.baseline !== null,
+        })),
+        authored_unreadable: result.authoredNotes.map((n) => ({ where: n.where, detail: n.detail })),
         dependencies: result.entries.map((entry) => ({
           package: entry.package,
           installed: entry.installed,

@@ -8,7 +8,10 @@ import { hostReadiness, type HostReadiness } from "./emit/host.js";
 import { buildReport, type BehaviourOptions, type Report, type VerdictLevel } from "./report.js";
 import type { Registry } from "./registry/npm.js";
 import type { Judge } from "./prose/judge.js";
-import type { RepoSource } from "./blast/repo.js";
+import type { UsageProfile } from "./usage/otel.js";
+import { fsJsonSource, type RepoSource } from "./blast/repo.js";
+import { discoverHostContracts, type DiscoveryNote, type HostContract } from "./host/discover.js";
+import { baselinePath, loadBaseline } from "./host/baseline.js";
 
 /**
  * The whole product with no arguments.
@@ -51,12 +54,34 @@ export type AuditEntry = {
   note: string | null;
 };
 
+/**
+ * A contract this repository writes itself, and whether it is being watched.
+ *
+ * Dependencies are only half of what hands a model tools. On a real application
+ * this audit covered **1 of 35** of them, because the rest of its model-facing
+ * contract was generated in the repo: no version, no registry, no range, and so
+ * invisible to every check above. Naming them costs one offline walk.
+ */
+export type AuthoredContract = HostContract & {
+  /** Where its baseline is stored, or null when nothing has been recorded yet. */
+  baseline: string | null;
+};
+
 export type AuditResult = {
   directory: string;
   /** Every dependency declared in the manifest, contract-bearing or not. */
   declared: number;
   /** Contract-bearing dependencies, worst first. */
   entries: AuditEntry[];
+  /**
+   * Contracts written in this repository rather than installed into it.
+   *
+   * Listed, never compared. A comparison needs a baseline, and saving one is a
+   * write — the one thing this command does not do.
+   */
+  authored: AuthoredContract[];
+  /** Documents discovery could not read. A gap, never a finding. */
+  authoredNotes: DiscoveryNote[];
   /** Whether anything here could run the tests `pin` would write. */
   readiness: HostReadiness;
   generatedAt: string;
@@ -68,6 +93,14 @@ export type AuditOptions = {
   judge?: Judge | null;
   /** Layer 3. The audit runs inside a repository by definition, so this is normally set. */
   repo?: RepoSource;
+  /**
+   * Traces of what this project's agent actually called.
+   *
+   * Additive: it turns a finding on a tool that is genuinely in use into an
+   * observed reach, and never clears one. Left unset, every answer here is
+   * exactly what it was.
+   */
+  usage?: UsageProfile;
   cacheRoot?: string;
   /** Where contract tests live, for the already-pinned check. */
   testDir?: string;
@@ -290,6 +323,7 @@ export async function auditProject(options: AuditOptions): Promise<AuditResult> 
         ...(options.judge === undefined ? {} : { judge: options.judge }),
         ...(options.behaviour === undefined ? {} : { behaviour: options.behaviour }),
         ...(options.repo === undefined ? {} : { repo: options.repo }),
+        ...(options.usage === undefined ? {} : { usage: options.usage }),
         ...(options.cacheRoot === undefined ? {} : { cacheRoot: options.cacheRoot }),
       });
       return finish({ ...base, latest, report });
@@ -311,10 +345,28 @@ export async function auditProject(options: AuditOptions): Promise<AuditResult> 
     return a.package.localeCompare(b.package);
   });
 
+  // Offline, and it stays offline: a walk over the repo's own JSON, parsed by
+  // the same extractor `stantal manifest` uses. Nothing is fetched, so this
+  // costs nothing on the run a first-time user makes.
+  const discovery = discoverHostContracts(fsJsonSource(directory));
+  const authored: AuthoredContract[] = discovery.contracts.map((contract) => {
+    let baseline: string | null = null;
+    try {
+      baseline = loadBaseline(directory, contract.catalog) === null ? null : baselinePath(contract.catalog);
+    } catch {
+      // A broken baseline is not a saved one. `stantal snapshot` says what is
+      // wrong with it; here it is enough that nothing is being watched.
+      baseline = null;
+    }
+    return { ...contract, baseline };
+  });
+
   return {
     directory,
     declared: manifest === null ? 0 : declaredDependencies(manifest).length,
     entries,
+    authored,
+    authoredNotes: discovery.notes,
     readiness: hostReadiness(directory),
     generatedAt: new Date().toISOString(),
   };

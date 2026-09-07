@@ -3,6 +3,7 @@ import type { PackageJson } from "../extract/package-source.js";
 import type { RepoSource } from "./repo.js";
 import { compareReaches, type BlastNote, type BlastResult, type Filtered, type Reach } from "./taxonomy.js";
 import { GENERATED_MARKER } from "../emit/vitest.js";
+import { callsOf, type UsageProfile } from "../usage/otel.js";
 
 /**
  * One thing a finding is about, reduced to what a scan can look for.
@@ -37,6 +38,14 @@ export type BlastOptions = {
    */
   affectedVersions: readonly string[];
   targets: readonly BlastTarget[];
+  /**
+   * What the consumer's agent actually called, from traces.
+   *
+   * Optional, and additive only: a profile can turn a finding into an observed
+   * reach and can never filter one out. Absence from a trace window is not
+   * evidence that a tool is unused.
+   */
+  usage?: UsageProfile | undefined;
 };
 
 const DEPENDENCY_FIELDS = [
@@ -99,7 +108,7 @@ function wordLines(text: string, word: string): number[] {
  * no network at all.
  */
 export function blastRadius(options: BlastOptions): BlastResult {
-  const { repo, package: pkg, affectedVersions, targets } = options;
+  const { repo, package: pkg, affectedVersions, targets, usage } = options;
 
   const reaches: Reach[] = [];
   const filtered: Filtered[] = [];
@@ -170,6 +179,11 @@ export function blastRadius(options: BlastOptions): BlastResult {
 
   const toolNames = [...new Set(targets.map((t) => t.tool))];
 
+  // The traces, when they live inside the repo being scanned. Compared as a
+  // repo-relative POSIX path, which is what `files()` yields.
+  const tracePath =
+    usage === undefined ? null : usage.source.replace(/^\.\//, "").split("\\").join("/");
+
   for (const path of repo.files()) {
     const text = repo.read(path);
     if (text === null) {
@@ -186,6 +200,13 @@ export function blastRadius(options: BlastOptions): BlastResult {
     // `canClaimUnaffected` from ever being true. We read this one and know
     // exactly what it is.
     if (text.lastIndexOf(GENERATED_MARKER, 200) !== -1) continue;
+
+    // Nor is the trace export a call site. It names every tool the agent
+    // called, by construction, so scanning it turns one file the user handed
+    // us into a `tool_reference` per span — the lockfile mistake again, found
+    // the same way, by running it. Its evidence belongs on the observed reach,
+    // which says how many calls rather than which line of JSON.
+    if (tracePath !== null && path === tracePath) continue;
 
     files += 1;
     bytes += text.length;
@@ -233,11 +254,47 @@ export function blastRadius(options: BlastOptions): BlastResult {
         kind: "surface_import",
         target: target.surface,
         evidence: importedAt,
-        detail: `imports the door ${target.label} is on`,
+        // Names the door, not the finding. A detail that named the finding
+        // would make two findings on one import look like two places to look.
+        detail: `imports the door this finding is on`,
+      });
+    }
+
+    // Proof, not inference. Reported before anything the scan inferred, and
+    // reported even when a source file names the tool as well: "you call this"
+    // and "you mention this" are different claims and the first one is the one
+    // a person acts on.
+    const calls = usage === undefined ? 0 : callsOf(usage, target.tool);
+    if (calls > 0) {
+      reaches.push({
+        kind: "observed_call",
+        target: target.tool,
+        evidence: usage?.source ?? "traces",
+        detail: `called ${calls} time(s) in the traces supplied`,
       });
     }
 
     const hits = toolFiles.get(target.tool) ?? [];
+
+    // No line of source names this tool, and yet the repo opens the door it is
+    // declared on. That is the ordinary case for a contract a model consumes:
+    // the code hands the pack over and the model chooses. Saying nothing here
+    // would let the strongest version of the finding present as no reach at
+    // all, so the mount site is reported as the reach it is.
+    //
+    // Anchored to a mount, never to the manifest. A dependency on its own
+    // already has its own reach, and stretching this kind to cover it would
+    // turn "we found no imports" into a positive claim about how the package
+    // is used.
+    if (hits.length === 0 && calls === 0 && importedAt !== undefined) {
+      reaches.push({
+        kind: "model_consumer",
+        target: target.tool,
+        evidence: importedAt,
+        detail: `mounts the contract \`${target.tool}\` is in; no file names the tool, so the caller is the model`,
+      });
+    }
+
     for (const hit of hits) {
       reaches.push({
         kind: "tool_reference",
@@ -268,5 +325,17 @@ export function blastRadius(options: BlastOptions): BlastResult {
   }
 
   reaches.sort(compareReaches);
-  return { reaches, filtered, notes, scanned: { files, bytes } };
+
+  // Two findings on one tool reach a consumer at the same line, and printing
+  // that line twice says nothing the first line did not. The detail is part of
+  // the key so a reach that really does carry different information survives.
+  const seen = new Set<string>();
+  const unique = reaches.filter((r) => {
+    const key = `${r.kind}\u0000${r.target}\u0000${r.evidence}\u0000${r.detail}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  return { reaches: unique, filtered, notes, scanned: { files, bytes } };
 }

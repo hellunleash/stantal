@@ -25,6 +25,20 @@
 
 export type ReachKind =
   /**
+   * A trace shows this tool being called.
+   *
+   * The only reach in this layer that is not inference. Everything else here
+   * argues from what the repository *could* do — it declares the dependency, it
+   * opens the door, it names the tool. This one is a record of what happened,
+   * which is why it ranks first.
+   *
+   * **It can add a reach and can never remove one.** A tool absent from a trace
+   * is a tool nobody called in the window that was exported, which is not the
+   * same as a tool nobody calls. Letting a short trace file clear a finding
+   * would be the exact false clearance this project exists to prevent.
+   */
+  | "observed_call"
+  /**
    * The manifest depends on the package, and the declared range admits a
    * version the finding is present in. Range, not installed version: a caret
    * range that resolves clean today will pick up the defect on the next
@@ -51,7 +65,27 @@ export type ReachKind =
    * every file and mean nothing. A match only counts where the surrounding
    * file is demonstrably about that tool.
    */
-  | "param_reference";
+  | "param_reference"
+  /**
+   * The repo mounts the door this finding sits on, and **no source file names
+   * the tool**. The caller here is the model, not the code.
+   *
+   * The kind exists because of a failure this layer had on a real repository:
+   * a project imported the package in three files and Layer 3 said nothing
+   * about the finding, because the tools it sat on appear in no source line.
+   * Under this project's own thesis that is not a rare corner. A contract
+   * consumed by a model is *usually* named nowhere in the consumer's code —
+   * the code hands the whole pack over and the model picks a tool at runtime.
+   * So the sharpest evidence this layer has, a `tool_reference`, is missing
+   * exactly when the product's central claim is most true, and silence there
+   * reads as "you are unaffected".
+   *
+   * It is emitted only where a mount was actually found, so it never stands in
+   * for "we did not look". Its evidence is the mount site: the line that hands
+   * this contract to a model is the line a consumer has to open, since there
+   * is no other.
+   */
+  | "model_consumer";
 
 export type Reach = {
   kind: ReachKind;
@@ -123,10 +157,15 @@ export function canClaimUnaffected(result: BlastResult): boolean {
 
 /** Worst first, so the line a consumer reads first is the one that matters most. */
 const RANK: Record<ReachKind, number> = {
-  dependency: 0,
-  surface_import: 1,
-  tool_reference: 2,
-  param_reference: 3,
+  // First: the one line here that is a record rather than an argument.
+  observed_call: 0,
+  dependency: 1,
+  surface_import: 2,
+  tool_reference: 3,
+  param_reference: 4,
+  // Last: real, and the least checkable thing here. A consumer scanning the
+  // list wants the lines naming a tool before the line that only mounts one.
+  model_consumer: 5,
 };
 
 export function compareReaches(a: Reach, b: Reach): number {

@@ -243,3 +243,40 @@ describe("auditProject", () => {
     expect(result.entries[0]?.pinnedSubpaths).toEqual(["."]);
   });
 });
+
+describe("contracts the repository writes itself", () => {
+  test("names them, and says which are not being watched", async () => {
+    // The argument for looking at all: on a real application this audit covered
+    // 1 of 35 dependencies, because the rest of what a model reads there was
+    // generated in the repo, where there is no version and no registry.
+    const root = project({});
+    mkdirSync(join(root, ".agent"), { recursive: true });
+    writeFileSync(
+      join(root, ".agent", "tools.json"),
+      JSON.stringify({
+        tools: [
+          {
+            name: "host_get_record",
+            description: "GET /api/candidates/{id}",
+            inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = await audit(root, registryOf({}, {}));
+    expect(result.entries).toEqual([]);
+    expect(result.authored.map((c) => c.catalog)).toEqual([".agent/tools.json"]);
+    // Null baseline is the useful half: the file is there and nothing records
+    // what it said last time, so a regeneration changes it silently.
+    expect(result.authored[0]?.baseline).toBeNull();
+    expect(result.authored[0]?.tools).toBe(1);
+  });
+
+  test("a repo that writes none says so without a network call", async () => {
+    const result = await audit(project({}), registryOf({}, {}));
+    expect(result.authored).toEqual([]);
+    expect(result.authoredNotes).toEqual([]);
+  });
+});

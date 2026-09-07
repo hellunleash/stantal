@@ -1,4 +1,5 @@
 import { blastRadius, type BlastTarget } from "./blast/scan.js";
+import type { UsageProfile } from "./usage/otel.js";
 import type { RepoSource } from "./blast/repo.js";
 import type { BlastResult } from "./blast/taxonomy.js";
 import { present as wireTools, type ToolCaller } from "./behaviour/caller.js";
@@ -154,6 +155,14 @@ export type ReportOptions = {
    * be on disk.
    */
   repo?: RepoSource;
+  /**
+   * Traces of what this consumer's agent actually called.
+   *
+   * Left unset, nothing changes: usage can only add an observed reach, never
+   * remove a finding, so a report built without it is the same report with less
+   * evidence rather than a different answer.
+   */
+  usage?: UsageProfile;
 };
 
 /**
@@ -297,7 +306,34 @@ async function behaviourFor(
       caller,
       ...(settings.seedCacheDir !== undefined ? { cacheDir: settings.seedCacheDir } : {}),
     }));
-  if (intents.length === 0) return null;
+  if (intents.length === 0) {
+    // Asked for, and it could not run. Reported rather than skipped silently:
+    // `behaviour: null` means nobody asked, and the two are opposite claims. A
+    // user who typed `--behaviour` and got nothing back has no way to tell
+    // which one happened.
+    //
+    // Found on a real contract, on a run that produced no Layer 2 section and
+    // said `caller: none`, with nothing anywhere to say why. Seeding the same
+    // anchor with the same model a few minutes later returned 137 intents, so
+    // whatever happened was not a property of the contract — which is exactly
+    // why silence was the wrong output. The one thing a skip must never do is
+    // read like a model that was never configured.
+    return {
+      findings: [],
+      skipped: [
+        {
+          intentId: "(corpus)",
+          reason: `${caller.id} did not propose a corpus for this contract, so nothing could be measured`,
+        },
+      ],
+      caller: caller.id,
+      k: settings.k ?? 5,
+      mode: "full",
+      replayed: 0,
+      corpus: 0,
+      stats: { hits: 0, misses: 0, writes: 0 },
+    };
+  }
 
   return runBehaviour({
     from: { version: versions.from, contract: from.contract },
@@ -404,6 +440,7 @@ export async function buildReport(options: ReportOptions): Promise<Report> {
     judge,
     caller: options.behaviour?.caller ?? null,
     ...(options.repo === undefined ? {} : { repo: options.repo }),
+    ...(options.usage === undefined ? {} : { usage: options.usage }),
   });
 }
 
@@ -460,6 +497,8 @@ function foldReport(input: {
   caller: ToolCaller | null;
   /** The consumer's repo, when Layer 3 was asked for. */
   repo?: RepoSource | undefined;
+  /** What the consumer's agent actually called, when traces were supplied. */
+  usage?: UsageProfile | undefined;
 }): Report {
   const { subject, surfaces, missingDependencies, judge } = input;
 
@@ -499,6 +538,7 @@ function foldReport(input: {
             package: subject.package,
             affectedVersions: [subject.to],
             targets: blastTargetsFor(surfaces),
+            ...(input.usage === undefined ? {} : { usage: input.usage }),
           }),
     generatedAt: new Date().toISOString(),
   };
@@ -547,6 +587,14 @@ export type ManifestReportOptions = {
   behaviour?: BehaviourOptions;
   /** The consumer's own repository, for Layer 3. Left unset, nothing is read. */
   repo?: RepoSource;
+  /**
+   * Traces of what this consumer's agent actually called.
+   *
+   * Left unset, nothing changes: usage can only add an observed reach, never
+   * remove a finding, so a report built without it is the same report with less
+   * evidence rather than a different answer.
+   */
+  usage?: UsageProfile;
 };
 
 export async function buildManifestReport(options: ManifestReportOptions): Promise<Report> {
@@ -588,6 +636,7 @@ export async function buildManifestReport(options: ManifestReportOptions): Promi
     judge,
     caller: options.behaviour?.caller ?? null,
     ...(options.repo === undefined ? {} : { repo: options.repo }),
+    ...(options.usage === undefined ? {} : { usage: options.usage }),
   });
 }
 
@@ -654,6 +703,14 @@ export type LocalReportOptions = {
   judge?: Judge | null;
   behaviour?: BehaviourOptions;
   repo?: RepoSource;
+  /**
+   * Traces of what this consumer's agent actually called.
+   *
+   * Left unset, nothing changes: usage can only add an observed reach, never
+   * remove a finding, so a report built without it is the same report with less
+   * evidence rather than a different answer.
+   */
+  usage?: UsageProfile;
 };
 
 export async function buildLocalReport(options: LocalReportOptions): Promise<Report> {
@@ -717,5 +774,6 @@ export async function buildLocalReport(options: LocalReportOptions): Promise<Rep
     judge,
     caller: options.behaviour?.caller ?? null,
     ...(options.repo === undefined ? {} : { repo: options.repo }),
+    ...(options.usage === undefined ? {} : { usage: options.usage }),
   });
 }

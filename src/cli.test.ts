@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applyReplay, main, warnIfGeminiBillsACard } from "./cli.js";
+import { applyReplay, main, repoRootFor, warnIfGeminiBillsACard } from "./cli.js";
 
 /**
  * The CLI's flag plumbing, tested where it can be tested without a network.
@@ -664,5 +664,90 @@ describe("the verdict adds up", () => {
     // key is needed to settle it. Offering one here would advertise a purchase
     // that buys nothing.
     expect(stdout).not.toContain("a model key would settle them");
+  });
+});
+
+describe("snapshot", () => {
+  let dir: string;
+  let stdout: string;
+
+  const TOOLS = {
+    tools: [
+      {
+        name: "host_get_record",
+        description: "GET /api/candidates/{id}",
+        inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    stdout = "";
+    dir = mkdtempSync(join(tmpdir(), "stantal-snapshot-"));
+    mkdirSync(join(dir, ".agent"), { recursive: true });
+    writeFileSync(join(dir, ".agent", "tools.json"), JSON.stringify(TOOLS));
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      stdout += String(chunk);
+      return true;
+    });
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("finds a generated contract and says nothing is watching it", async () => {
+    const code = await main(["snapshot", dir, "--no-judge"]);
+    // Exit 0: a contract with no baseline is not a failure, it is a contract
+    // nobody has recorded yet. A non-zero exit here would teach people to take
+    // this out of CI on the first run.
+    expect(code).toBe(0);
+    expect(stdout).toContain(".agent/tools.json");
+    expect(stdout).toContain("no baseline");
+  });
+
+  it("--save writes the documents where a diff can read them", async () => {
+    expect(await main(["snapshot", dir, "--save", "--no-judge"])).toBe(0);
+    expect(existsSync(join(dir, ".stantal/contracts/agent-tools/0-tools.json"))).toBe(true);
+    expect(existsSync(join(dir, ".stantal/contracts/agent-tools/stantal.json"))).toBe(true);
+  });
+
+  it("exits 1 when the regenerated contract changed", async () => {
+    await main(["snapshot", dir, "--save", "--no-judge"]);
+    writeFileSync(
+      join(dir, ".agent", "tools.json"),
+      JSON.stringify({
+        tools: [
+          {
+            name: "host_get_record",
+            description: "GET /api/candidates/{id}",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      }),
+    );
+
+    stdout = "";
+    expect(await main(["snapshot", dir, "--no-judge"])).toBe(1);
+    expect(stdout).toContain("param_removed");
+  });
+});
+
+describe("repoRootFor", () => {
+  it("follows --directory when --repo is not given", () => {
+    // The bug this pins: auditing another checkout read that project's
+    // dependencies and scanned the working directory for reach, so every
+    // finding came back "not a declared dependency" — an evidenced claim that
+    // nothing reaches you, made about the wrong repository.
+    expect(repoRootFor({ directory: "C:/other-app" })).toBe("C:/other-app");
+  });
+
+  it("lets --repo win, including the off switch", () => {
+    expect(repoRootFor({ repo: "C:/elsewhere", directory: "C:/other-app" })).toBe("C:/elsewhere");
+    expect(repoRootFor({ repo: "none", directory: "C:/other-app" })).toBe("none");
+  });
+
+  it("falls back to the working directory", () => {
+    expect(repoRootFor({})).toBe(".");
   });
 });

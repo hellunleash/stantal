@@ -86,7 +86,21 @@ export function isScannable(path: string): boolean {
   return SOURCE_EXTENSIONS.some((ext) => base.endsWith(ext));
 }
 
-export function fsRepoSource(root: string): RepoSource {
+/**
+ * How a walk decides what to list.
+ *
+ * Layer 3 wants the consumer's source and stays out of dot directories, which
+ * hold tooling rather than code. Contract discovery wants the opposite: a
+ * host-generated tool list usually lives in exactly such a directory, and
+ * `.agent/tools.json` is the case this was written against.
+ */
+type WalkRules = {
+  keep: (basename: string) => boolean;
+  /** Descend into `.name` directories. `.git` and the skip list are excluded either way. */
+  dotDirectories: boolean;
+};
+
+function sourceOver(root: string, rules: WalkRules): RepoSource {
   let listed: string[] | null = null;
 
   const walk = (dir: string, out: string[]): void => {
@@ -100,12 +114,13 @@ export function fsRepoSource(root: string): RepoSource {
       return;
     }
     for (const entry of entries) {
-      if (entry.name.startsWith(".") && entry.isDirectory() && !SKIP_DIRECTORIES.has(entry.name)) continue;
+      if (entry.name.startsWith(".") && entry.isDirectory() && !rules.dotDirectories) continue;
+      if (entry.name === ".git") continue;
       const full = join(dir, entry.name);
       if (entry.isDirectory()) {
         if (SKIP_DIRECTORIES.has(entry.name)) continue;
         walk(full, out);
-      } else if (entry.isFile() && isScannable(entry.name)) {
+      } else if (entry.isFile() && rules.keep(entry.name)) {
         try {
           if (statSync(full).size > MAX_FILE_BYTES) continue;
         } catch {
@@ -143,6 +158,25 @@ export function fsRepoSource(root: string): RepoSource {
       }
     },
   };
+}
+
+/** The consumer's own source, for Layer 3. Dot directories are tooling, not code. */
+export function fsRepoSource(root: string): RepoSource {
+  return sourceOver(root, { keep: isScannable, dotDirectories: false });
+}
+
+/**
+ * Every JSON document in the repo, for contract discovery.
+ *
+ * Descends into dot directories, which Layer 3 skips. A host writes its
+ * generated tool list where its own tooling lives, so the directory Layer 3 is
+ * right to ignore is the first place to look here.
+ */
+export function fsJsonSource(root: string): RepoSource {
+  return sourceOver(root, {
+    keep: (name) => name.endsWith(".json") && !GENERATED_FILES.has(name),
+    dotDirectories: true,
+  });
 }
 
 /** In-memory repo, for tests and for a caller that already has the text. */

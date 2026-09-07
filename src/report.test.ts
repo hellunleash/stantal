@@ -201,6 +201,21 @@ describe("Layer 2 in the verdict", () => {
     expect(result.headline).toContain("`target`");
   });
 
+  test("a model that cannot propose a corpus is reported, never silent", async () => {
+    // A model that answers the corpus request with prose instead of calling
+    // `propose_intents` leaves nothing to measure. Before this, Layer 2 simply
+    // vanished and the report said `caller: none`, which reads as "no model was
+    // configured". Those are opposite claims.
+    const caller = scriptedCaller("test:refuses", () => ({ kind: "no_call", text: "which tools do you mean?" }));
+    const result = await report(packFiles(DESCRIBED), packFiles(BARE), { behaviour: { caller } });
+
+    expect(result.caller).toBe("test:refuses");
+    expect(result.surfaces[0]?.behaviour?.findings).toEqual([]);
+    expect(result.surfaces[0]?.behaviour?.skipped[0]?.reason).toContain("did not propose a corpus");
+    // Nothing was measured, so nothing may be claimed from it.
+    expect(result.verdict).toBe("prose-risk");
+  });
+
   test("no caller is a normal run, not an error", async () => {
     const result = await report(packFiles(DESCRIBED), packFiles(BARE), { behaviour: { caller: null } });
 

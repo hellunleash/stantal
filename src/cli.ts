@@ -8,7 +8,11 @@ import { callerFromEnv } from "./behaviour/callers.js";
 import { behaviourCacheFromEnv } from "./behaviour/run.js";
 import type { Judge } from "./prose/judge.js";
 import { judgeFromEnv } from "./prose/judges.js";
-import { fsRepoSource, type RepoSource } from "./blast/repo.js";
+import { fsJsonSource, fsRepoSource, type RepoSource } from "./blast/repo.js";
+import { discoverHostContracts } from "./host/discover.js";
+import { ranked, readTraces, type UsageProfile } from "./usage/otel.js";
+import { saveSnapshots, snapshotHostContracts } from "./host/snapshot.js";
+import { baselineWouldBeIgnored } from "./host/baseline.js";
 import { planRemedy } from "./remedy/plan.js";
 import type { Remedy } from "./remedy/taxonomy.js";
 import { canClaimUnaffected } from "./blast/taxonomy.js";
@@ -35,6 +39,7 @@ import { exportedSubpaths, fsPackageSource } from "./extract/package-source.js";
 import { packageDirectory } from "./testkit.js";
 import { applyPatch, planPatch } from "./patch/plan.js";
 import { renderPatchFile } from "./patch/emit.js";
+import { planReapply, wireReapply } from "./patch/reapply.js";
 import { canApply } from "./patch/taxonomy.js";
 import { renderHtml } from "./verdict/html.js";
 import { publishableReport } from "./verdict/publish.js";
@@ -70,6 +75,7 @@ stantal — know whether an upgrade changes how a model uses your dependency
   stantal                                  audit this project and say what to do
   stantal pin --all                        protect every contract you depend on
   stantal watch                            for a scheduled job: decide what to say
+  stantal snapshot [dir] [--save]          the contracts this repo writes itself
   stantal <package> <from> <to> [options]
   stantal history <package> [options]
   stantal manifest <before...> <after...> [options]
@@ -99,11 +105,23 @@ Comparing two manifests answers the other side's question: I am about to ship
 this — what will it do to the models already calling me. Nothing is fetched and
 no version is resolved, so it works on a release that is not published, and on
 a contract that never goes to a registry at all. It reads a serialized tool
-list: an MCP tools/list reply, or whatever a host writes out for its own tools.
+list: an MCP tools/list reply, whatever a host writes out for its own tools, or
+an OpenAPI document, whose operations are the contract a generator hands a
+model. On a spec the question is not the one oasdiff answers: a deleted summary
+breaks no client, passes every contract test, and changes what the model does.
 Checking a directory is the provider's gate before publishing: it reads the
 build on disk, fetches the release you name, and tells you what your next
 version does to the models already calling you -- while it still costs
 minutes to fix rather than a deprecation cycle.
+
+Snapshotting covers the contracts a repository writes rather than installs. A
+host that hands its own API to an agent generates a tool list into a file, and
+that file has no version, no registry and no semver range, so nothing else here
+can see it. Run it to find those files; run it with --save to record what they
+say today. After that, every later run is an ordinary before/after against the
+saved copy, read by the same extractor and folded into the same verdict. The
+copy is stored as files under .stantal/contracts, so the change is legible in a
+normal diff. It never fetches anything.
 
 Connecting registers this tool with a coding agent, by writing an MCP entry into
 a config file in your repository. That file is committable, so one person
@@ -125,9 +143,18 @@ Options
   --exclude-when <k=v>  manifest: drop tools whose merged descriptor carries
                         this field, for policy the host applies but the
                         document only states. Repeatable.
-  --repo <dir>          Layer 3: which of YOUR call sites a finding reaches.
+  --repo <dir>          Layer 3: where a finding reaches you — your call
+                        sites, and the lines that mount a contract for a model.
                         Reads that directory only, never writes, never calls
                         out. Defaults to "." — pass "none" to turn it off.
+  --wire                patch: set scripts.postinstall to patch-package, so an
+                        emitted patch is reapplied on every install.
+  --save                snapshot: record what the contracts say today. Without
+                        it, snapshot only reads and compares.
+  --traces <file>       An OpenTelemetry span export. Findings on tools your
+                        agent actually called are reported as observed, and
+                        ranked first. It can only add evidence: a tool missing
+                        from the window is never treated as unused.
   --all                 pin: every contract-bearing dependency at once.
                         Never overwrites a suite that already exists.
   --write               watch: actually write the contract tests it planned.
@@ -280,11 +307,11 @@ function renderBlast(blast: Report["blast"]): string[] {
   if (blast.reaches.length === 0) {
     out.push(
       canClaimUnaffected(blast)
-        ? `  ${green("nothing here reaches your code")}  ${scanned}`
+        ? `  ${green("nothing here reaches you")}  ${scanned}`
         : `  ${yellow("no reach found, but the scan was incomplete")}  ${scanned}`,
     );
   } else {
-    out.push(`  ${bold(`reaches your code in ${blast.reaches.length} place(s)`)}  ${scanned}`);
+    out.push(`  ${bold(`reaches you in ${blast.reaches.length} place(s)`)}  ${scanned}`);
     for (const reach of blast.reaches.slice(0, 12)) {
       out.push(`    ${reach.kind.padEnd(16)} ${reach.target}`);
       out.push(`      ${dim(`${reach.evidence} — ${reach.detail}`)}`);
@@ -545,6 +572,15 @@ function renderHistory(result: HistoryResult): string {
  * stop using the feature.
  */
 const DEFAULT_TEST_DIR = "stantal";
+
+/** The project's manifest, or an empty one. Only used to say what is already wired. */
+function readManifestFor(root: string): Record<string, unknown> {
+  try {
+    return JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
 
 /** Where a restoration goes.  is where patch-package looks. */
 const DEFAULT_PATCH_DIR = "patches";
@@ -893,6 +929,7 @@ async function runPatch(
     surface?: string[] | undefined;
     cache?: string | undefined;
     "emit-patch"?: boolean | undefined;
+    wire?: boolean | undefined;
     directory?: string | undefined;
     out?: string | undefined;
   },
@@ -998,12 +1035,30 @@ async function runPatch(
       // Named rather than assumed. The file alone changes nothing; something
       // has to reapply it after each install, and if that step is skipped the
       // restoration disappears exactly as quietly as the sentence it restores.
-      if (packageDirectory("patch-package", root) === null) {
+      const installed = packageDirectory("patch-package", root) !== null;
+
+      if (values.wire === true) {
+        // The one field that closes the loop. Asked for, never assumed: a
+        // postinstall script runs on every install on every machine, and
+        // adding one to somebody's project is a bigger step than writing a
+        // file into a directory.
+        const wired = wireReapply(root);
+        out.push(
+          wired.kind === "refused" ? `  could not wire it up — ${wired.detail}` : `  ${wired.detail}`,
+        );
+        if (!installed) out.push(`      npm install -D patch-package`);
+      } else if (installed) {
+        const wired = planReapply(readManifestFor(root));
+        out.push(
+          wired.kind === "already"
+            ? `  patch-package is installed and runs on install, so this is reapplied.`
+            : `  patch-package is installed but nothing runs it — re-run with --wire, or:
+      npm pkg set scripts.postinstall="patch-package"`,
+        );
+      } else {
         out.push(`  Nothing here reapplies it yet:`);
         out.push(`      npm install -D patch-package`);
-        out.push(`      npm pkg set scripts.postinstall="patch-package"`);
-      } else {
-        out.push(`  patch-package is installed, so this reapplies on every install.`);
+        out.push(`      npx stantal patch ${pkg} ${from} --emit-patch --wire`);
       }
       out.push("");
     }
@@ -1291,6 +1346,7 @@ async function runCheck(
   judge: Judge | null,
   behaviour: BehaviourOptions | undefined,
   repo: ReturnType<typeof fsRepoSource> | undefined,
+  usage: UsageProfile | undefined,
 ): Promise<number> {
   if (directory === undefined || values.against === undefined) {
     process.stderr.write(
@@ -1326,6 +1382,7 @@ async function runCheck(
       ...(values.cache !== undefined ? { cacheRoot: values.cache } : {}),
       ...(values.surface !== undefined ? { subpaths: values.surface } : {}),
       ...(repo === undefined ? {} : { repo }),
+      ...(usage === undefined ? {} : { usage }),
     });
 
     process.stdout.write(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : render(report));
@@ -1337,6 +1394,169 @@ async function runCheck(
     process.stderr.write(`stantal: ${error instanceof Error ? error.message : String(error)}\n`);
     return 2;
   }
+}
+
+/**
+ * The contracts this repository writes.
+ *
+ * Every other command starts from a dependency, and on a real application that
+ * covered **1 of 35** of them: the rest of its model-facing contract was
+ * generated in the repo, where there is no version to compare and no registry
+ * to walk. This finds those documents and, once a baseline is saved, treats the
+ * same file a week apart as an ordinary before/after.
+ *
+ * Reads and reports; `--save` is the step that writes. Same rule as the
+ * no-argument audit, and for the same reason: a command that edits a repository
+ * the first time somebody runs it is a command they stop running.
+ */
+async function runSnapshot(
+  root: string,
+  values: {
+    json?: boolean | undefined;
+    save?: boolean | undefined;
+    "fields-at"?: string | undefined;
+    "exclude-when"?: string[] | undefined;
+  },
+  judge: Judge | null,
+): Promise<number> {
+  const documents = fsJsonSource(root);
+
+  const excludeWhen: Array<{ key: string; value: string }> = [];
+  for (const rule of values["exclude-when"] ?? []) {
+    const at = rule.indexOf("=");
+    if (at <= 0) {
+      process.stderr.write(`stantal: --exclude-when wants key=value, got "${rule}"
+`);
+      return 2;
+    }
+    excludeWhen.push({ key: rule.slice(0, at), value: rule.slice(at + 1) });
+  }
+
+  if (values.save === true) {
+    const found = discoverHostContracts(documents, { fieldsKey: values["fields-at"] });
+    const written = saveSnapshots(root, documents, found.contracts);
+    if (values.json === true) {
+      process.stdout.write(`${JSON.stringify({ discovery: found, written }, null, 2)}
+`);
+    } else {
+      process.stdout.write(renderSaved(found.contracts.length, written, baselineWouldBeIgnored(root)));
+    }
+    // A save that could not write is exit 2, not a verdict. The next run would
+    // otherwise compare against a baseline nobody has.
+    return written.some((w) => w.error !== null) ? 2 : 0;
+  }
+
+  const result = await snapshotHostContracts({
+    root,
+    repo: documents,
+    judge,
+    ...(values["fields-at"] !== undefined ? { fieldsKey: values["fields-at"] } : {}),
+    ...(excludeWhen.length > 0 ? { excludeWhen } : {}),
+  });
+
+  if (values.json === true) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}
+`);
+  } else {
+    process.stdout.write(renderSnapshot(result));
+  }
+
+  // Worst verdict wins, and a contract we could not read is a 2. A repo that
+  // authors none, or one whose baselines are all unsaved, has nothing to check
+  // and exits 0 — a non-zero exit for "nothing here yet" teaches people to
+  // take this out of CI.
+  let code: 0 | 1 | 2 = 0;
+  for (const entry of result.entries) {
+    if (entry.report !== null) {
+      const own = exitCodeFor(entry.report.verdict);
+      if (own > code) code = own;
+    } else if (entry.baseline !== null) {
+      code = 2;
+    }
+  }
+  return code;
+}
+
+function renderSaved(
+  discovered: number,
+  written: ReturnType<typeof saveSnapshots>,
+  ignored: boolean,
+): string {
+  const out: string[] = [""];
+  if (discovered === 0) {
+    out.push(`  ${dim("no contracts written by this repository were found")}`, "");
+    return `${out.join("\n")}\n`;
+  }
+  out.push(`  ${bold(`saved ${written.filter((w) => w.error === null).length} baseline(s)`)}`, "");
+  for (const row of written) {
+    out.push(
+      row.error === null
+        ? `    ${green("saved")}  ${row.contract.catalog} ${dim(`→ ${row.path}`)}`
+        : `    ${red("failed")} ${row.contract.catalog} ${dim(row.error)}`,
+    );
+  }
+  out.push("", `  ${dim("commit these. The next run compares the file against the copy.")}`);
+  if (ignored) {
+    // Silent otherwise: the comparison still works on this machine, and nowhere
+    // else. That is a shared check quietly turned into a personal one.
+    out.push(
+      `  ${yellow("your .gitignore ignores .stantal/, so this will not be committed")}`,
+      `    ${dim("un-ignore .stantal/contracts, or CI and everyone else compare against nothing")}`,
+    );
+  }
+  out.push("");
+  return `${out.join("\n")}\n`;
+}
+
+function renderSnapshot(result: Awaited<ReturnType<typeof snapshotHostContracts>>): string {
+  const { discovery, entries } = result;
+  const out: string[] = ["", `  ${bold("contracts this repository writes")}  ${dim(`${discovery.scanned} document(s) read`)}`, ""];
+
+  if (entries.length === 0) {
+    out.push(`  ${dim("none found")}`);
+  }
+
+  for (const entry of entries) {
+    const where = `${entry.contract.catalog}${entry.contract.sources.length > 1 ? ` + ${entry.contract.sources.length - 1} more` : ""}`;
+    out.push(
+      `  ${bold(where)}  ${dim(`${entry.contract.tools} tool(s), ${entry.contract.withParams} with parameters`)}`,
+    );
+    out.push(`    ${dim(entry.contract.why)}`);
+
+    if (entry.report !== null) {
+      const color = VERDICT_COLOR[entry.report.verdict];
+      out.push(`    ${color(bold(entry.report.verdict))}  ${dim(truncate(entry.report.headline, 84))}`);
+      // The headline says how bad; these say what. A regenerated contract is
+      // usually a long list of small moves, so this is the line a person needs
+      // to decide whether the regeneration was intended.
+      const lines: string[] = [];
+      for (const surface of entry.report.surfaces) {
+        for (const change of surface.comparison.diff?.changes ?? []) {
+          lines.push(`${change.breaking ? red("breaking") : dim("change  ")}  ${change.rule}  ${change.target}`);
+        }
+        for (const finding of surface.prose.findings) {
+          lines.push(`${yellow("prose   ")}  ${finding.rule}  ${finding.target}`);
+        }
+      }
+      for (const line of lines.slice(0, 8)) out.push(`      ${line}`);
+      if (lines.length > 8) out.push(`      ${dim(`... and ${lines.length - 8} more`)}`);
+    } else if (entry.baseline === null) {
+      out.push(`    ${yellow("no baseline")}  ${dim("run `stantal snapshot --save` to record what it says today")}`);
+    } else {
+      out.push(`    ${red("unreadable")}  ${dim(entry.note ?? "")}`);
+    }
+    out.push("");
+  }
+
+  // Gaps, never dropped. A document we could not read is not a document that
+  // holds no contract, and this is the one command whose silence would mean
+  // "your repo writes nothing a model reads".
+  for (const note of discovery.notes) {
+    out.push(`  ${yellow("note")}  ${note.where} ${dim(note.detail)}`);
+  }
+  if (discovery.notes.length > 0) out.push("");
+
+  return `${out.join("\n")}\n`;
 }
 
 /**
@@ -1361,6 +1581,7 @@ async function runManifest(
   judge: Judge | null,
   behaviour: BehaviourOptions | undefined,
   repo: RepoSource | undefined,
+  usage: UsageProfile | undefined,
 ): Promise<number> {
   if (beforePath === undefined || afterPath === undefined) {
     process.stderr.write(`stantal: manifest needs two files — a before and an after.\n\n${USAGE}\n`);
@@ -1423,6 +1644,7 @@ async function runManifest(
       ...(values["fields-at"] !== undefined ? { fieldsKey: values["fields-at"] } : {}),
       ...(excludeWhen.length > 0 ? { excludeWhen } : {}),
       ...(repo === undefined ? {} : { repo }),
+      ...(usage === undefined ? {} : { usage }),
       ...(behaviour === undefined ? {} : { behaviour }),
     });
 
@@ -1593,6 +1815,20 @@ model through Vertex AI and draw on those credits instead.
   );
 }
 
+/**
+ * Which directory Layer 3 reads.
+ *
+ * `--repo` wins, then `--directory`, then the working directory. The middle
+ * step is the one that was missing, and it was missing in the direction that
+ * matters: auditing another checkout from here read that project's
+ * dependencies and scanned this repository for reach, so every finding came
+ * back `not_a_dependency` — an evidenced "nothing reaches you", produced by
+ * looking in the wrong place. Found by running the audit on a real application.
+ */
+export function repoRootFor(values: { repo?: string | undefined; directory?: string | undefined }): string {
+  return values.repo ?? values.directory ?? ".";
+}
+
 export function applyReplay(env: NodeJS.ProcessEnv): void {
   env["STANTAL_JUDGE_CACHE"] = "replay";
   env["STANTAL_BEHAVIOUR_CACHE"] = "replay";
@@ -1618,6 +1854,7 @@ async function runAudit(
     directory?: string | undefined;
     concurrency?: number | undefined;
     repo?: RepoSource | undefined;
+    usage?: UsageProfile | undefined;
     out?: string | undefined;
   },
   judge: Judge | null,
@@ -1635,6 +1872,7 @@ async function runAudit(
     registry: pacoteRegistry(),
     judge,
     ...(values.repo === undefined ? {} : { repo: values.repo }),
+    ...(values.usage === undefined ? {} : { usage: values.usage }),
     ...(values.cache !== undefined ? { cacheRoot: values.cache } : {}),
     ...(values.out !== undefined ? { testDir: values.out } : {}),
     ...(values.concurrency !== undefined ? { concurrency: values.concurrency } : {}),
@@ -1665,13 +1903,21 @@ function renderAudit(result: AuditResult, verdict: ReturnType<typeof auditVerdic
   const out: string[] = ["", `  ${bold("stantal")}  ${dim(result.directory)}`, ""];
 
   if (result.entries.length === 0) {
-    out.push(
-      `  ${dim(`${result.declared} dependency/ies, none of which hand a model tools`)}`,
-      "",
-      `  ${green("Nothing here can be affected by contract drift.")}`,
-      `  ${dim("A normal result. It is not a claim that every dependency was readable.")}`,
-      "",
-    );
+    out.push(`  ${dim(`${result.declared} dependency/ies, none of which hand a model tools`)}`, "");
+    if (result.authored.length === 0) {
+      out.push(
+        `  ${green("Nothing here can be affected by contract drift.")}`,
+        `  ${dim("A normal result. It is not a claim that every dependency was readable.")}`,
+        "",
+      );
+      return out.join("\n");
+    }
+    // Not clean, and the difference matters: no dependency hands a model tools,
+    // and this repository writes a contract of its own. Saying "nothing here
+    // can be affected" would be false about the one that can. The plan is
+    // printed too — a listing with no next step leaves the reader to work out
+    // what to do about it, which is the job this command exists to do.
+    out.push(...renderAuthored(result), "", ...renderSteps(result));
     return out.join("\n");
   }
 
@@ -1686,17 +1932,50 @@ function renderAudit(result: AuditResult, verdict: ReturnType<typeof auditVerdic
 
   for (const entry of result.entries) out.push(...renderAuditEntry(entry));
 
-  const steps = nextSteps(result);
-  if (steps.length > 0) {
-    out.push(`  ${bold("DO THIS")}`);
-    steps.forEach((step, index) => {
-      out.push(`    ${index + 1}. ${step.action}`);
-      if (step.why !== null) out.push(`       ${dim(step.why)}`);
-    });
-    out.push("");
-  }
+  if (result.authored.length > 0) out.push(...renderAuthored(result), "");
 
+  out.push(...renderSteps(result));
   return out.join("\n");
+}
+
+function renderSteps(result: AuditResult): string[] {
+  const steps = nextSteps(result);
+  if (steps.length === 0) return [];
+  const out = [`  ${bold("DO THIS")}`];
+  steps.forEach((step, index) => {
+    out.push(`    ${index + 1}. ${step.action}`);
+    if (step.why !== null) out.push(`       ${dim(step.why)}`);
+  });
+  out.push("");
+  return out;
+}
+
+/**
+ * The contracts this repository writes, listed beside the ones it installs.
+ *
+ * Listed, not judged. Comparing one needs a baseline, and taking that snapshot
+ * is a write. What this can say without writing anything is that the file
+ * exists, how much of a contract is in it, and whether anything watches it.
+ */
+function renderAuthored(result: AuditResult): string[] {
+  const unwatched = result.authored.filter((c) => c.baseline === null).length;
+  const out: string[] = [
+    `  ${bold(String(result.authored.length))} contract(s) written by this repository ${dim(
+      unwatched === 0 ? "all with a baseline" : `${unwatched} with no baseline`,
+    )}`,
+  ];
+  for (const contract of result.authored.slice(0, 6)) {
+    out.push(
+      `    ${contract.baseline === null ? yellow("unwatched") : green("watched  ")}  ${contract.catalog}  ${dim(
+        `${contract.tools} tool(s)${contract.sources.length > 1 ? ` + ${contract.sources.length - 1} document(s)` : ""}`,
+      )}`,
+    );
+  }
+  if (result.authored.length > 6) out.push(`    ${dim(`... and ${result.authored.length - 6} more`)}`);
+  for (const note of result.authoredNotes.slice(0, 3)) {
+    out.push(`    ${yellow("note")}  ${note.where} ${dim(note.detail)}`);
+  }
+  return out;
 }
 
 function renderAuditEntry(entry: AuditEntry): string[] {
@@ -1721,7 +2000,7 @@ function renderAuditEntry(entry: AuditEntry): string[] {
       const first = blast.reaches[0];
       const more = blast.reaches.length - 1;
       out.push(
-        `    ${red(`reaches your code in ${blast.reaches.length} place(s)`)}  ${dim(
+        `    ${red(`reaches you in ${blast.reaches.length} place(s)`)}  ${dim(
           `${first?.evidence}${more > 0 ? ` and ${more} more` : ""}`,
         )}`,
       );
@@ -1734,7 +2013,7 @@ function renderAuditEntry(entry: AuditEntry): string[] {
         )}`,
       );
     } else if (blast !== null && canClaimUnaffected(blast)) {
-      out.push(`    ${green("nothing here reaches your code")}  ${dim(`${total} finding(s) in the package`)}`);
+      out.push(`    ${green("nothing here reaches you")}  ${dim(`${total} finding(s) in the package`)}`);
     }
   } else if (entry.note !== null) {
     // An unreachable dependency is painted like a gap, never like a pass. This
@@ -1816,6 +2095,15 @@ function nextSteps(result: AuditResult): NextStep[] {
     });
   }
 
+  const unwatched = result.authored.filter((c) => c.baseline === null);
+  if (unwatched.length > 0) {
+    const tools = unwatched.reduce((n, c) => n + c.tools, 0);
+    steps.push({
+      action: "stantal snapshot --save",
+      why: `${tools} tool(s) in ${unwatched.length} contract(s) this repo writes have nothing to compare against — a regeneration changes them silently`,
+    });
+  }
+
   for (const entry of result.entries) {
     if (!isUnreachable(entry)) continue;
     steps.push({
@@ -1842,6 +2130,7 @@ async function runWatch(
     directory?: string | undefined;
     concurrency?: number | undefined;
     repo?: RepoSource | undefined;
+    usage?: UsageProfile | undefined;
     out?: string | undefined;
     write?: boolean | undefined;
     text?: boolean | undefined;
@@ -1856,6 +2145,7 @@ async function runWatch(
     registry: pacoteRegistry(),
     judge,
     ...(values.repo === undefined ? {} : { repo: values.repo }),
+    ...(values.usage === undefined ? {} : { usage: values.usage }),
     ...(values.cache !== undefined ? { cacheRoot: values.cache } : {}),
     ...(values.out !== undefined ? { testDir: values.out } : {}),
     ...(values.concurrency !== undefined ? { concurrency: values.concurrency } : {}),
@@ -1916,6 +2206,9 @@ export async function main(argv: readonly string[]): Promise<number> {
         "exclude-when": { type: "string", multiple: true },
         repo: { type: "string" },
         all: { type: "boolean" },
+        save: { type: "boolean" },
+        wire: { type: "boolean" },
+        traces: { type: "string" },
         "emit-patch": { type: "boolean" },
         write: { type: "boolean" },
         text: { type: "boolean" },
@@ -2046,8 +2339,47 @@ GEMINI_API_KEY). Continuing without Layer 2.
   // the effect of the old default was that the CI path answered "does this
   // reach you" while the path a person actually types did not. `--repo none`
   // turns it off; `--repo <dir>` still points it somewhere else.
-  const repoArg = values.repo ?? ".";
+  //
+  // Unset, it follows `--directory`, not the working directory. Found by
+  // running the audit on a real application from another checkout: the
+  // dependencies were read from that project and the reach was scanned here, so
+  // every finding came back "not a declared dependency" — an *evidenced* claim
+  // that nothing reaches you, produced by looking in the wrong repository. That
+  // is the one mistake this layer must never make, and it is the same shape as
+  // the `pin --directory` bug: a flag that moves half the command.
+  const repoArg = repoRootFor(values);
   const repo = repoArg === "none" ? undefined : fsRepoSource(repoArg);
+
+  // Traces are read once, here, and handed to whichever command runs. Reading
+  // them is local and free: a file the user already has, parsed offline, with
+  // no exporter, no endpoint and no credential.
+  let usage: UsageProfile | undefined;
+  if (values.traces !== undefined) {
+    try {
+      usage = readTraces(readFileSync(values.traces, "utf8"), values.traces);
+    } catch (error) {
+      // Exit 2, never a verdict. A trace file we could not open is a gap, and
+      // continuing without it would silently produce the weaker answer under
+      // the stronger flag.
+      process.stderr.write(
+        `stantal: cannot read ${values.traces}: ${error instanceof Error ? error.message : String(error)}` + "\n",
+      );
+      return 2;
+    }
+    for (const note of usage.notes) process.stderr.write(`stantal: ${note}` + "\n");
+    const used = ranked(usage);
+    if (used.length > 0) {
+      // On stderr, so `--json` stays pipeable. Worth saying out loud because it
+      // is the one number that prices the traces: a window with three calls in
+      // it supports a much smaller claim than one with three thousand.
+      process.stderr.write(
+        `  ${usage.spans} span(s), ${used.length} tool(s) called: ${used
+          .slice(0, 5)
+          .map((u) => `${u.tool} x${u.calls}`)
+          .join(", ")}` + "\n",
+      );
+    }
+  }
 
   // No subcommand and no package: the question somebody standing in a
   // repository actually has. This is the default because remembering a package
@@ -2078,18 +2410,23 @@ GEMINI_API_KEY). Continuing without Layer 2.
         ...(values.directory === undefined ? {} : { directory: values.directory }),
         ...(values.out === undefined ? {} : { out: values.out }),
         ...(repo === undefined ? {} : { repo }),
+        ...(usage === undefined ? {} : { usage }),
         ...(concurrency === undefined ? {} : { concurrency }),
       },
       judge,
     );
   }
 
+  if (positionals[0] === "snapshot") {
+    return runSnapshot(positionals[1] ?? values.directory ?? ".", values, judge);
+  }
+
   if (positionals[0] === "check") {
-    return runCheck(positionals[1], values, judge, behaviour, repo);
+    return runCheck(positionals[1], values, judge, behaviour, repo, usage);
   }
 
   if (positionals[0] === "manifest") {
-    return runManifest(positionals[1], positionals[2], values, judge, behaviour, repo);
+    return runManifest(positionals[1], positionals[2], values, judge, behaviour, repo, usage);
   }
 
   if (positionals[0] === "mcp") {
@@ -2126,6 +2463,7 @@ GEMINI_API_KEY). Continuing without Layer 2.
       ...(values.cache !== undefined ? { cacheRoot: values.cache } : {}),
       ...(values.surface !== undefined ? { subpaths: values.surface } : {}),
       ...(repo === undefined ? {} : { repo }),
+      ...(usage === undefined ? {} : { usage }),
     });
 
     process.stdout.write(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : render(report));
