@@ -318,7 +318,7 @@ export class ModuleGraph {
   private local(module: ParsedModule, name: string, depth: number, seen: Set<string>): unknown {
     if (depth <= 0) return UNRESOLVED;
 
-    const key = `${module.path} ${name}`;
+    const key = `${module.path}\u0000${name}`;
     if (seen.has(key)) return UNRESOLVED; // a cycle; no value exists to read
     seen.add(key);
 
@@ -375,7 +375,7 @@ export class ModuleGraph {
   ): { node: AnyNode; module: ParsedModule } | null {
     if (depth <= 0) return null;
 
-    const key = `node ${module.path} ${name}`;
+    const key = `node\u0000${module.path}\u0000${name}`;
     if (seen.has(key)) return null; // a cycle; there is no node to read
     seen.add(key);
 
