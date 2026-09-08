@@ -11,6 +11,151 @@ upgrade needs a full re-run.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-08
+
+Two halves. One is the provider side: the check a package author can put inside
+their own CLI, so it runs on real consumer code without anyone sending them
+their repository. The other is a reader that speaks the protocol instead of
+reading files, and the first thing it did was catch this tool reporting `clean`
+on a package it had not read.
+
+**Read the first item under Fixed before upgrading.** A comparison that used to
+exit `0` can now exit `2`. That is the release being right where it was
+previously wrong, and it can still turn a green CI job red.
+
+### Added
+
+- **`stantal doctor <package>`** — one package, in the repository that installed
+  it. Every other command needs something you already know: a package name and
+  two versions. Nobody knows those before something has broken. A **provider**
+  knows exactly one thing, their own name, so this takes that, works out the
+  pair itself, and reads the repository it is standing in. It is a narrowing and
+  not a second implementation: the pair goes through the same `buildReport` the
+  three-argument form uses, so the two cannot disagree. `--against <version>`
+  judges a named release instead of the newest.
+
+  The work is in the four ways it finds nothing to say, because a provider's CLI
+  runs in repositories that have nothing to do with them. `not-a-dependency`,
+  `not-installed` and `no-contract` report `not-applicable` and **exit 0** —
+  none of them is the user's fault, and a postinstall must not fail the installs
+  of people who are not affected. `unreachable` is `unreadable` and exits 2.
+  **None of the four is ever `clean`**: a provider must not be able to count a
+  repository they never measured.
+- **`doctor --summary` and `doctor --send <url>`** — the bounded payload a
+  provider's own tool sends home, and the disclosure printed before it goes.
+  `--publish` answers what may leave when *you* forward a verdict you have read.
+  This is a narrower question, because the person running it ran somebody else's
+  CLI and may not have read anything.
+
+  > The provider's own names may go, because they are already public. Nothing
+  > read out of your files may go, ever.
+
+  Tool names, parameter names, rule names and versions all sit in a tarball
+  anyone can `npm pack`. A file path, a line number or a line of your source
+  exists only on your machine. The payload is **rebuilt field by field**, so a
+  field added to the report next year is private until somebody puts it there on
+  purpose, and the disclosure is rendered from the payload itself so the two
+  cannot drift. **No default address and no environment variable**: a provider
+  embeds this with the URL written into their own command, where you can read it.
+- **`stale_quote`, a sixth kind of reach** — your own prompt still quotes a
+  sentence the newer contract deleted. Someone copies a line out of a tool
+  description into a system prompt; the provider rewrites the description and
+  drops it; the prompt now instructs a model about behaviour the contract no
+  longer describes. Both halves of the mismatch are prose, so nothing else in a
+  toolchain can see it. It is a **verbatim** match on a normalised sentence, with
+  a floor of 40 characters and 6 words — under that a match is an accident being
+  reported as evidence. `.md`, `.mdx`, `.txt`, `.mdc` and `.prompt` files are now
+  read, **for quotes only**: a README naming a tool is documentation, not a line
+  that stops working.
+- **`stantal exposure <package>`** — a release-history walk crossed with npm's
+  public per-version download counts. How much of an installed base is sitting on
+  a release that carries a finding, with no access to any user and nothing of
+  ours in the path. Every install is counted whether or not anyone ran anything,
+  so it is a census rather than a survey, and the caveat prints every time. A
+  version the walk did not cover counts as **neither**, and no installs gives no
+  share rather than a zero.
+- **`stantal live <server> [<server>]`** — the contract a running MCP server
+  actually hands out. stdio for a command, Streamable HTTP for a URL, SSE as the
+  fallback. It reaches the two things no static reader ever will: a server that
+  builds its tools at run time, and a server that is not a package at all. Two
+  targets compares them; one target with `--emit <file>` writes what that server
+  offers today, so a baseline is an ordinary committed file and the next
+  comparison is `stantal manifest`.
+
+  **It only ever contacts what you name.** Nothing turns a package name into
+  `npx -y name@version`, which is why this is its own command rather than a flag
+  on the audit or the history walk — there, one flag would start a hundred
+  strangers' servers on your machine.
+- **`check_release` and `compare_manifests` on the MCP server**, which now
+  registers seven tools. The first five were all consumer-side, so a provider who
+  connected was briefed about the half of the product they care about least.
+  `AGENTS.md` gained a provider section, and the trigger is read rather than
+  asked: the same extractor a consumer would use is pointed at this project's own
+  build, and both a public name and a readable tool set are required.
+- **`Report.breaks` now has a prose half.** It joined a breaking structural
+  change to a line that names it. It now also joins a deleted sentence to a file
+  that still contains it. Structural severity is not the gate for the second: a
+  `guidance_removed` finding breaks no client, and your own copy of the deleted
+  sentence is exactly why it belongs at the top anyway.
+- The library surface gains the provider path — `doctorPackage`,
+  `doctorSummary`, `readLiveServer`, `exposureOf`, `buildSurfacePairReport` and
+  their types. Embedding is the point of `doctor`, and a provider who has to
+  parse our stdout is one release away from us breaking them.
+
+### Fixed
+
+- **A package whose entry point defers to another file no longer reports
+  `clean`.** Found by pointing the new live reader and the static reader at the
+  same package and noticing they disagreed: `@modelcontextprotocol/server-everything`
+  returned ten tools live, and two of its versions compared as **`clean`** with
+  nothing read on either side.
+
+  Its entry point is a 36-line dispatcher whose whole body is
+  `switch (argv[2]) { case "stdio": await import("./stdio.js") ... }`. No static
+  imports, so no descriptors were found, so the reader recorded `no_descriptors`
+  — an *evidenced* absence, meaning "we looked and there are none". Both sides
+  absent compares as no surface, and no surface on both sides is clean.
+
+  **An entry that hands off to a local file we did not read is not evidence of
+  absence.** That pair now reports `unreadable`, naming the line it stopped at.
+  Narrow on purpose: same-package relative specifiers only, only ones that
+  resolve to a file the package actually ships, and only where nothing at all was
+  found. The published backfill number did not move — 168 findings, 145 silent,
+  unchanged.
+- **A server that does not advertise the `tools` capability is read as having no
+  tools, rather than as unreachable.** It said so during the handshake, which is
+  an answer and not a failure to get one.
+
+### Changed
+
+- `SurfaceAbsenceReason` gains `server_unreachable`, which is **unevidenced**. A
+  live read fails for reasons that have nothing to do with the contract — a
+  missing key, a cold download, a URL that moved — and an empty contract compares
+  as every tool removed. `ReachKind` gains `stale_quote`. Both are exported
+  types, so an exhaustive switch over either needs a new case.
+- `--publish` still has no built-in address, and now there is one to pass:
+  [stantal.cloud](https://stantal.cloud) runs a host that renders the report
+  rather than accepting a page, so the only thing it can serve is a verdict.
+  Pass it, or set `STANTAL_VERDICT_HOST`.
+- The verdict host under `service/` also accepts the doctor summary at `POST /s`.
+  It **rebuilds** the payload field by field rather than filtering it, so a field
+  a newer client adds is dropped rather than stored — the same rule the CLI
+  builds it with, applied again at the other end, because a boundary only one end
+  enforces is enforced by whichever end has the bug. A leak is refused and an
+  unknown field is dropped, which is a deliberate difference: a path in a named
+  field means the sender has a bug, and quietly cleaning up after it hides that.
+
+### Known limitations
+
+- **The summary endpoint is unauthenticated.** Submissions are content-addressed,
+  so the same machine sending the same answer twice writes one record rather than
+  two, but that does not make an opted-in sample representative. Nothing counted
+  there may be presented as a measurement of an installed base. `stantal exposure`
+  is the number that can be, and the two must never be multiplied together.
+- A `bin:` surface still gets no mount, so no `model_consumer` reach. An MCP
+  server is started by client configuration rather than by an import.
+
+
 ## [0.5.0] - 2026-08-29
 
 Every command used to need something you already knew: a package name, two
@@ -474,7 +619,8 @@ These are properties of the tool, not features, and breaking one is a bug:
   `.omit()`, `.partial()` and `.extend()` produce a note carrying a path instead
   of a contract nobody can trust.
 
-[Unreleased]: https://github.com/hellunleash/stantal/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/hellunleash/stantal/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/hellunleash/stantal/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/hellunleash/stantal/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/hellunleash/stantal/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/hellunleash/stantal/compare/v0.2.0...v0.3.0
