@@ -1,6 +1,7 @@
 import semver from "semver";
 import type { PackageJson } from "../extract/package-source.js";
 import { isProseFile, type RepoSource } from "./repo.js";
+import type { Ecosystem } from "../contract/types.js";
 import { compareReaches, type BlastNote, type BlastResult, type Filtered, type Reach } from "./taxonomy.js";
 import { GENERATED_MARKER } from "../emit/vitest.js";
 import { callsOf, type UsageProfile } from "../usage/otel.js";
@@ -23,6 +24,14 @@ export type BlastTarget = {
   /** Set when the finding is about one parameter. */
   param?: string;
   /**
+   * Other strings that identify this same operation in the consumer's source.
+   *
+   * Carried down from the contract rather than derived here, for the same
+   * reason the deleted sentences are: only the reader knows what the operation
+   * is called anywhere other than in its own contract.
+   */
+  aliases?: readonly string[];
+  /**
    * Sentences the newer version of the contract deleted.
    *
    * Handed down rather than derived here, because only Layer 1 knows what the
@@ -36,6 +45,24 @@ export type BlastOptions = {
   repo: RepoSource;
   /** The package the findings are about. */
   package: string;
+  /**
+   * How this contract is distributed, which decides whether the manifest has
+   * anything to say about it.
+   *
+   * For a package the manifest is the first and strongest filter: if the
+   * project does not depend on it, nothing in it can reach them, and that is an
+   * evidenced answer.
+   *
+   * For an HTTP API the same reasoning is simply wrong. Nobody declares
+   * Stripe's API in a `package.json` — they install an SDK under some other
+   * name, or they call `fetch`. Applying the dependency gate there filtered
+   * every finding as `not_a_dependency` before a single file was read, which
+   * is a confident claim of "nothing reaches you" about a repository that was
+   * never scanned. Found by pointing this at a real Stripe consumer.
+   *
+   * Defaults to `npm`, so every existing caller keeps the behaviour it had.
+   */
+  ecosystem?: Ecosystem;
   /**
    * Versions the findings are present in.
    *
@@ -174,6 +201,32 @@ function quoteLines(text: string, needle: string): number[] {
 }
 
 /**
+ * Every line where an alias appears, bounded so a prefix is not a match.
+ *
+ * `wordLines` cannot be reused. It wraps the pattern in `\-b` at both ends,
+ * and an alias routinely starts with a character that is not a word character:
+ * `/v1/account_sessions` starts with a slash, `.charges` with a dot. A leading
+ * boundary there can never match, so every path would be silently invisible.
+ *
+ * The trailing boundary is the one that matters and it is kept. Without it
+ * `.billing` matches inside `.billingPortal`, which was measured against real
+ * consumer code: it pulled in twenty-five billing endpoints from a project that
+ * only touches the portal.
+ */
+function aliasLines(text: string, alias: string): number[] {
+  const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const lead = /^\w/.test(alias) ? "\\b" : "";
+  const tail = /\w$/.test(alias) ? "\\b" : "";
+  const pattern = new RegExp(`${lead}${escaped}${tail}`);
+
+  const out: number[] = [];
+  text.split("\n").forEach((line, i) => {
+    if (pattern.test(line)) out.push(i + 1);
+  });
+  return out;
+}
+
+/**
  * Which of a consumer's code a set of findings actually reaches.
  *
  * Reads only: nothing is written, nothing is executed, and nothing leaves the
@@ -182,6 +235,9 @@ function quoteLines(text: string, needle: string): number[] {
  */
 export function blastRadius(options: BlastOptions): BlastResult {
   const { repo, package: pkg, affectedVersions, targets, usage } = options;
+  // An HTTP API is not something a manifest can declare, so the whole
+  // dependency question is skipped rather than answered wrongly.
+  const distributed = (options.ecosystem ?? "npm") !== "http";
 
   const reaches: Reach[] = [];
   const filtered: Filtered[] = [];
@@ -189,8 +245,11 @@ export function blastRadius(options: BlastOptions): BlastResult {
 
   // --- is the package even here, and does the range admit the defect? -------
 
-  const manifest = repo.packageJson();
-  if (manifest === null) {
+  const manifest = distributed ? repo.packageJson() : undefined;
+  if (manifest === undefined) {
+    // Nothing to say. Not a gap either: there is no manifest entry that could
+    // have existed, so silence here narrows nothing.
+  } else if (manifest === null) {
     // No manifest is a gap, never "not a dependency". A workspace member, a
     // Deno project, or a repo we were pointed at one directory too deep all
     // land here, and all of them may still use the package.
@@ -247,11 +306,13 @@ export function blastRadius(options: BlastOptions): BlastResult {
 
   const importedSubpaths = new Map<string, string>(); // subpath -> evidence
   const toolFiles = new Map<string, Array<{ path: string; line: number }>>();
+  const aliasFiles = new Map<string, Array<{ path: string; line: number }>>();
   const quoteFiles = new Map<string, Array<{ path: string; line: number }>>();
   let files = 0;
   let bytes = 0;
 
   const toolNames = [...new Set(targets.map((t) => t.tool))];
+  const aliasNames = [...new Set(targets.flatMap((t) => t.aliases ?? []))];
 
   // Deduplicated and normalised once, because two findings on one tool often
   // carry the same deleted sentence and the search is the expensive part.
@@ -322,6 +383,14 @@ export function blastRadius(options: BlastOptions): BlastResult {
         const rows = toolFiles.get(tool) ?? [];
         rows.push({ path, line });
         toolFiles.set(tool, rows);
+      }
+    }
+
+    for (const alias of aliasNames) {
+      for (const line of aliasLines(text, alias)) {
+        const rows = aliasFiles.get(alias) ?? [];
+        rows.push({ path, line });
+        aliasFiles.set(alias, rows);
       }
     }
   }
@@ -397,6 +466,25 @@ export function blastRadius(options: BlastOptions): BlastResult {
         evidence: `${hit.path}:${hit.line}`,
         detail: `names \`${target.tool}\``,
       });
+    }
+
+    // The consumer's own name for this operation. Reported before the prose
+    // match only in file order; both are their code naming the thing.
+    for (const alias of target.aliases ?? []) {
+      // An exact path identifies one operation. A resource name identifies the
+      // family it belongs to, and saying so is the difference between a claim
+      // somebody can act on and one they have to work out.
+      const exact = alias.startsWith("/") || /^[A-Z]+ \//.test(alias);
+      for (const hit of aliasFiles.get(alias) ?? []) {
+        reaches.push({
+          kind: "endpoint_reference",
+          target: target.label,
+          evidence: `${hit.path}:${hit.line}`,
+          detail: exact
+            ? `names \`${alias}\``
+            : `uses the \`${alias.replace(/^\./, "")}\` resource this operation belongs to`,
+        });
+      }
     }
 
     // Word for word, and the strongest thing this layer can say about prose.

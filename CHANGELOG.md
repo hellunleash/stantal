@@ -11,6 +11,84 @@ upgrade needs a full re-run.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-08
+
+An HTTP API has no package, no version to bump and no type-checker. Until this
+release, pointing Stantal at one produced a full report about the API and
+**nothing at all** about the code calling it, because the contract and the code
+never use the same name for an operation.
+
+**Read the first item under Fixed before upgrading.** A comparison of two API
+specs against a repository can now report breaks where it previously reported
+none. That is the release being right where it was silently wrong, and it can
+still turn a green CI job red.
+
+### Added
+
+- **Operations now carry the names your code actually uses.** `Tool` gains an
+  optional `aliases`, and the OpenAPI reader fills it with the path, the
+  `METHOD /path` pair, and the resource identifiers from the path. Stripe calls
+  one operation `PostAccountSessions`; no consumer contains that string. They
+  write `/v1/account_sessions`, or `stripe.accountSessions.create`. Without the
+  other names there was nothing to match on.
+
+  The distinctiveness rule was measured against Stripe's real specification and
+  its real generated SDK rather than assumed. A **multi-word** segment
+  camel-cases into something no prose contains, so `account_sessions` becomes
+  `accountSessions` and is emitted bare. A **single-word** segment is an
+  ordinary English word — `charges` matched a comment reading "this charges the
+  customer" — so it is emitted only as `.charges`, which is a property access.
+  With that rule a control comment matches none of Stripe's 594 operations.
+- **`endpoint_reference`, a sixth kind of reach.** Your file names the endpoint,
+  or the resource it belongs to. **The two are not equally strong and the reach
+  says which it found**: a path match identifies one operation, while a resource
+  match means somebody who calls one charges endpoint matches every charges
+  endpoint. The second is weaker and still worth reporting, because it is the
+  line you have to open and there is no better one.
+- Aliases are read from a serialized manifest too, so a host that writes its own
+  tool list can supply them.
+
+### Fixed
+
+- **An API finding is no longer filtered out before the scan runs.** Layer 3
+  opened by asking whether the manifest declares the package, and answering "no"
+  ended the scan with every finding marked `not_a_dependency`. That is right for
+  a package and wrong for an HTTP API: nobody declares Stripe's API in a
+  `package.json`. The result was a confident "nothing reaches you" about a
+  repository that was never read — the one claim this layer must never make.
+
+  `blastRadius` now takes the ecosystem and skips the dependency question
+  entirely for an `http` contract. Not as a gap, because there is no manifest
+  entry that could have existed, so its absence narrows nothing.
+
+  Found by pointing the reader at a real Stripe consumer. An earlier run had
+  passed only because the fixture happened to depend on a package with the same
+  name as the label being compared.
+- **A break on an endpoint no longer claims your line names the operation.**
+  `breaks` phrased every entry as "and this line names it", which is false for a
+  resource match. It now carries the reach's own wording, so the section keeps
+  the property that every entry survives being opened.
+
+### Changed
+
+- `ReachKind` gains `endpoint_reference`. It is an exported type, so an
+  exhaustive switch over it needs a new case.
+- `Tool` gains an optional `aliases`. **Never defaulted to `[]`**, because
+  `JSON.stringify` drops an undefined property but keeps an empty array, and an
+  empty array would change the bytes of every contract already recorded in a
+  cassette.
+- `blastRadius` accepts an optional `ecosystem`, defaulting to `npm`, so an
+  existing caller keeps the behaviour it had.
+
+### Notes
+
+Measured on Stripe's public specification, API version `2026-07-29.dahlia`
+against `2026-08-26.dahlia`, 8 MB per side: **594 operations read on each side
+in 0.9 seconds**, 44 optional parameters added, **5 new endpoints**, **3
+required parameters added**, 2 enums widened. The npm backfill headline is
+unchanged at 168 findings, 145 silent.
+
+
 ## [0.6.0] - 2026-09-08
 
 Two halves. One is the provider side: the check a package author can put inside
@@ -632,7 +710,8 @@ These are properties of the tool, not features, and breaking one is a bug:
   `.omit()`, `.partial()` and `.extend()` produce a note carrying a path instead
   of a contract nobody can trust.
 
-[Unreleased]: https://github.com/hellunleash/stantal/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/hellunleash/stantal/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/hellunleash/stantal/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/hellunleash/stantal/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/hellunleash/stantal/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/hellunleash/stantal/compare/v0.3.0...v0.4.0

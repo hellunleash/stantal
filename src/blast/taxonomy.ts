@@ -79,6 +79,24 @@ export type ReachKind =
   /** The repo names an affected tool. */
   | "tool_reference"
   /**
+   * The repo names the endpoint this operation is, or the resource it belongs
+   * to.
+   *
+   * The kind that makes an HTTP API reachable at all. Every other reach here
+   * assumes the contract and the code agree on what a thing is called, which is
+   * true for a package — the tool is `tavily-search` and the consumer writes
+   * `tavily-search` — and never true for an API. Stripe names an operation
+   * `PostAccountSessions`; no consumer contains that string. They write
+   * `/v1/account_sessions`, or `stripe.accountSessions.create`.
+   *
+   * **Two strengths under one kind, and the detail says which.** A match on the
+   * path is exact and identifies one operation. A match on a resource name says
+   * the consumer uses that resource, so somebody who calls one charges endpoint
+   * matches every charges endpoint. The second is weaker and still worth having:
+   * it is the line they have to open, because there is no better one.
+   */
+  | "endpoint_reference"
+  /**
    * The repo names an affected parameter, in a file that already names its
    * tool.
    *
@@ -188,10 +206,13 @@ const RANK: Record<ReachKind, number> = {
   dependency: 2,
   surface_import: 3,
   tool_reference: 4,
-  param_reference: 5,
+  // Beside `tool_reference`, because it is the same claim in the vocabulary an
+  // API uses: your own code names the thing that changed.
+  endpoint_reference: 5,
+  param_reference: 6,
   // Last: real, and the least checkable thing here. A consumer scanning the
   // list wants the lines naming a tool before the line that only mounts one.
-  model_consumer: 6,
+  model_consumer: 7,
 };
 
 export function compareReaches(a: Reach, b: Reach): number {

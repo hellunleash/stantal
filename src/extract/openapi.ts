@@ -75,6 +75,54 @@ function operationName(method: string, path: string, operation: Json): string {
 }
 
 /**
+ * The other names this operation goes by in somebody's source.
+ *
+ * `operationId` is what the contract calls it and what the diff compares. It is
+ * almost never what a consumer writes. Stripe calls one operation
+ * `PostAccountSessions`; a consumer writes `/v1/account_sessions` or
+ * `stripe.accountSessions.create`. Without these, Layer 3 finds nothing on any
+ * HTTP API, which is exactly where nothing else is looking either.
+ *
+ * Two kinds come out, and they are not equally strong. **The path is exact.**
+ * `/v1/account_sessions` does not occur by accident and identifies one
+ * operation. **A resource name is not**: it identifies the resource the
+ * operation belongs to, so a consumer who calls one charges endpoint matches
+ * every charges endpoint. Both are worth emitting and the reach says which one
+ * matched, because "you call this exact endpoint" and "you use this resource"
+ * are different claims.
+ *
+ * The distinctiveness rule was measured against Stripe's real spec and its real
+ * generated SDK, not assumed:
+ *
+ * - A **multi-word** segment camel-cases into something no prose contains.
+ *   `account_sessions` becomes `accountSessions`. Emitted bare.
+ * - A **single-word** segment is an ordinary English word. `charges` matched a
+ *   comment saying "this charges the customer". Emitted only in its
+ *   dot-prefixed form, `.charges`, which is a property access rather than
+ *   prose. With that rule a control comment matches zero of 594 operations.
+ *
+ * Version prefixes and path parameters are dropped: `v1` and `{charge}` name
+ * nothing a consumer would write.
+ */
+function aliasesFor(method: string, path: string): string[] {
+  const out = new Set<string>([path, `${method.toUpperCase()} ${path}`]);
+
+  for (const segment of path.split("/")) {
+    if (segment.length === 0) continue;
+    if (/^\{.*\}$/.test(segment)) continue;
+    if (/^v\d+$/.test(segment)) continue;
+
+    const camel = segment.replace(/[_-]+(.)/g, (_, c: string) => c.toUpperCase());
+    // Multi-word segments camel-case into something distinctive. Single-word
+    // ones do not, and only earn a place with the dot that makes them a
+    // property access.
+    out.add(camel === segment ? `.${camel}` : camel);
+  }
+
+  return [...out];
+}
+
+/**
  * The prose the model is given.
  *
  * `summary` and `description` joined, because a generator concatenates them and
@@ -168,6 +216,7 @@ export function openApiToolList(root: unknown): unknown[] | null {
         name: operationName(method, path, operation),
         description: prose(operation),
         inputSchema: inputSchemaFor(operation, entry["parameters"], root),
+        aliases: aliasesFor(method, path),
       });
     }
   }

@@ -354,7 +354,9 @@ export function extractFromManifest(options: ManifestExtractOptions): SurfaceRes
   const tools: Tool[] = [];
   for (const { name, record, schemaUnreadable } of merged.values()) {
     if (withheld(record, excludeWhen)) continue;
-    tools.push(toolFrom(name, record["description"], schemaUnreadable ? undefined : schemaOf(record)));
+    tools.push(
+      toolFrom(name, record["description"], schemaUnreadable ? undefined : schemaOf(record), record["aliases"]),
+    );
   }
 
   // Excluding every tool is a fact about the rules the caller supplied, not a

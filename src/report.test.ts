@@ -458,3 +458,90 @@ describe("where a break meets the consumer's own code", () => {
     expect(stale[0]?.detail).toContain("quotes a sentence the newer version deleted");
   });
 });
+
+/**
+ * The RFS's own example, reduced to a fixture.
+ *
+ * An HTTP API has no package, no version to bump and no type-checker. Its
+ * operations are identified by `operationId` in the contract and by a path or
+ * an SDK resource in the consumer's code, and until those were joined Layer 3
+ * returned nothing on every API — the one case where nothing else is looking
+ * either.
+ */
+describe("an API change, met by the code that calls it", () => {
+  const spec = (required: string[]) => ({
+    name: "spec.json",
+    text: JSON.stringify({
+      openapi: "3.1.0",
+      paths: {
+        "/v1/account_sessions": {
+          post: {
+            operationId: "PostAccountSessions",
+            summary: "Create an Account Session",
+            requestBody: {
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    properties: { account: { type: "string" }, components: { type: "string" } },
+                    required,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    }),
+  });
+
+  const apiReport = (repo: RepoSource) =>
+    buildManifestReport({
+      package: "example-api",
+      from: { version: "before", sources: [spec(["account"])] },
+      to: { version: "after", sources: [spec(["account", "components"])] },
+      judge: null,
+      repo,
+    });
+
+  test("joins a new required parameter to an SDK call site", async () => {
+    const report = await apiReport(
+      memoryRepoSource({
+        "package.json": JSON.stringify({ name: "shop" }),
+        "src/billing.ts": "await client.accountSessions.create({ account });\n",
+      }),
+    );
+
+    expect(report.verdict).toBe("structurally-breaking");
+    const hit = report.breaks.find((b) => b.reach === "endpoint_reference");
+    expect(hit?.evidence).toBe("src/billing.ts:1");
+    // Named as a resource match, because that is what it is: the consumer's
+    // code contains the resource, never the operationId.
+    expect(hit?.detail).toContain("resource this operation belongs to");
+  });
+
+  test("joins it to a raw HTTP call by the exact path", async () => {
+    const report = await apiReport(
+      memoryRepoSource({
+        "package.json": JSON.stringify({ name: "shop" }),
+        "src/billing.ts": 'await fetch("https://api.example.com/v1/account_sessions", { method: "POST" });\n',
+      }),
+    );
+
+    const hit = report.breaks.find((b) => b.reach === "endpoint_reference");
+    expect(hit?.detail).toContain("names `/v1/account_sessions`");
+  });
+
+  test("stays silent about a repository that calls something else", async () => {
+    // The section is only worth anything if it can be empty.
+    const report = await apiReport(
+      memoryRepoSource({
+        "package.json": JSON.stringify({ name: "shop" }),
+        "src/billing.ts": "await client.invoices.list();\n",
+      }),
+    );
+
+    expect(report.verdict).toBe("structurally-breaking");
+    expect(report.breaks).toEqual([]);
+  });
+});

@@ -462,3 +462,162 @@ describe("stale_quote", () => {
     expect(kinds.indexOf("stale_quote")).toBeLessThan(kinds.indexOf("tool_reference"));
   });
 });
+
+/**
+ * The reach that makes an HTTP API reachable at all.
+ *
+ * Every other kind here assumes the contract and the consumer's code agree on
+ * what a thing is called. For a package they do. For an API they never do.
+ */
+describe("endpoint_reference", () => {
+  const ENDPOINT: BlastTarget = {
+    label: "PostAccountSessions",
+    surface: "spec.json",
+    tool: "PostAccountSessions",
+    aliases: ["/v1/account_sessions", "POST /v1/account_sessions", "accountSessions"],
+  };
+
+  const CHARGES: BlastTarget = {
+    label: "GetCharges",
+    surface: "spec.json",
+    tool: "GetCharges",
+    aliases: ["/v1/charges", "GET /v1/charges", ".charges"],
+  };
+
+  it("finds a raw HTTP call by its exact path", () => {
+    const result = scan(
+      {
+        "package.json": manifest("^0.24.0"),
+        "src/a.ts": USES,
+        "src/http.ts": 'await fetch("https://api.example.com/v1/account_sessions", { method: "POST" });',
+      },
+      [ENDPOINT],
+    );
+    const hit = result.reaches.find((r) => r.kind === "endpoint_reference");
+    expect(hit?.evidence).toBe("src/http.ts:1");
+    expect(hit?.detail).toContain("names `/v1/account_sessions`");
+  });
+
+  it("finds an SDK call by the resource, and says that is what it found", () => {
+    // The consumer writes `stripe.accountSessions.create`, which contains no
+    // path and no operationId. The resource is all there is, and the detail has
+    // to say so rather than implying the exact endpoint was matched.
+    const result = scan(
+      {
+        "package.json": manifest("^0.24.0"),
+        "src/a.ts": USES,
+        "src/sdk.ts": "await stripe.accountSessions.create({ account });",
+      },
+      [ENDPOINT],
+    );
+    const hit = result.reaches.find((r) => r.kind === "endpoint_reference");
+    expect(hit?.evidence).toBe("src/sdk.ts:1");
+    expect(hit?.detail).toContain("resource this operation belongs to");
+  });
+
+  /**
+   * Measured, not assumed. A substring match pulled twenty-five billing
+   * endpoints into a project that only touches the portal, because `.billing`
+   * sits inside `.billingPortal`.
+   */
+  it("does not match a resource that is only a prefix of another", () => {
+    const BILLING: BlastTarget = {
+      label: "GetBillingAlerts",
+      surface: "spec.json",
+      tool: "GetBillingAlerts",
+      aliases: ["/v1/billing/alerts", ".billing"],
+    };
+    const result = scan(
+      {
+        "package.json": manifest("^0.24.0"),
+        "src/a.ts": USES,
+        "src/sdk.ts": "await stripe.billingPortal.sessions.create({ customer });",
+      },
+      [BILLING],
+    );
+    expect(result.reaches.some((r) => r.kind === "endpoint_reference")).toBe(false);
+  });
+
+  it("does not match an ordinary English word in a comment", () => {
+    // The control that decides whether this reach can be believed at all.
+    const result = scan(
+      {
+        "package.json": manifest("^0.24.0"),
+        "src/a.ts": USES,
+        "src/note.ts": "// this charges the customer and creates an invoice\n",
+      },
+      [CHARGES],
+    );
+    expect(result.reaches.some((r) => r.kind === "endpoint_reference")).toBe(false);
+  });
+
+  it("does not anchor on a prose file", () => {
+    // A README documenting an endpoint is documentation, not a line that stops
+    // working. Same rule as `tool_reference`.
+    const result = scan(
+      {
+        "package.json": manifest("^0.24.0"),
+        "src/a.ts": USES,
+        "docs/api.md": "Call `/v1/account_sessions` to open the dashboard.",
+      },
+      [ENDPOINT],
+    );
+    expect(result.reaches.every((r) => !r.evidence.startsWith("docs/"))).toBe(true);
+  });
+
+  it("says nothing about a target with no aliases", () => {
+    const result = scan({ "package.json": manifest("^0.24.0"), "src/a.ts": USES });
+    expect(result.reaches.some((r) => r.kind === "endpoint_reference")).toBe(false);
+  });
+});
+
+/**
+ * The manifest gate is right for a package and wrong for an API.
+ *
+ * This is the bug that nearly shipped. Applying the dependency check to an HTTP
+ * contract filtered every finding as `not_a_dependency` before one file was
+ * read — a confident "nothing reaches you" about a repository that was never
+ * scanned, which is the exact claim this layer must never make.
+ */
+describe("how a contract is distributed", () => {
+  const ENDPOINT: BlastTarget = {
+    label: "PostAccountSessions",
+    surface: "spec.json",
+    tool: "PostAccountSessions",
+    aliases: ["/v1/account_sessions"],
+  };
+
+  const files = {
+    // A real manifest that quite correctly says nothing about an HTTP API.
+    "package.json": JSON.stringify({ name: "shop", dependencies: { react: "^19.0.0" } }),
+    "src/billing.ts": 'await fetch("https://api.example.com/v1/account_sessions");',
+  };
+
+  it("scans the repo for an http contract, which no manifest can declare", () => {
+    const result = blastRadius({
+      repo: repo(files),
+      package: "example-api",
+      ecosystem: "http",
+      affectedVersions: ["after"],
+      targets: [ENDPOINT],
+    });
+
+    expect(result.reaches.some((r) => r.kind === "endpoint_reference")).toBe(true);
+    // No dependency claim in either direction: there is no manifest entry that
+    // could have existed, so its absence narrows nothing.
+    expect(result.filtered).toEqual([]);
+    expect(result.reaches.some((r) => r.kind === "dependency")).toBe(false);
+  });
+
+  it("still applies the gate to a package, where it is evidence", () => {
+    const result = blastRadius({
+      repo: repo(files),
+      package: "example-api",
+      affectedVersions: ["1.0.0"],
+      targets: [ENDPOINT],
+    });
+
+    expect(result.filtered.map((f) => f.kind)).toEqual(["not_a_dependency"]);
+    expect(result.reaches).toEqual([]);
+  });
+});

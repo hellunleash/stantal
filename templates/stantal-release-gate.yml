@@ -53,7 +53,7 @@ jobs:
         env:
           # Pin the CLI. A new release of ours must not change your gate under
           # you between one pull request and the next.
-          STANTAL_VERSION: "0.6.0"
+          STANTAL_VERSION: "0.7.0"
         run: |
           set -euo pipefail
 

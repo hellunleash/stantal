@@ -109,3 +109,55 @@ describe("an OpenAPI document is a tool contract", () => {
     expect(openApiToolList({ openapi: "3.1.0", paths: {} })).toBeNull();
   });
 });
+
+/**
+ * The names a consumer's source actually contains.
+ *
+ * `operationId` is what the contract calls an operation and it is the one thing
+ * no consumer writes. Every rule below was measured against Stripe's real spec
+ * and its real generated SDK rather than assumed.
+ */
+describe("aliases", () => {
+  const aliasesOf = (spec: unknown, name: string): string[] =>
+    ((openApiToolList(spec) as Array<{ name: string; aliases?: string[] }>).find((t) => t.name === name)
+      ?.aliases ?? []);
+
+  const spec = (path: string) => ({
+    openapi: "3.1.0",
+    paths: { [path]: { post: { operationId: "op", summary: "x" } } },
+  });
+
+  it("always carries the path and the method-and-path pair", () => {
+    // Neither occurs by accident, and a raw HTTP caller contains the first.
+    expect(aliasesOf(spec("/v1/account_sessions"), "op")).toEqual(
+      expect.arrayContaining(["/v1/account_sessions", "POST /v1/account_sessions"]),
+    );
+  });
+
+  it("camel-cases a multi-word resource, which is how an SDK names it", () => {
+    // `stripe.accountSessions.create(...)`. Distinctive on its own.
+    expect(aliasesOf(spec("/v1/account_sessions"), "op")).toContain("accountSessions");
+  });
+
+  it("gives a single-word resource only its dot-prefixed form", () => {
+    // `charges` is an ordinary English word and matched a comment reading
+    // "this charges the customer". `.charges` is a property access.
+    const aliases = aliasesOf(spec("/v1/charges"), "op");
+    expect(aliases).toContain(".charges");
+    expect(aliases).not.toContain("charges");
+  });
+
+  it("drops the version prefix and the path parameters", () => {
+    // `v1` and `{charge}` name nothing a consumer would write.
+    const aliases = aliasesOf(spec("/v1/charges/{charge}/refunds"), "op");
+    expect(aliases).not.toContain(".v1");
+    expect(aliases.some((a) => a.includes("{charge}") && !a.startsWith("/") && !a.startsWith("POST"))).toBe(false);
+    expect(aliases).toContain(".refunds");
+  });
+
+  it("says nothing when there is no resource to name", () => {
+    // A root path has no segments. The path itself is still an alias.
+    const aliases = aliasesOf(spec("/"), "op");
+    expect(aliases).toEqual(["/", "POST /"]);
+  });
+});

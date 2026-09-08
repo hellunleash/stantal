@@ -522,6 +522,10 @@ function confirmedBreaks(report: Report): ConfirmedBreak[] {
     "tool_reference",
     "param_reference",
     "observed_call",
+    // The same claim as `tool_reference`, in the vocabulary an HTTP API uses.
+    // Leaving it out would mean an API change could never break anybody's code,
+    // which is the opposite of true.
+    "endpoint_reference",
   ]);
 
   const out: ConfirmedBreak[] = [];
@@ -553,7 +557,15 @@ function confirmedBreaks(report: Report): ConfirmedBreak[] {
           detail:
             reach.kind === "observed_call"
               ? `${change.note}, and your traces record it being called`
-              : `${change.note}, and this line names it`,
+              : // An endpoint reach already carries the honest phrasing, and it
+                // is the one kind where "this line names it" can be false: a
+                // resource match means the line names the family the operation
+                // belongs to, not the operation. Flattening the two would put
+                // an overstatement in the section whose whole worth is that
+                // every entry survives being opened.
+                reach.kind === "endpoint_reference"
+                ? `${change.note}, and ${reach.detail}`
+                : `${change.note}, and this line names it`,
         });
       }
     }
@@ -637,6 +649,20 @@ type PendingTarget = BlastTarget & { quotes?: string[] };
 function blastTargetsFor(surfaces: readonly SurfaceReport[]): BlastTarget[] {
   const seen = new Map<string, PendingTarget>();
 
+  // Aliases belong to a tool, and a finding names a tool, so they are looked up
+  // once per surface rather than threaded through every caller of `add`.
+  const aliasesByTool = new Map<string, readonly string[]>();
+  for (const s of surfaces) {
+    for (const side of [s.from, s.to]) {
+      if (!isPresent(side)) continue;
+      for (const t of side.contract.tools) {
+        if (t.aliases !== undefined && t.aliases.length > 0) {
+          aliasesByTool.set(`${s.subpath}\u0000${t.name}`, t.aliases);
+        }
+      }
+    }
+  }
+
   const add = (surface: string, tool: string, target: string, quote?: string | null): void => {
     const key = `${surface} ${target}`;
     const existing = seen.get(key);
@@ -652,11 +678,13 @@ function blastTargetsFor(surfaces: readonly SurfaceReport[]): BlastTarget[] {
     // `tool.param` -> the parameter; a bare tool name -> no parameter. Split on
     // the first dot only, so a nested `tool.opts.retries` keeps its path.
     const rest = target.startsWith(`${tool}.`) ? target.slice(tool.length + 1) : undefined;
+    const aliases = aliasesByTool.get(`${surface}\u0000${tool}`);
     seen.set(key, {
       label: target,
       surface,
       tool,
       ...(rest === undefined ? {} : { param: rest }),
+      ...(aliases === undefined ? {} : { aliases }),
       ...(quote === undefined || quote === null ? {} : { quotes: [quote] }),
     });
   };
@@ -729,6 +757,7 @@ function foldReport(input: {
         : blastRadius({
             repo: input.repo,
             package: subject.package,
+            ecosystem: subject.ecosystem,
             affectedVersions: [subject.to],
             targets: blastTargetsFor(surfaces),
             ...(input.usage === undefined ? {} : { usage: input.usage }),

@@ -77,11 +77,34 @@ export const ToolSchema = z.object({
   /** null means the tool ships with no description at all. */
   description: z.string().nullable(),
   params: z.array(ParamSchema),
+  aliases: z.array(z.string()).optional(),
 });
 export type Tool = {
   name: string;
   description: string | null;
   params: Param[];
+  /**
+   * Other strings that identify this same operation in a consumer's code.
+   *
+   * A contract and the code calling it do not always agree on what a thing is
+   * called. For a package they do: the tool is `tavily-search` and the consumer
+   * writes `tavily-search`. For an HTTP API they never do. Stripe names an
+   * operation `PostAccountSessions` and no consumer contains that string —
+   * they write `/v1/account_sessions` or `stripe.accountSessions.create`.
+   * Without the other names, Layer 3 returns nothing on every API, which is
+   * the case where nothing else in a toolchain is looking either.
+   *
+   * **Derived, never authoritative.** The name is what the contract says and is
+   * the only thing the diff compares. An alias is a way to find the operation
+   * in somebody's source, so a wrong one costs a reach nobody can act on and
+   * never a wrong claim about the contract itself.
+   *
+   * **Optional, and never defaulted to `[]`.** `JSON.stringify` drops an
+   * undefined property, so a contract with no aliases serializes byte for byte
+   * as it did before this field existed, and every cassette recorded against
+   * one still matches.
+   */
+  aliases?: string[];
 };
 
 /**

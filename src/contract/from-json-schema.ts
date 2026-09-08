@@ -142,10 +142,20 @@ export function toolFrom(
   name: string,
   description: unknown,
   inputSchema: unknown,
+  aliases?: unknown,
 ): Tool {
+  // Spread rather than assigned, so a descriptor with no aliases produces a
+  // tool with no `aliases` key at all. `JSON.stringify` drops an undefined
+  // property but keeps an empty array, and an empty array here would change the
+  // bytes of every contract ever recorded in a cassette.
+  const named = Array.isArray(aliases)
+    ? [...new Set(aliases.filter((a): a is string => typeof a === "string" && a.length > 0))]
+    : [];
+
   return {
     name,
     description: normalizeDescription(description),
     params: paramsFromInputSchema(inputSchema),
+    ...(named.length === 0 ? {} : { aliases: named }),
   };
 }
