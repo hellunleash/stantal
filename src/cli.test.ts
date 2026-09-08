@@ -751,3 +751,79 @@ describe("repoRootFor", () => {
     expect(repoRootFor({})).toBe(".");
   });
 });
+
+/**
+ * The reach list is grouped by the line, because the line is what a person
+ * opens.
+ *
+ * Reaches are stored per finding, which the join in `breaks` needs. Printed
+ * that way they repeat: one call to an API resource with many changed
+ * operations printed the same sentence against the same line once per
+ * operation. Measured on Stripe, one line of source produced sixteen identical
+ * lines of output. That is not a long answer, it is one answer repeated, and it
+ * is how a section stops being read.
+ */
+describe("the reach list is grouped by line", () => {
+  let dir: string;
+  let stdout: string;
+
+  const spec = (extra: Record<string, unknown>) => ({
+    openapi: "3.1.0",
+    paths: {
+      "/v1/invoices": { get: { operationId: "GetInvoices", summary: "List invoices", ...extra } },
+      "/v1/invoices/{id}": { get: { operationId: "GetInvoice", summary: "Get an invoice", ...extra } },
+      "/v1/invoices/{id}/pay": { post: { operationId: "PayInvoice", summary: "Pay an invoice", ...extra } },
+    },
+  });
+
+  const body = (props: Record<string, unknown>) => ({
+    requestBody: { content: { "application/json": { schema: { type: "object", properties: props } } } },
+  });
+
+  function write(name: string, value: unknown): string {
+    const path = join(dir, name);
+    writeFileSync(path, JSON.stringify(value));
+    return path;
+  }
+
+  beforeEach(() => {
+    stdout = "";
+    dir = mkdtempSync(join(tmpdir(), "stantal-group-"));
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      stdout += String(chunk);
+      return true;
+    });
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("prints one line per place, not one per finding", async () => {
+    const app = mkdtempSync(join(tmpdir(), "stantal-group-app-"));
+    mkdirSync(join(app, "src"), { recursive: true });
+    writeFileSync(join(app, "package.json"), JSON.stringify({ name: "shop" }));
+    // One call, touching one resource that three changed operations belong to.
+    writeFileSync(join(app, "src", "x.ts"), "await client.invoices.list();\n");
+
+    await main([
+      "manifest",
+      write("a.json", spec(body({ limit: {} }))),
+      write("b.json", spec(body({ limit: {}, cursor: {} }))),
+      "--name",
+      "billing-api",
+      "--no-judge",
+      "--repo",
+      app,
+    ]);
+
+    // Three findings, one line of source. The header counts places.
+    expect(stdout).toContain("reaches you in 1 place(s)");
+    // And the sentence appears once, with the rest folded into a count.
+    const repeated = stdout.split("uses the `invoices` resource").length - 1;
+    expect(repeated).toBe(1);
+    expect(stdout).toContain("and 2 more");
+
+    rmSync(app, { recursive: true, force: true });
+  });
+});

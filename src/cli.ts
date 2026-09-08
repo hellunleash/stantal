@@ -362,13 +362,39 @@ function renderBlast(blast: Report["blast"]): string[] {
         : `  ${yellow("no reach found, but the scan was incomplete")}  ${scanned}`,
     );
   } else {
-    out.push(`  ${bold(`reaches you in ${blast.reaches.length} place(s)`)}  ${scanned}`);
-    for (const reach of blast.reaches.slice(0, 12)) {
-      out.push(`    ${reach.kind.padEnd(16)} ${reach.target}`);
-      out.push(`      ${dim(`${reach.evidence} — ${reach.detail}`)}`);
+    // Grouped by the line, because the line is what a person opens.
+    //
+    // A reach is stored per finding, which the join in `breaks` needs — it
+    // matches a change to the reach naming that exact target. Printed that way
+    // it repeats itself: one call to a resource with eighteen changed
+    // operations printed eighteen identical sentences against one line of
+    // source. That is not a long answer, it is the same answer eighteen times,
+    // and it is how a section stops being read.
+    //
+    // `place(s)` now counts distinct lines rather than findings, which is what
+    // the word already claimed.
+    const byLine = new Map<string, { kind: string; detail: string; targets: string[] }>();
+    for (const reach of blast.reaches) {
+      const seen = byLine.get(reach.evidence);
+      if (seen === undefined) {
+        byLine.set(reach.evidence, { kind: reach.kind, detail: reach.detail, targets: [reach.target] });
+      } else if (!seen.targets.includes(reach.target)) {
+        seen.targets.push(reach.target);
+      }
     }
-    if (blast.reaches.length > 12) {
-      out.push(`    ${dim(`... and ${blast.reaches.length - 12} more`)}`);
+
+    out.push(`  ${bold(`reaches you in ${byLine.size} place(s)`)}  ${scanned}`);
+    let shown = 0;
+    for (const [evidence, group] of byLine) {
+      if (shown >= 12) break;
+      shown += 1;
+      const first = group.targets[0] ?? "";
+      const more = group.targets.length - 1;
+      out.push(`    ${group.kind.padEnd(18)} ${first}${more > 0 ? dim(` and ${more} more`) : ""}`);
+      out.push(`      ${dim(`${evidence} — ${group.detail}`)}`);
+    }
+    if (byLine.size > shown) {
+      out.push(`    ${dim(`... and ${byLine.size - shown} more place(s)`)}`);
     }
   }
 
