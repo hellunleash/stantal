@@ -97,6 +97,19 @@ previously wrong, and it can still turn a green CI job red.
   that still contains it. Structural severity is not the gate for the second: a
   `guidance_removed` finding breaks no client, and your own copy of the deleted
   sentence is exactly why it belongs at the top anyway.
+- **A release gate workflow for providers**, `templates/stantal-release-gate.yml`.
+  On every pull request it reads the build in the tree against your last
+  published release and fails on a structural break. Prose risk is reported and
+  does not block: it is a real finding and a judgement call about wording, which
+  is yours. A run that could not read enough warns rather than blocking, because
+  an extraction gap is our problem and not a reason to stop somebody shipping.
+- **The workflow templates now ship in the package**, at
+  `node_modules/stantal/templates/`. They were only in the repository, so the
+  one step that makes any of this run without somebody remembering to run it
+  was the one step you had to go and find. `AGENTS.md` gained a section naming
+  both, where they are, and which applies — and telling an agent to **ask**
+  first, because a scheduled workflow spends Actions minutes and can open pull
+  requests.
 - The library surface gains the provider path — `doctorPackage`,
   `doctorSummary`, `readLiveServer`, `exposureOf`, `buildSurfacePairReport` and
   their types. Embedding is the point of `doctor`, and a provider who has to

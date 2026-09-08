@@ -1,0 +1,112 @@
+# Copy this to .github/workflows/stantal-release-gate.yml
+#
+# For a repository that PUBLISHES a package handing a language model tools.
+#
+# It answers the question your own tests cannot: what does the release I am
+# about to ship do to the models already calling me. A deleted sentence of
+# guidance, a parameter offered with nothing explaining when to pass it, a tool
+# quietly renamed — none of those fail a type check, a unit test, or an HTTP
+# contract test, and every one of them changes what a model does.
+#
+# It reads the build in the working tree and compares it against your last
+# published release. Nothing is published here and nothing is executed.
+#
+# Run it before `npm publish`, not after. Afterwards the only fix is another
+# release.
+#
+# No account and no API key. Everything runs on your runner.
+
+name: stantal — release gate
+
+on:
+  pull_request:
+  workflow_dispatch:
+  # Also on the tag, so a release cut without a pull request is still gated.
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Whatever your build step is. The contract is read out of the files a
+      # consumer would receive, so it has to exist before the gate runs.
+      - run: npm run build --if-present
+
+      - name: Compare this build against the last published release
+        id: gate
+        env:
+          # Pin the CLI. A new release of ours must not change your gate under
+          # you between one pull request and the next.
+          STANTAL_VERSION: "0.6.0"
+        run: |
+          set -euo pipefail
+
+          name=$(node -p 'require("./package.json").name')
+          # The release a consumer is on today. `latest` is the dist-tag npm
+          # installs by default, which makes it the pair somebody actually ends
+          # up with.
+          published=$(npm view "$name" version 2>/dev/null || true)
+
+          if [ -z "$published" ]; then
+            echo "::notice::$name has no published release yet — nothing to compare against"
+            echo "verdict=first-release" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          report="${RUNNER_TEMP}/stantal-release.json"
+          set +e
+          npx --yes "stantal@${STANTAL_VERSION}" check . \
+            --against "$published" --repo none --json > "$report"
+          status=$?
+          set -e
+
+          # 2 means we could not read enough to say anything, which is not a
+          # pass. It is reported and it does not block: an extraction gap is our
+          # problem, not a reason to stop somebody shipping.
+          if [ "$status" -gt 1 ]; then
+            echo "::warning::stantal could not read enough of this pair to judge it"
+            echo "verdict=unreadable" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          verdict=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).verdict' "$report")
+          headline=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).headline' "$report")
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          echo "report=$report" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## stantal — $published → this build"
+            echo
+            echo "**$verdict** · $headline"
+            echo
+            npx --yes "stantal@${STANTAL_VERSION}" check . --against "$published" --repo none 2>/dev/null || true
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "$verdict · $headline"
+
+      # A structural break is the one that stops a caller written against the
+      # old contract. Prose risk is reported and does not block: it is a real
+      # finding and it is a judgement call about wording, which is yours to make.
+      - name: Fail on a structural break
+        if: steps.gate.outputs.verdict == 'structurally-breaking' || steps.gate.outputs.verdict == 'behaviour-breaking'
+        run: |
+          echo "::error::This build breaks the contract models are calling today."
+          echo "Restore the removed tool, parameter or required field, or ship it as a"
+          echo "deliberate breaking release and say so in the changelog."
+          exit 1

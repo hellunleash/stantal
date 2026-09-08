@@ -176,3 +176,21 @@ describe("publishesContract", () => {
     expect(publishesContract(dir)).toBeNull();
   });
 });
+
+describe("the automation section", () => {
+  const section = agentsSection();
+
+  test("names both workflows and where they ship", () => {
+    // Copying beats retyping: the agent has the exact file, and a workflow it
+    // invented would be a workflow nobody reviewed.
+    expect(section).toContain("node_modules/stantal/templates/");
+    expect(section).toContain("stantal-watch.yml");
+    expect(section).toContain("stantal-release-gate.yml");
+  });
+
+  test("makes the agent ask before adding one", () => {
+    // A scheduled workflow spends Actions minutes and can open pull requests.
+    // That is a larger thing to add unasked than a config file.
+    expect(section).toContain("Ask before adding either one");
+  });
+});
