@@ -94,6 +94,10 @@ const ABSENCE_DETAIL: Record<SurfaceAbsenceReason, string> = {
   file_missing: "the manifest file was not supplied",
   unparseable: "the file is not parseable as a JSON tool manifest",
   no_descriptors: "the manifest lists no tools",
+  // Not reachable from a document reader. Named so the map stays exhaustive:
+  // a reason added later has to be given a sentence here rather than silently
+  // rendering as undefined.
+  server_unreachable: "the server could not be reached",
   descriptors_unreadable: "the manifest lists tools whose names are not readable strings",
 };
 

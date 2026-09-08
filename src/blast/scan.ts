@@ -1,6 +1,6 @@
 import semver from "semver";
 import type { PackageJson } from "../extract/package-source.js";
-import type { RepoSource } from "./repo.js";
+import { isProseFile, type RepoSource } from "./repo.js";
 import { compareReaches, type BlastNote, type BlastResult, type Filtered, type Reach } from "./taxonomy.js";
 import { GENERATED_MARKER } from "../emit/vitest.js";
 import { callsOf, type UsageProfile } from "../usage/otel.js";
@@ -22,6 +22,14 @@ export type BlastTarget = {
   tool: string;
   /** Set when the finding is about one parameter. */
   param?: string;
+  /**
+   * Sentences the newer version of the contract deleted.
+   *
+   * Handed down rather than derived here, because only Layer 1 knows what the
+   * text used to say. The scan's job is the other half: does any file in this
+   * repository still contain one of them.
+   */
+  quotes?: readonly string[];
 };
 
 export type BlastOptions = {
@@ -82,6 +90,12 @@ export function subpathOf(specifier: string, pkg: string): string | null {
 /** `from "x"`, `require("x")`, `import("x")`. Textual, and honest about it. */
 const SPECIFIER = /(?:from|import|require)\s*\(?\s*["'`]([^"'`]+)["'`]/g;
 
+/** Enough of the sentence to recognise, short enough for one terminal line. */
+function truncateQuote(quote: string): string {
+  const flat = normalise(quote).trim();
+  return flat.length <= 60 ? flat : `${flat.slice(0, 59)}…`;
+}
+
 function lineOf(text: string, index: number): number {
   let line = 1;
   for (let i = 0; i < index && i < text.length; i += 1) {
@@ -97,6 +111,65 @@ function wordLines(text: string, word: string): number[] {
   text.split("\n").forEach((line, i) => {
     if (pattern.test(line)) out.push(i + 1);
   });
+  return out;
+}
+
+/**
+ * A sentence long enough that finding it twice is not a coincidence.
+ *
+ * Measured against what a deleted guidance sentence actually looks like:
+ * *"Pass `slot` only when the request names a particular place"* is 56
+ * characters and 10 words. The floor is set below that and well above the
+ * fragments that appear everywhere — "the request", "an existing app", "if it
+ * is not set". Under it, a match would be an accident being reported as
+ * evidence, which is the one thing this reach cannot afford: its whole worth is
+ * that the reader opens the line and agrees.
+ */
+const QUOTE_MIN_CHARS = 40;
+const QUOTE_MIN_WORDS = 6;
+
+/** Collapse runs of whitespace, so a wrapped prompt still matches one sentence. */
+function normalise(text: string): string {
+  return text.replace(/\s+/g, " ");
+}
+
+export function isQuotable(sentence: string): boolean {
+  const flat = normalise(sentence).trim();
+  return flat.length >= QUOTE_MIN_CHARS && flat.split(" ").length >= QUOTE_MIN_WORDS;
+}
+
+/**
+ * Where a normalised sentence appears in a text, as a line in the original.
+ *
+ * The search runs on whitespace-collapsed text so a sentence wrapped across
+ * three lines of a prompt still matches, but the answer has to be a line in the
+ * file the reader will open. So the map back to the original offset is built as
+ * the normalisation happens rather than reconstructed afterwards.
+ */
+function quoteLines(text: string, needle: string): number[] {
+  const flat: string[] = [];
+  const origin: number[] = [];
+  let inSpace = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i] as string;
+    if (/\s/.test(ch)) {
+      if (inSpace) continue;
+      inSpace = true;
+      flat.push(" ");
+      origin.push(i);
+      continue;
+    }
+    inSpace = false;
+    flat.push(ch);
+    origin.push(i);
+  }
+
+  const haystack = flat.join("");
+  const out: number[] = [];
+  for (let at = haystack.indexOf(needle); at !== -1; at = haystack.indexOf(needle, at + 1)) {
+    const start = origin[at];
+    if (start !== undefined) out.push(lineOf(text, start));
+  }
   return out;
 }
 
@@ -174,10 +247,19 @@ export function blastRadius(options: BlastOptions): BlastResult {
 
   const importedSubpaths = new Map<string, string>(); // subpath -> evidence
   const toolFiles = new Map<string, Array<{ path: string; line: number }>>();
+  const quoteFiles = new Map<string, Array<{ path: string; line: number }>>();
   let files = 0;
   let bytes = 0;
 
   const toolNames = [...new Set(targets.map((t) => t.tool))];
+
+  // Deduplicated and normalised once, because two findings on one tool often
+  // carry the same deleted sentence and the search is the expensive part.
+  const quotes = [
+    ...new Set(
+      targets.flatMap((t) => (t.quotes ?? []).filter(isQuotable).map((q) => normalise(q).trim())),
+    ),
+  ];
 
   // The traces, when they live inside the repo being scanned. Compared as a
   // repo-relative POSIX path, which is what `files()` yields.
@@ -210,6 +292,19 @@ export function blastRadius(options: BlastOptions): BlastResult {
 
     files += 1;
     bytes += text.length;
+
+    for (const quote of quotes) {
+      for (const line of quoteLines(text, quote)) {
+        const rows = quoteFiles.get(quote) ?? [];
+        rows.push({ path, line });
+        quoteFiles.set(quote, rows);
+      }
+    }
+
+    // A prose file is read for its quotes and for nothing else. A README that
+    // names a tool is documentation, not a line that stops working, and the
+    // other reaches are all claims about code.
+    if (isProseFile(path)) continue;
 
     SPECIFIER.lastIndex = 0;
     for (let m = SPECIFIER.exec(text); m !== null; m = SPECIFIER.exec(text)) {
@@ -302,6 +397,22 @@ export function blastRadius(options: BlastOptions): BlastResult {
         evidence: `${hit.path}:${hit.line}`,
         detail: `names \`${target.tool}\``,
       });
+    }
+
+    // Word for word, and the strongest thing this layer can say about prose.
+    // Reported wherever it is found, including in a file that imports nothing
+    // and names no tool: a prompt is exactly that file, and it is the one the
+    // stale sentence is most likely to be sitting in.
+    for (const quote of target.quotes ?? []) {
+      if (!isQuotable(quote)) continue;
+      for (const hit of quoteFiles.get(normalise(quote).trim()) ?? []) {
+        reaches.push({
+          kind: "stale_quote",
+          target: target.label,
+          evidence: `${hit.path}:${hit.line}`,
+          detail: `quotes a sentence the newer version deleted: "${truncateQuote(quote)}"`,
+        });
+      }
     }
 
     // Parameters are ordinary words. A match only counts inside a file that is

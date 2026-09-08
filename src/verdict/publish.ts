@@ -50,6 +50,16 @@ export function publishableReport(report: Report): Publishable {
     });
   }
 
+  if (report.breaks.length > 0) {
+    // Same reasoning as `blast`, and more urgent: every entry here carries a
+    // path and a line number from the consumer's own repository, and this is
+    // the list somebody is most tempted to forward because it is the strongest.
+    stripped.push({
+      field: "breaks",
+      detail: `${report.breaks.length} line(s) of your own code that a breaking change lands on, with their paths`,
+    });
+  }
+
   return {
     report: {
       subject: report.subject,
@@ -61,6 +71,7 @@ export function publishableReport(report: Report): Publishable {
       caller: report.caller,
       // Never published. See above.
       blast: null,
+      breaks: [],
       generatedAt: report.generatedAt,
     },
     stripped,

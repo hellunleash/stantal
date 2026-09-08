@@ -235,7 +235,19 @@ export function isUnreachable(entry: AuditEntry): boolean {
  * Read off the `kind`, never the sentence. The wording is for people.
  */
 export function heldByRange(entry: AuditEntry): boolean {
-  const blast = entry.report?.blast;
+  return rangeHolds(entry.report);
+}
+
+/**
+ * The same question, asked of a report rather than an audit row.
+ *
+ * One implementation, because `doctor` asks it about a single package and the
+ * audit asks it about every one. Two copies would eventually disagree, and the
+ * direction they would disagree in is the dangerous one: this is the predicate
+ * that decides whether somebody is told to do nothing.
+ */
+export function rangeHolds(report: Report | null): boolean {
+  const blast = report?.blast;
   if (blast === undefined || blast === null) return false;
   if (blast.reaches.length > 0 || blast.notes.length > 0) return false;
   return blast.filtered.length > 0 && blast.filtered.every((f) => f.kind === "range_excludes");

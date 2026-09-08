@@ -46,6 +46,11 @@ npm-debug.log*
 coverage/
 service/vendor/
 service/site/
+# A local `npm install` here is for smoke-testing the host by hand. The
+# Dockerfile installs the renderer from the packed tarball, so a lockfile
+# and a tree from a laptop are noise at best and a wrong pin at worst.
+service/node_modules/
+service/package-lock.json
 site/out/
 site/node_modules/
 site/.next/

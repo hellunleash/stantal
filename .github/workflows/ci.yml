@@ -196,3 +196,63 @@ jobs:
             if (!Array.isArray(r.entries)) throw new Error("the audit produced no entries");
             console.log(`keyless audit: ${r.verdict}, ${r.entries.length} contract dependency/ies`);
           ' "$audit"
+
+      # The provider's form of the same promise. `stantal doctor` is what goes
+      # inside somebody else's CLI, so it runs on machines we know nothing
+      # about and it must never need anything configured. It also has to answer
+      # correctly about a package that is not here at all, which is the case it
+      # will hit most often once a provider ships it.
+      - name: The doctor works with every key unset, and on a package that is absent
+        env:
+          ANTHROPIC_API_KEY: ""
+          OPENAI_API_KEY: ""
+          GEMINI_API_KEY: ""
+          GOOGLE_API_KEY: ""
+          GOOGLE_ACCESS_TOKEN: ""
+          STANTAL_VERTEX_PROJECT: ""
+        run: |
+          set -o pipefail
+          absent=$(mktemp)
+
+          # A package this repository does not depend on. Exit must be 0 and the
+          # verdict must not be `clean`: "we are not in this repo" is a real
+          # answer, and reporting it as a pass would let a provider count
+          # installs they never measured.
+          set +e
+          node dist/cli.js doctor @modelcontextprotocol/server-filesystem --json > "$absent"
+          status=$?
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            echo "::error::exit $status — doctor on an absent package must exit 0"
+            head -c 2000 "$absent"
+            exit 1
+          fi
+
+          node -e '
+            const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+            if (r.status !== "not-a-dependency") throw new Error(`expected not-a-dependency, got ${r.status}`);
+            if (r.verdict !== "not-applicable") throw new Error(`an unmeasured repo reported ${r.verdict}`);
+            console.log(`keyless doctor: ${r.status} / ${r.verdict}`);
+          ' "$absent"
+
+          # And on a package that is here, with a summary payload. The payload
+          # is what would leave a stranger's machine, so the assertion is that
+          # it carries no path out of this checkout.
+          present=$(mktemp)
+          set +e
+          node dist/cli.js doctor acorn --summary --json > "$present"
+          set -e
+
+          node -e '
+            const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+            if (r.summary === undefined) throw new Error("--summary produced no payload");
+            // The full result names the directory it read, as it should. The
+            // payload is what would leave a stranger machine, and it may not
+            // carry that or anything else read off it. Compared as it appears
+            // once serialized, so a path full of separators still matches.
+            const dir = JSON.stringify(r.directory).slice(1, -1);
+            if (typeof dir !== "string" || dir.length === 0) throw new Error("the result named no directory");
+            if (JSON.stringify(r.summary).includes(dir)) throw new Error("the payload carries a local path");
+            console.log(`keyless doctor payload: ${r.summary.schema}, ${r.summary.status}`);
+          ' "$present"

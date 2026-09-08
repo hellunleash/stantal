@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { Storage } from "@google-cloud/storage";
 import { renderHtml } from "stantal";
+import { rebuildSummary, packageKey } from "./summary-schema.mjs";
 
 /**
  * The verdict host.
@@ -25,6 +26,13 @@ import { renderHtml } from "stantal";
  * **Nothing here is required to get a verdict.** The CLI produces the same page
  * locally with `--html`. This exists so a page can be forwarded, not so a
  * verdict can be reached.
+ *
+ * It has a second, smaller job. `POST /s` receives the bounded summary a
+ * provider's own embedded `stantal doctor` sends home. That is a different
+ * thing from a verdict in every way that matters, and the two never share a
+ * code path: a verdict is a page a person chose to forward, a summary is a
+ * handful of counts a stranger's machine sent because they ran somebody else's
+ * CLI. See `handleSummary`.
  */
 
 const BUCKET = process.env.VERDICT_BUCKET ?? "";
@@ -33,6 +41,13 @@ const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN ?? "";
 
 /** Well under Cloud Run's request cap, and far above any real report. */
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
+
+/**
+ * A summary is counts and tool names. Sixty-four kilobytes is already generous
+ * for the largest package anyone ships, and a cap two orders of magnitude
+ * larger than the payload is not a cap.
+ */
+const MAX_SUMMARY_BYTES = 64 * 1024;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SITE = join(HERE, "site");
@@ -125,13 +140,13 @@ function idFor(report) {
   return createHash("sha256").update(JSON.stringify(report)).digest("hex").slice(0, 16);
 }
 
-function readBody(request) {
+function readBody(request, limit = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
     request.on("data", (chunk) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > limit) {
         reject(new Error("body too large"));
         request.destroy();
         return;
@@ -204,6 +219,46 @@ async function handlePublish(request, response) {
   return send(response, 201, { id, url: `${origin}/v/${id}` });
 }
 
+/**
+ * Receive one summary.
+ *
+ * **Content-addressed, like a verdict, and for a sharper reason here.** The id
+ * is a hash of the stored payload, so the same machine sending the same answer
+ * twice writes one object rather than two. Nothing about this endpoint is
+ * authenticated, so the cheapest way to skew a provider's numbers would
+ * otherwise be to post the same summary a thousand times.
+ *
+ * That said: **an unauthenticated, opted-in sample is not a measurement of an
+ * installed base**, and no count taken from this bucket may be presented as
+ * one. The census that can be is `stantal exposure`, which reads npm's public
+ * download numbers and needs nobody to opt into anything. The two numbers must
+ * never be multiplied together.
+ */
+async function handleSummary(request, response) {
+  let parsed;
+  try {
+    parsed = JSON.parse(await readBody(request, MAX_SUMMARY_BYTES));
+  } catch (error) {
+    return send(response, 400, { error: `could not read the body: ${error.message}` });
+  }
+
+  // Validated before the bucket is looked at, unlike a verdict. A malformed or
+  // leaky payload is wrong whatever this service is configured with, and the
+  // sender should hear that rather than a message about our storage.
+  const { summary, error } = rebuildSummary(parsed);
+  if (error !== undefined) return send(response, 400, { error });
+  if (bucket === null) return send(response, 500, { error: "VERDICT_BUCKET is not configured" });
+
+  const id = createHash("sha256").update(JSON.stringify(summary)).digest("hex").slice(0, 16);
+  const day = summary.generatedAt.slice(0, 10);
+  await bucket
+    .file(`s/${packageKey(summary.package)}/${day}/${id}.json`)
+    .save(JSON.stringify(summary), { contentType: "application/json" });
+
+  // No URL. There is no page, and returning a link would suggest one exists.
+  return send(response, 201, { ok: true, id });
+}
+
 async function handleRead(id, response) {
   if (bucket === null) return send(response, 500, { error: "VERDICT_BUCKET is not configured" });
   if (!/^[0-9a-f]{16}$/.test(id)) return send(response, 400, { error: "not a verdict id" });
@@ -230,6 +285,11 @@ const server = createServer((request, response) => {
     const path = url.pathname === "/" ? "/index.html" : url.pathname;
     const asset = STATIC.get(path);
     if (asset !== undefined) return sendAsset(response, asset, path, request.method === "HEAD");
+  }
+  if (request.method === "POST" && url.pathname === "/s") {
+    return handleSummary(request, response).catch((error) =>
+      send(response, 500, { error: error.message }),
+    );
   }
   if (request.method === "POST" && url.pathname === "/v") {
     return handlePublish(request, response).catch((error) =>

@@ -6,7 +6,16 @@ import { extractFromModule } from "../extract/module.js";
 import { packageDirectory } from "../testkit.js";
 import { assertionsFromContract } from "../emit/assertions.js";
 import { emitTests, type EmitTarget } from "../emit/write.js";
-import { buildReport, countFindings, exitCodeFor } from "../report.js";
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
+import {
+  buildLocalReport,
+  buildManifestReport,
+  buildReport,
+  countFindings,
+  exitCodeFor,
+  type Report,
+} from "../report.js";
 import { pacoteRegistry } from "../registry/npm.js";
 import { walkHistory } from "../history.js";
 import { planRemedy } from "../remedy/plan.js";
@@ -37,15 +46,22 @@ export { contractDependencies };
  * project exists to find, and shipping a server that trips our own rule would
  * be the loudest possible argument that the rule does not matter.
  *
- * **Nothing here needs an account, a key or a network call to us.** Two of the
- * five tools never touch the network at all. The other three fetch published
+ * **Nothing here needs an account, a key or a network call to us.** Three of
+ * the seven tools never touch the network at all. The rest fetch published
  * tarballs from the registry the user already uses.
  *
  * **`audit_project` is the front door and the others are follow-ups.** An agent
- * handed four tools has to sequence them, and sequencing them correctly means
+ * handed six tools has to sequence them, and sequencing them correctly means
  * holding our mental model of the problem — which is our job, not its. One call
  * returns the ranked plan; the rest exist for going deeper on one package once
  * that plan has named it.
+ *
+ * **Two of the seven are the provider's, not the consumer's.** `check_release`
+ * and `compare_manifests` answer the question from the side that causes the
+ * problem — I am about to ship this, what does it do to the models already
+ * calling me. They were missing for a while, and the effect was that a provider
+ * who connected this server was briefed entirely about the half of the product
+ * they care about least.
  */
 
 /** How long an answer is allowed to get before it stops being useful to a model. */
@@ -63,6 +79,49 @@ export type ServerOptions = {
   judge?: Judge | null;
   version?: string;
 };
+
+/**
+ * One report, in the shape a model reads.
+ *
+ * Shared by every tool that produces a report, so a consumer's answer and a
+ * provider's answer are folded identically. Two renderings would eventually
+ * disagree about what counts, and the count is the thing an agent acts on.
+ */
+function renderForModel(report: Report): string {
+  const lines = [`verdict: ${report.verdict}`, report.headline, ""];
+
+  // First, and above everything the report merely found. This is the only part
+  // that is about a particular repository rather than about the package.
+  for (const item of report.breaks.slice(0, MAX_FINDINGS_RENDERED)) {
+    lines.push(`[breaks your code] ${item.rule} ${item.target} — ${item.evidence}: ${item.detail}`);
+  }
+  if (report.breaks.length > 0) lines.push("");
+
+  let shown = 0;
+  for (const surface of report.surfaces) {
+    for (const change of surface.comparison.diff?.changes ?? []) {
+      if (!change.breaking || shown >= MAX_FINDINGS_RENDERED) continue;
+      lines.push(`[breaking] ${change.rule} ${change.target} (${surface.subpath})`);
+      shown += 1;
+    }
+    for (const finding of surface.prose.findings) {
+      if (shown >= MAX_FINDINGS_RENDERED) continue;
+      lines.push(
+        `[${finding.severity}/${finding.confidence}] ${finding.rule} ${finding.target} ` +
+          `(${surface.subpath}) — ${finding.headline}`,
+      );
+      shown += 1;
+    }
+    // Never dropped. A claim we could not support is a different result from no
+    // claim, and only one of them lets a reader stop looking.
+    for (const withheld of surface.comparison.suppressed) {
+      lines.push(`[withheld] ${withheld.rule} ${withheld.target} — extraction could not support this`);
+    }
+  }
+  if (shown === 0) lines.push("Nothing a model would read differently.");
+  lines.push("", `exit code if run as a CLI: ${exitCodeFor(report.verdict)}`);
+  return lines.join("\n");
+}
 
 export function createServer(options: ServerOptions = {}): McpServer {
   const judge = options.judge ?? null;
@@ -245,34 +304,9 @@ export function createServer(options: ServerOptions = {}): McpServer {
         registry: pacoteRegistry(),
         judge,
         ...(subpath === undefined ? {} : { subpaths: [subpath] }),
-        ...(repo === undefined ? {} : { repo: (await import("../blast/repo.js")).fsRepoSource(repo) }),
+        ...(repo === undefined ? {} : { repo: fsRepoSource(repo) }),
       });
-
-      const lines = [`verdict: ${report.verdict}`, report.headline, ""];
-      let shown = 0;
-      for (const surface of report.surfaces) {
-        for (const change of surface.comparison.diff?.changes ?? []) {
-          if (!change.breaking || shown >= MAX_FINDINGS_RENDERED) continue;
-          lines.push(`[breaking] ${change.rule} ${change.target} (${surface.subpath})`);
-          shown += 1;
-        }
-        for (const finding of surface.prose.findings) {
-          if (shown >= MAX_FINDINGS_RENDERED) continue;
-          lines.push(
-            `[${finding.severity}/${finding.confidence}] ${finding.rule} ${finding.target} ` +
-              `(${surface.subpath}) — ${finding.headline}`,
-          );
-          shown += 1;
-        }
-        // Never dropped. A claim we could not support is a different result
-        // from no claim, and only one of them lets a reader stop looking.
-        for (const withheld of surface.comparison.suppressed) {
-          lines.push(`[withheld] ${withheld.rule} ${withheld.target} — extraction could not support this`);
-        }
-      }
-      if (shown === 0) lines.push("Nothing a model would read differently.");
-      lines.push("", `exit code if run as a CLI: ${exitCodeFor(report.verdict)}`);
-      return text(lines.join("\n"));
+      return text(renderForModel(report));
     },
   );
 
@@ -437,6 +471,134 @@ export function createServer(options: ServerOptions = {}): McpServer {
       return text(lines.join("\n"));
     },
   );
+
+  // --- the provider's two, which are the other end of the same dependency ---
+  //
+  // Everything above answers a consumer's question: something I install is
+  // about to move, what does it do to me. These answer the question from the
+  // side that causes it — *I* am about to ship, what does this do to the models
+  // already calling me. The server exposed only the consumer half, so a
+  // provider who connected was briefed about the part of the product they care
+  // about least.
+
+  server.registerTool(
+    "check_release",
+    {
+      title: "Check what an unpublished build does to the models already calling you",
+      description:
+        "The provider's gate before publishing. Reads the build sitting on disk, fetches the " +
+        "release you name from the registry, and reports what your next version does to a " +
+        "language model consuming your tools — while it still costs minutes to fix rather than " +
+        "a deprecation cycle. Nothing is published and nothing is executed. " +
+        "Pass `subpath` only to restrict the read to one entry point; by default every entry " +
+        "point the package exports is read separately, because two of them can disagree. " +
+        "Pass `repo` only to also scan a directory of consuming code — your own examples, " +
+        "templates or starters — for the call sites these findings reach.",
+      inputSchema: {
+        directory: z
+          .string()
+          .describe("The package root of the build to check: the directory holding its package.json, not its dist."),
+        against: z.string().min(1).describe("The published version to compare the build against, for example 1.4.0."),
+        package: z
+          .string()
+          .optional()
+          .describe(
+            "The published package name. Omit it to use the name in the local package.json, " +
+              "which is right unless you are checking a build against a differently named release.",
+          ),
+        subpath: z
+          .string()
+          .optional()
+          .describe(
+            'One entry point to read, written as a consumer imports it: "." or "./ai-sdk". ' +
+              "Omit it to read every entry point, which is the default and the safer choice.",
+          ),
+        repo: z
+          .string()
+          .optional()
+          .describe(
+            "A directory of consuming code to scan for call sites the findings reach. Omit it " +
+              "to skip that scan. The scan is local and read-only.",
+          ),
+      },
+    },
+    async ({ directory, against, package: named, subpath, repo }) => {
+      const local = fsPackageSource(directory);
+      const manifest = local.packageJson();
+      const pkg = named ?? (typeof manifest?.["name"] === "string" ? manifest["name"] : undefined);
+      if (pkg === undefined) {
+        // Named rather than guessed. Reading a package under the wrong name
+        // reports every tool as removed, which is the loudest possible wrong
+        // answer.
+        return text(`${directory} has no readable package name — pass \`package\` explicitly.`);
+      }
+
+      const report = await buildLocalReport({
+        directory,
+        against: { package: pkg, version: against, registry: pacoteRegistry() },
+        judge,
+        ...(subpath === undefined ? {} : { subpaths: [subpath] }),
+        ...(repo === undefined ? {} : { repo: fsRepoSource(repo) }),
+      });
+      return text(renderForModel(report));
+    },
+  );
+
+  server.registerTool(
+    "compare_manifests",
+    {
+      title: "Compare two serialized tool lists, with nothing fetched",
+      description:
+        "Compares two tool manifests read from disk and reports what a language model consuming " +
+        "them would read differently. No version is resolved and nothing is fetched, so it works " +
+        "on a release that is not published, on a contract that never goes to a registry at all, " +
+        "and on a tool list a host generates for its own API. Each side accepts an MCP " +
+        "tools/list reply, a host-written tool list, or an OpenAPI document, whose operations are " +
+        "the contract a generator hands a model. " +
+        "Pass several files per side, catalog first, only when the contract is split across " +
+        "documents — schemas generated from routes, prose kept where a person edits it. What a " +
+        "model receives is the merge. " +
+        "Pass `fieldsAt` only when a document nests a descriptor's editable fields under a " +
+        "wrapper key, and `repo` only to also scan consuming code.",
+      inputSchema: {
+        before: z
+          .array(z.string().min(1))
+          .min(1)
+          .describe("Paths to the older side's documents, catalog first. One path is the ordinary case."),
+        after: z
+          .array(z.string().min(1))
+          .min(1)
+          .describe("Paths to the newer side's documents, in the same order as `before`."),
+        name: z
+          .string()
+          .optional()
+          .describe("What to call the subject in the report. Omit it to use the first filename."),
+        fieldsAt: z
+          .string()
+          .optional()
+          .describe(
+            'The key a document nests a descriptor\'s fields under, for example "fields". Omit it ' +
+              "unless a document is shaped that way; without it those descriptors read as empty.",
+          ),
+        repo: z.string().optional().describe("A directory of consuming code to scan. Omit it to skip that scan."),
+      },
+    },
+    async ({ before, after, name, fieldsAt, repo }) => {
+      const read = (paths: readonly string[]) =>
+        paths.map((path) => ({ name: basename(path), text: readFileSync(path, "utf8"), origin: path }));
+
+      const report = await buildManifestReport({
+        package: name ?? basename(before[0] ?? "manifest"),
+        from: { version: "before", sources: read(before) },
+        to: { version: "after", sources: read(after) },
+        judge,
+        ...(fieldsAt === undefined ? {} : { fieldsKey: fieldsAt }),
+        ...(repo === undefined ? {} : { repo: fsRepoSource(repo) }),
+      });
+      return text(renderForModel(report));
+    },
+  );
+
 
   return server;
 }

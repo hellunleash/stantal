@@ -832,6 +832,8 @@ const ABSENCE_DETAIL: Record<SurfaceAbsenceReason, string> = {
   file_missing: "the package points at an entry file it did not ship",
   unparseable: "the entry file is not parseable as JavaScript",
   no_descriptors: "the entry file holds no tool descriptor",
+  // Not reachable from a static reader. Present so the map stays exhaustive.
+  server_unreachable: "the server could not be reached",
   descriptors_unreadable: "the entry file holds tool descriptors whose names are built at runtime",
 };
 
@@ -918,6 +920,25 @@ export function extractFromModule(options: ModuleExtractOptions): SurfaceResult 
     const helper = registrationImport(modules);
     if (helper !== null) {
       return absent("descriptors_unreadable", [helper]);
+    }
+
+    // Nor is it the same in a file that immediately hands off to another file
+    // in the same package, by a hop nothing static can follow.
+    //
+    // `@modelcontextprotocol/server-everything` is the case that proves this
+    // one. Its entry point is a 36-line dispatcher whose entire body is
+    // `switch (argv[2]) { case "stdio": await import("./stdio.js") ... }`.
+    // There is not one static import in it, so there were no descriptor sites
+    // and no registration helper, and two versions of a server with a dozen
+    // tools compared as `clean` — a false all-clear, which is the single worst
+    // output this product can produce. Found by reading the same package live
+    // and getting ten tools back.
+    const deferred = modules.flatMap((m) => graph.deferredModules(m));
+    if (deferred.length > 0) {
+      return absent(
+        "descriptors_unreadable",
+        deferred.slice(0, 6).map((d) => `${d.at} defers to \`${d.specifier}\` at run time`),
+      );
     }
 
     return absent("no_descriptors", modules.map((m) => m.path));

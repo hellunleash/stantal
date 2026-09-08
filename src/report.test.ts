@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { scriptedCaller, type CallRequest, type ToolChoice } from "./behaviour/caller.js";
 import type { Intent } from "./behaviour/intent.js";
+import { memoryRepoSource, type RepoSource } from "./blast/repo.js";
 import { RegistryError, type Registry } from "./registry/npm.js";
 import { buildManifestReport, buildReport, exitCodeFor, type BehaviourOptions } from "./report.js";
 
@@ -62,7 +63,7 @@ const REWORDED = pack(`[{
 
 const packFiles = (contents: string) => ({ "package.json": manifest({ "./pack": "./pack.js" }), "pack.js": contents });
 
-type Extra = { subpaths?: string[]; behaviour?: BehaviourOptions };
+type Extra = { subpaths?: string[]; behaviour?: BehaviourOptions; repo?: RepoSource };
 
 async function report(from: Record<string, string>, to: Record<string, string>, extra: Extra = {}) {
   return buildReport({
@@ -73,6 +74,7 @@ async function report(from: Record<string, string>, to: Record<string, string>, 
     cacheRoot: cacheRoot(),
     ...(extra.subpaths ? { subpaths: extra.subpaths } : {}),
     ...(extra.behaviour ? { behaviour: extra.behaviour } : {}),
+    ...(extra.repo ? { repo: extra.repo } : {}),
   });
 }
 
@@ -345,5 +347,114 @@ describe("a withheld claim is not a clean bill", () => {
     expect(report.surfaces[0]!.comparison.suppressed).toEqual([]);
     expect(report.verdict).toBe("clean");
     expect(exitCodeFor(report.verdict)).toBe(0);
+  });
+});
+
+
+describe("where a break meets the consumer's own code", () => {
+  /** The older side ships `build`; the newer one renamed it and dropped it. */
+  const RENAMED = pack(`[{
+    name: "assemble",
+    description: "Build a screen.",
+    inputSchema: { type: "object", properties: { request: { type: "string" } }, required: ["request"] },
+  }]`);
+
+  const consumer = (source: string) =>
+    memoryRepoSource({
+      "package.json": JSON.stringify({ name: "app", dependencies: { "@example/tools": "^2.0.0" } }),
+      "src/agent.ts": source,
+    });
+
+  test("joins a removed tool to the line that names it", async () => {
+    // The whole point. Layer 0 knew `build` was removed and Layer 3 knew the
+    // repo names it, and until these were joined a consumer with dead call
+    // sites read exactly like one with none.
+    const result = await report(packFiles(DESCRIBED), packFiles(RENAMED), {
+      subpaths: ["./pack"],
+      repo: consumer('const SYSTEM = "always call build first";\nexport const which = "build";\n'),
+    });
+
+    expect(result.verdict).toBe("structurally-breaking");
+    expect(result.breaks.length).toBeGreaterThan(0);
+    const first = result.breaks[0];
+    expect(first?.rule).toBe("tool_removed");
+    expect(first?.target).toBe("build");
+    expect(first?.evidence.startsWith("src/agent.ts:")).toBe(true);
+    expect(first?.detail).toContain("this line names it");
+  });
+
+  test("says nothing when the same break lands on nobody", async () => {
+    // A repository that never names the tool. The change is just as breaking
+    // and this section must stay empty, or it stops meaning anything.
+    const result = await report(packFiles(DESCRIBED), packFiles(RENAMED), {
+      subpaths: ["./pack"],
+      repo: consumer("export const unrelated = 1;\n"),
+    });
+
+    expect(result.verdict).toBe("structurally-breaking");
+    expect(result.breaks).toEqual([]);
+  });
+
+  test("a dependency reach is not a line that breaks", async () => {
+    // Depending on the package is not the same as using the thing that went
+    // away. Counting it here would make the section true of everybody.
+    const result = await report(packFiles(DESCRIBED), packFiles(RENAMED), {
+      subpaths: ["./pack"],
+      repo: consumer("export const unrelated = 1;\n"),
+    });
+    expect(result.blast?.reaches.some((r) => r.kind === "dependency")).toBe(true);
+    expect(result.breaks).toEqual([]);
+  });
+
+  test("is empty when no repository was read", async () => {
+    // Null blast means nobody looked. An empty list here has to mean "we looked
+    // and it lands on nothing", never "we did not look".
+    const result = await report(packFiles(DESCRIBED), packFiles(RENAMED), { subpaths: ["./pack"] });
+    expect(result.blast).toBeNull();
+    expect(result.breaks).toEqual([]);
+  });
+
+  test("a prose finding nobody quotes stays out of this list", async () => {
+    // A deleted sentence on its own is a claim about how a model reads. It
+    // earns a place here only when the consumer's own files still contain it,
+    // and this repository does not.
+    const result = await report(packFiles(DESCRIBED), packFiles(REWORDED), {
+      subpaths: ["./pack"],
+      repo: consumer('const SYSTEM = "always call build first";\n'),
+    });
+
+    expect(result.surfaces[0]?.prose.findings.length).toBeGreaterThan(0);
+    expect(result.breaks).toEqual([]);
+  });
+
+  /**
+   * The deepest case on the whole page, and the one no other tool can see.
+   *
+   * The consumer copied a sentence of the tool description into their system
+   * prompt. The provider rewrote the description and dropped it. Semver, the
+   * type-checker, every contract test and the HTTP wire all pass, and the
+   * prompt now instructs a model about behaviour the contract no longer
+   * describes.
+   */
+  test("joins a deleted sentence to the prompt that still quotes it", async () => {
+    const result = await report(packFiles(DESCRIBED), packFiles(REWORDED), {
+      subpaths: ["./pack"],
+      repo: memoryRepoSource({
+        "package.json": JSON.stringify({ name: "app", dependencies: { "@example/tools": "^2.0.0" } }),
+        "src/agent.ts": "export const which = 1;\n",
+        // Copied out of the docs, backticks and all, which is what a person
+        // does. Nothing in this file imports the package or names the tool.
+        "prompts/system.md":
+          "You are a builder.\n\nPass `slot` only when the request names a place for it to land.\n",
+      }),
+    });
+
+    const stale = result.breaks.filter((b) => b.reach === "stale_quote");
+    expect(stale.length).toBeGreaterThan(0);
+    // "Pass `slot` only when…" is a mode switch, which is the sharpest kind of
+    // guidance to lose and the exact shape of the anchoring case.
+    expect(stale[0]?.rule).toBe("mode_switch_changed");
+    expect(stale[0]?.evidence).toBe("prompts/system.md:3");
+    expect(stale[0]?.detail).toContain("quotes a sentence the newer version deleted");
   });
 });

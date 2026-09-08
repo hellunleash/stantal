@@ -11,6 +11,7 @@
 <p align="center">
   <a href="https://github.com/hellunleash/stantal/actions/workflows/ci.yml"><img alt="ci" src="https://img.shields.io/github/actions/workflow/status/hellunleash/stantal/ci.yml?branch=main&style=flat-square&label=ci" /></a>
   <a href="https://www.npmjs.com/package/stantal"><img alt="npm" src="https://img.shields.io/npm/v/stantal?style=flat-square&color=cb3837&logo=npm" /></a>
+  <a href="https://stantal.cloud"><img alt="site" src="https://img.shields.io/badge/site-stantal.cloud-111?style=flat-square" /></a>
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" />
   <img alt="node" src="https://img.shields.io/badge/node-%3E%3D20-339933?style=flat-square&logo=nodedotjs&logoColor=white" />
 </p>
@@ -198,6 +199,9 @@ find the text exactly once or it refuses.
 
 ```bash
 npx stantal watch                       # for a scheduled job: decide what to say
+npx stantal doctor @acme/sdk            # one package, in the repo that installed it
+npx stantal live <server> [<server>]    # read a running MCP server, or diff two
+npx stantal exposure @acme/sdk          # how much of an installed base is affected
 npx stantal check ./ --against 1.4.0    # a release you have not published yet
 npx stantal manifest <before> <after>   # a contract that never reached a registry
 npx stantal mcp                         # the MCP server itself, over stdio
@@ -347,14 +351,19 @@ to go.
 
 - Nothing leaves your machine unless you ask. There is no account and no
   telemetry.
-- It never runs the package it reads. Contracts are parsed out of published
-  files, so nothing from an untrusted package executes on your machine.
+- It never runs a package it fetched. Contracts are parsed out of published
+  files, so nothing downloaded from a registry executes on your machine. The one
+  command that starts a process is `stantal live`, and only for the exact
+  command you typed: nothing here turns a package name into something to run.
 - The scan of your files never calls out. It reads the directory you are in,
   matches findings against it, and stops there, with no network and no upload.
   Turn it off entirely with `--repo none`.
 - Private registries already work. Fetching uses `pacote`, which is what npm
   itself uses, so your `.npmrc`, auth token and proxy are handled.
 - `--publish` strips your file paths before sending, and prints what it removed.
+  It has no built-in address: pass one, or set `STANTAL_VERDICT_HOST`.
+  [stantal.cloud](https://stantal.cloud) runs one, and it renders the report
+  rather than accepting a page, so the only thing it can serve is a verdict.
 
 It also withholds claims it cannot support. Where a package could not be fully
 read, the affected findings are listed as withheld rather than reported or

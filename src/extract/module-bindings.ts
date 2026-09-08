@@ -196,6 +196,10 @@ function factsOf(module: ParsedModule): ModuleFacts {
  * pack, and re-parsing it each time is the difference between a fast backfill
  * and a slow one.
  */
+function isNodeLike(value: unknown): value is AnyNode {
+  return typeof value === "object" && value !== null && typeof (value as { type?: unknown }).type === "string";
+}
+
 export class ModuleGraph {
   private readonly parsed = new WeakMap<PackageSource, Map<string, ParsedModule | null>>();
   private readonly facts = new WeakMap<Program, ModuleFacts>();
@@ -277,6 +281,70 @@ export class ModuleGraph {
     }
 
     return collected;
+  }
+
+  /**
+   * Local files this module hands off to at run time, which we did not read.
+   *
+   * `surfaceModules` follows static imports and re-exports. It cannot follow
+   * `await import("./stdio.js")`, because which branch runs depends on values
+   * that only exist while the program is running. So a module built that way is
+   * a file we parsed and a program we did not.
+   *
+   * The distinction this supports is the one the whole extractor rests on.
+   * Reading a 36-line dispatcher and finding no descriptors is not evidence
+   * that a package ships none — it is evidence that the descriptors are one hop
+   * further on, behind a hop nothing static can take.
+   * `@modelcontextprotocol/server-everything` is exactly that, and it was being
+   * reported as a clean comparison of two versions with no tools on either
+   * side.
+   *
+   * **Only same-package relative specifiers, and only ones that resolve.** A
+   * dynamic import of a dependency is that dependency's business, and a
+   * specifier built from a variable resolves to nothing here, which is honest:
+   * we cannot say a file exists that we cannot name.
+   */
+  deferredModules(module: ParsedModule): Array<{ specifier: string; at: string }> {
+    const out: Array<{ specifier: string; at: string }> = [];
+    const seen = new Set<string>();
+
+    const consider = (specifier: unknown, node: { loc?: { start: { line: number } } | null }): void => {
+      if (typeof specifier !== "string") return;
+      if (!specifier.startsWith("./") && !specifier.startsWith("../")) return;
+      if (seen.has(specifier)) return;
+      const target = resolveSpecifier(specifier, module.path, module.source, this.query);
+      if (target === null) return;
+      seen.add(specifier);
+      const line = node.loc?.start.line;
+      out.push({ specifier, at: line === undefined ? module.path : `${module.path}:${line}` });
+    };
+
+    const stack: AnyNode[] = [module.program];
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (node === undefined) continue;
+
+      if (node.type === "ImportExpression") {
+        consider((node.source as { value?: unknown }).value, node);
+      } else if (
+        node.type === "CallExpression" &&
+        node.callee.type === "Identifier" &&
+        node.callee.name === "require" &&
+        node.arguments.length === 1
+      ) {
+        const first = node.arguments[0];
+        if (first !== undefined && first.type === "Literal") consider(first.value, node);
+      }
+
+      for (const value of Object.values(node)) {
+        if (Array.isArray(value)) {
+          for (const item of value) if (isNodeLike(item)) stack.push(item);
+        } else if (isNodeLike(value)) {
+          stack.push(value);
+        }
+      }
+    }
+    return out;
   }
 
   /** The value a module exports under `name`, folded as far as literals allow. */

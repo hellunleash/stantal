@@ -1,7 +1,7 @@
 import { blastRadius, type BlastTarget } from "./blast/scan.js";
 import type { UsageProfile } from "./usage/otel.js";
 import type { RepoSource } from "./blast/repo.js";
-import type { BlastResult } from "./blast/taxonomy.js";
+import type { BlastResult, ReachKind } from "./blast/taxonomy.js";
 import { present as wireTools, type ToolCaller } from "./behaviour/caller.js";
 import type { Intent } from "./behaviour/intent.js";
 import { runBehaviour, type BehaviourCache, type RunResult } from "./behaviour/run.js";
@@ -15,6 +15,7 @@ import { extractFromModule } from "./extract/module.js";
 import { exportedSubpaths, fsPackageSource } from "./extract/package-source.js";
 import { classifyProse, type ProseResult } from "./prose/classify.js";
 import type { Judge } from "./prose/judge.js";
+import type { ProseFinding } from "./prose/taxonomy.js";
 import { installPackage } from "./registry/install.js";
 import type { Registry } from "./registry/npm.js";
 
@@ -102,7 +103,52 @@ export type Report = {
    * them lets a consumer stop reading.
    */
   blast: BlastResult | null;
+  /**
+   * Changes that break, landed on the lines that use them.
+   *
+   * Layer 0 knows `tavily-search` was removed. Layer 3 knows the repo names
+   * `tavily-search` at `src/agent.ts:9`. Until this, the report held both and
+   * joined neither, so a consumer with forty dead call sites read the same as
+   * one with none: a list of changes, then a list of "reaches", in the same
+   * neutral voice.
+   *
+   * This is the join, and it is the strongest claim the tool makes about a
+   * particular consumer. Not "a model might read this differently" — *this line
+   * of your code names something that is gone.* It is checkable by opening the
+   * file, which is the property every finding here is supposed to have.
+   *
+   * Two joins, and both hold to the same standard: every entry has to survive
+   * being opened.
+   *
+   * 1. A **breaking structural change**, met by a reach that names the thing in
+   *    the consumer's own code or records it being called. A dependency reach
+   *    means "you install this", and a mount means "the model chooses here";
+   *    neither is a line that breaks.
+   * 2. A **deleted sentence**, met by a file that still contains it word for
+   *    word. Structural severity is not the gate there — a `guidance_removed`
+   *    finding breaks no client, and the consumer's own copy of the deleted
+   *    sentence is precisely why it belongs at the top anyway. It is also the
+   *    only entry here that is usually not code: a system prompt is where a
+   *    quoted sentence lives.
+   */
+  breaks: ConfirmedBreak[];
   generatedAt: string;
+};
+
+/** One breaking change, and one place in the consumer's code that meets it. */
+export type ConfirmedBreak = {
+  /** The Layer 0 rule: `tool_removed`, `param_removed`, `param_added_required`. */
+  rule: string;
+  /** What broke: a tool, or `tool.param`. */
+  target: string;
+  /** Which door it came through. */
+  subpath: string;
+  /** How we know this consumer meets it. */
+  reach: ReachKind;
+  /** `src/agent.ts:9`, or the trace file. Openable. */
+  evidence: string;
+  /** One sentence a person can act on. */
+  detail: string;
 };
 
 /**
@@ -445,6 +491,111 @@ export async function buildReport(options: ReportOptions): Promise<Report> {
 }
 
 /**
+ * Where a breaking change meets a line of the consumer's code.
+ *
+ * The join both halves were built for and neither could make alone. Layer 0
+ * says what broke; Layer 3 says where this consumer touches it. Kept apart they
+ * are two lists in the same neutral voice, and the reader has to do the
+ * crossing by eye — which is the work a tool should be doing. A consumer with
+ * forty dead call sites read exactly like a consumer with none.
+ *
+ * This is the strongest claim the product makes about a particular consumer.
+ * Not "a model might read this differently". *This line of your code names
+ * something that is gone.* Checkable by opening the file, which is the property
+ * every claim here is meant to have.
+ *
+ * Deliberately narrow, because the value is that it cannot be argued with:
+ *
+ * - only **breaking** structural changes. A prose finding is a claim about how
+ *   a model reads, and this section is for claims about code;
+ * - only reaches that **name the thing** — a call site, a parameter reference,
+ *   or a recorded call. `dependency` says "you install this" and
+ *   `model_consumer` says "the model chooses here"; neither is a line that
+ *   stops working, and listing them here would blunt the one section whose
+ *   whole worth is that every entry survives being checked.
+ */
+function confirmedBreaks(report: Report): ConfirmedBreak[] {
+  const blast = report.blast;
+  if (blast === null) return [];
+
+  const NAMES: ReadonlySet<ReachKind> = new Set<ReachKind>([
+    "tool_reference",
+    "param_reference",
+    "observed_call",
+  ]);
+
+  const out: ConfirmedBreak[] = [];
+  const seen = new Set<string>();
+
+  for (const surface of report.surfaces) {
+    for (const change of surface.comparison.diff?.changes ?? []) {
+      if (!change.breaking) continue;
+
+      for (const reach of blast.reaches) {
+        if (!NAMES.has(reach.kind)) continue;
+        // A tool-level change meets any reach naming that tool. A parameter
+        // change meets only a reach naming that exact parameter, because
+        // naming the tool says nothing about which field is passed.
+        const meets =
+          change.target === change.tool ? reach.target === change.tool : reach.target === change.target;
+        if (!meets) continue;
+
+        const key = `${change.rule}|${change.target}|${reach.evidence}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        out.push({
+          rule: change.rule,
+          target: change.target,
+          subpath: surface.subpath,
+          reach: reach.kind,
+          evidence: reach.evidence,
+          detail:
+            reach.kind === "observed_call"
+              ? `${change.note}, and your traces record it being called`
+              : `${change.note}, and this line names it`,
+        });
+      }
+    }
+  }
+
+  // The prose half, and the sharpest entry this section has.
+  //
+  // Every other break here joins a structural change to a line that *names*
+  // something. This one joins a deleted sentence to a line that *contains* it,
+  // word for word. It is a stronger claim than a word match — a name can appear
+  // for a dozen reasons and a full sentence of guidance appears for one — and it
+  // is the case nothing else in a toolchain can see, because both halves of the
+  // mismatch are prose.
+  //
+  // Structural severity is not the gate here; the match is. A `guidance_removed`
+  // finding is not a breaking change to any client, and that is exactly why the
+  // consumer's own copy of the deleted sentence is worth putting at the top.
+  for (const surface of report.surfaces) {
+    for (const finding of surface.prose.findings) {
+      for (const reach of blast.reaches) {
+        if (reach.kind !== "stale_quote" || reach.target !== finding.target) continue;
+
+        const key = `${finding.rule}|${finding.target}|${reach.evidence}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        out.push({
+          rule: finding.rule,
+          target: finding.target,
+          subpath: surface.subpath,
+          reach: reach.kind,
+          evidence: reach.evidence,
+          detail: reach.detail,
+        });
+      }
+    }
+  }
+
+  return out;
+}
+
+/**
  * Every finding in the report, reduced to what Layer 3 can look for.
  *
  * Structural changes and prose findings both reduce to the same three fields,
@@ -456,21 +607,63 @@ export async function buildReport(options: ReportOptions): Promise<Report> {
  * a prose finding at once, and scanning a repo twice for the same word produces
  * two identical reaches and no extra information.
  */
-function blastTargetsFor(surfaces: readonly SurfaceReport[]): BlastTarget[] {
-  const seen = new Map<string, BlastTarget>();
+/**
+ * The sentence a finding says was deleted, when it says one was.
+ *
+ * Three of Layer 1's rules are about text that used to be there and is not.
+ * Their `quote` is that text, verbatim from the older version. The other rules
+ * quote something that is still present, and handing one of those to the scan
+ * would report a consumer as stale for holding a sentence the contract still
+ * contains — the exact opposite of the claim.
+ *
+ * Checked against the newer text as well, rather than trusted. The classifier
+ * compares whole sentences; a sentence it treated as removed can still survive
+ * inside a rewritten one, and this reach is only worth having because it cannot
+ * be argued with.
+ */
+function deletedSentence(finding: ProseFinding): string | null {
+  const REMOVES: ReadonlySet<string> = new Set(["guidance_removed", "mode_switch_changed", "example_removed"]);
+  if (!REMOVES.has(finding.rule)) return null;
+  const quote = finding.evidence.quote;
+  if (quote === null) return null;
+  const after = finding.evidence.after;
+  if (after !== null && after.replace(/\s+/g, " ").includes(quote.replace(/\s+/g, " ").trim())) return null;
+  return quote;
+}
 
-  const add = (surface: string, tool: string, target: string): void => {
+/** Mutable while it is being assembled, frozen into `BlastTarget` on the way out. */
+type PendingTarget = BlastTarget & { quotes?: string[] };
+
+function blastTargetsFor(surfaces: readonly SurfaceReport[]): BlastTarget[] {
+  const seen = new Map<string, PendingTarget>();
+
+  const add = (surface: string, tool: string, target: string, quote?: string | null): void => {
     const key = `${surface} ${target}`;
-    if (seen.has(key)) return;
+    const existing = seen.get(key);
+    if (existing !== undefined) {
+      // The same target can arrive from Layer 0 and Layer 1 both, and only one
+      // of them carries a deleted sentence. Merged rather than skipped, or the
+      // quote would be lost to whichever layer happened to be read first.
+      if (quote !== undefined && quote !== null) {
+        existing.quotes = [...new Set([...(existing.quotes ?? []), quote])];
+      }
+      return;
+    }
     // `tool.param` -> the parameter; a bare tool name -> no parameter. Split on
     // the first dot only, so a nested `tool.opts.retries` keeps its path.
     const rest = target.startsWith(`${tool}.`) ? target.slice(tool.length + 1) : undefined;
-    seen.set(key, { label: target, surface, tool, ...(rest === undefined ? {} : { param: rest }) });
+    seen.set(key, {
+      label: target,
+      surface,
+      tool,
+      ...(rest === undefined ? {} : { param: rest }),
+      ...(quote === undefined || quote === null ? {} : { quotes: [quote] }),
+    });
   };
 
   for (const s of surfaces) {
     for (const c of s.comparison.diff?.changes ?? []) add(s.subpath, c.tool, c.target);
-    for (const f of s.prose.findings) add(s.subpath, f.tool, f.target);
+    for (const f of s.prose.findings) add(s.subpath, f.tool, f.target, deletedSentence(f));
     for (const f of s.behaviour?.findings ?? []) {
       // Behavioural targets are `tool` or `tool.field`; the tool is the head.
       const tool = f.target.split(".")[0] ?? f.target;
@@ -540,8 +733,11 @@ function foldReport(input: {
             targets: blastTargetsFor(surfaces),
             ...(input.usage === undefined ? {} : { usage: input.usage }),
           }),
+    breaks: [],
     generatedAt: new Date().toISOString(),
   };
+  // After the blast, because it is the join of the two.
+  report.breaks = confirmedBreaks(report);
   report.headline = headlineFor(report);
   return report;
 }
@@ -632,6 +828,64 @@ export async function buildManifestReport(options: ManifestReportOptions): Promi
     surfaces: [surface],
     // Nothing was installed, so nothing could be missing. Reporting a dependency
     // gap here would claim a narrowed read that did not happen.
+    missingDependencies: [],
+    judge,
+    caller: options.behaviour?.caller ?? null,
+    ...(options.repo === undefined ? {} : { repo: options.repo }),
+    ...(options.usage === undefined ? {} : { usage: options.usage }),
+  });
+}
+
+/**
+ * Two contracts that were read rather than inferred.
+ *
+ * The live MCP reader hands back a `SurfaceResult` directly. There is no
+ * package to install, no entry point to resolve and no document to parse, so
+ * the two lines that produce the sides in every other builder have already
+ * happened by the time this is called.
+ *
+ * Everything after that point is shared with the other builders on purpose.
+ * The diff, the classifier, Layer 2, Layer 3 and the fold are the same objects,
+ * so a finding about a running server is the same kind of claim, ranked the
+ * same way, as a finding about a tarball.
+ */
+export type SurfacePairOptions = {
+  from: SurfaceResult;
+  to: SurfaceResult;
+  /** What to call the subject. A running server carries no registry identity. */
+  package: string;
+  /** Labels for the two sides. A URL or a command, not a semver. */
+  versions: { from: string; to: string };
+  /** The name of the thing being compared, used as the surface label. */
+  subpath?: string;
+  ecosystem?: Ecosystem;
+  judge?: Judge | null;
+  behaviour?: BehaviourOptions;
+  repo?: RepoSource;
+  usage?: UsageProfile;
+};
+
+export async function buildSurfacePairReport(options: SurfacePairOptions): Promise<Report> {
+  const judge = options.judge ?? undefined;
+  const surface = await compareSurfaces(
+    options.subpath ?? "mcp-server",
+    options.from,
+    options.to,
+    options.versions,
+    judge,
+    options.behaviour,
+  );
+
+  return foldReport({
+    subject: {
+      ecosystem: options.ecosystem ?? "http",
+      package: options.package,
+      from: options.versions.from,
+      to: options.versions.to,
+    },
+    surfaces: [surface],
+    // Nothing was installed, so nothing could be missing. Reporting a
+    // dependency gap here would claim a narrowed read that never happened.
     missingDependencies: [],
     judge,
     caller: options.behaviour?.caller ?? null,

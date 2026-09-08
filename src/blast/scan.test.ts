@@ -187,14 +187,18 @@ describe("tool and parameter reach", () => {
 });
 
 describe("what gets scanned", () => {
-  it("skips files that are not source", () => {
+  it("reads prose for quotes, and never as a call site", () => {
     const result = scan({
       "package.json": manifest("^0.24.0"),
       "src/a.ts": USES,
       "README.md": "make_thing target target target",
       "yarn.lock": "make_thing",
     });
-    expect(result.scanned.files).toBe(2); // package.json + src/a.ts
+    // Markdown is read, because a system prompt is as often a file as a string
+    // literal and `stale_quote` has to be able to see it. A lockfile is not.
+    expect(result.scanned.files).toBe(3); // package.json + src/a.ts + README.md
+    // Naming a tool in documentation is not a line that stops working, so no
+    // reach may be anchored there.
     expect(result.reaches.every((r) => !r.evidence.startsWith("README"))).toBe(true);
   });
 
@@ -368,5 +372,93 @@ describe("the trace file is not a call site", () => {
 
     expect(result.reaches.some((r) => r.kind === "tool_reference")).toBe(false);
     expect(result.reaches.some((r) => r.kind === "observed_call")).toBe(true);
+  });
+});
+
+/**
+ * The deepest reach in this layer, and the one nothing else in a toolchain can
+ * see: the consumer copied a sentence of the tool description into their own
+ * prompt, and the provider later deleted it.
+ */
+describe("stale_quote", () => {
+  const SENTENCE = "Pass `slot` only when the request names a particular place to put it.";
+
+  const QUOTED: BlastTarget = {
+    label: "make_thing",
+    surface: "./ai-sdk",
+    tool: "make_thing",
+    quotes: [SENTENCE],
+  };
+
+  it("finds the deleted sentence in the consumer's own prompt", () => {
+    const result = scan(
+      {
+        "package.json": manifest("^0.24.0"),
+        "src/a.ts": USES,
+        "src/prompt.ts": `export const SYSTEM = \`You are an agent.\n${SENTENCE}\nBe brief.\`;\n`,
+      },
+      [QUOTED],
+    );
+
+    const stale = result.reaches.filter((r) => r.kind === "stale_quote");
+    expect(stale).toHaveLength(1);
+    expect(stale[0]?.evidence).toBe("src/prompt.ts:2");
+    expect(stale[0]?.detail).toContain("quotes a sentence the newer version deleted");
+  });
+
+  it("finds it in a markdown prompt, which imports nothing and names no tool", () => {
+    // The case the prose extensions exist for. This file has no import, no tool
+    // name, and is exactly where a system prompt lives on a real project.
+    const result = scan(
+      {
+        "package.json": manifest("^0.24.0"),
+        "src/a.ts": USES,
+        "prompts/agent.md": `# Agent\n\n${SENTENCE}\n`,
+      },
+      [QUOTED],
+    );
+
+    expect(result.reaches.some((r) => r.kind === "stale_quote" && r.evidence === "prompts/agent.md:3")).toBe(true);
+  });
+
+  it("matches across a line wrap, because a prompt is wrapped text", () => {
+    const wrapped = "Pass `slot` only when the request\n  names a particular place to put it.";
+    const result = scan(
+      { "package.json": manifest("^0.24.0"), "src/a.ts": USES, "prompts/agent.md": `Rules:\n${wrapped}\n` },
+      [QUOTED],
+    );
+    expect(result.reaches.some((r) => r.kind === "stale_quote")).toBe(true);
+  });
+
+  it("says nothing when the sentence is not in the repo", () => {
+    const result = scan({ "package.json": manifest("^0.24.0"), "src/a.ts": USES }, [QUOTED]);
+    expect(result.reaches.some((r) => r.kind === "stale_quote")).toBe(false);
+  });
+
+  /**
+   * The floor is the whole reason this reach can be trusted. A short fragment
+   * appears in every repository by accident, and reporting one as evidence
+   * would turn the strongest line in the layer into the noisiest.
+   */
+  it("refuses a fragment too short to be distinctive", () => {
+    const short: BlastTarget = { label: "make_thing", surface: "./ai-sdk", tool: "make_thing", quotes: ["the request"] };
+    const result = scan(
+      { "package.json": manifest("^0.24.0"), "src/a.ts": USES, "prompts/agent.md": "about the request itself" },
+      [short],
+    );
+    expect(result.reaches.some((r) => r.kind === "stale_quote")).toBe(false);
+  });
+
+  it("ranks above a word match on the same tool", () => {
+    const result = scan(
+      {
+        "package.json": manifest("^0.24.0"),
+        "src/a.ts": USES,
+        "prompts/agent.md": SENTENCE,
+      },
+      [QUOTED],
+    );
+    const kinds = result.reaches.map((r) => r.kind);
+    expect(kinds.indexOf("stale_quote")).toBeLessThan(kinds.indexOf("tool_reference"));
   });
 });

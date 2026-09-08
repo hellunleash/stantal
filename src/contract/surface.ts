@@ -31,7 +31,17 @@ export type SurfaceAbsenceReason =
    * on purpose: this surface exists, and saying it does not would be a false
    * finding of exactly the kind the product is supposed to catch.
    */
-  | "descriptors_unreadable";
+  | "descriptors_unreadable"
+  /**
+   * A running server we could not reach, boot, or get an answer out of.
+   *
+   * Unevidenced, and it is the most important unevidenced reason in this list.
+   * The live reader fails for reasons that have nothing to do with the
+   * contract: a missing API key, a cold `npx` download, a network blip, a URL
+   * that moved. Treating any of those as "the server has no tools" would turn a
+   * bad minute into a report saying every tool was removed.
+   */
+  | "server_unreachable";
 
 export type SurfaceAbsence = {
   ecosystem: Ecosystem;
@@ -88,6 +98,7 @@ const EVIDENCED_ABSENCE: Record<SurfaceAbsenceReason, boolean> = {
   no_descriptors: true,
   unparseable: false,
   descriptors_unreadable: false,
+  server_unreachable: false,
 };
 
 export function isEvidencedAbsence(reason: SurfaceAbsenceReason): boolean {

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, test } from "vitest";
 import { agentsSection, writeAgentsMd } from "./agents-md.js";
+import { publishesContract } from "./publishes.js";
 
 describe("writeAgentsMd", () => {
   let dir: string;
@@ -103,5 +104,75 @@ describe("the briefing itself", () => {
     expect(section).toContain("error or a vulnerability");
     expect(section).toContain("`unconfirmed` means no model was available");
     expect(section).toContain('"We could not read it" is never "it is fine."');
+  });
+});
+
+/**
+ * A repository that publishes a contract has the problem from the side that
+ * causes it, and none of the consumer rows will ever mention that.
+ */
+describe("the provider branch", () => {
+  const facts = { package: "@acme/tools", subpaths: [".", "./ai-sdk"], tools: 7 };
+
+  test("is absent from a repository that publishes nothing", () => {
+    // A section about publishing, in a project that publishes nothing, is noise
+    // in the one file every agent reads first.
+    expect(agentsSection()).not.toContain("This repository also publishes a contract");
+    expect(agentsSection()).not.toContain("check_release");
+  });
+
+  test("names the package, the entry points and the two commands", () => {
+    const section = agentsSection("1.0.0", facts);
+    expect(section).toContain("This repository also publishes a contract");
+    expect(section).toContain("`@acme/tools` ships 7 tool(s)");
+    expect(section).toContain("`.`, `./ai-sdk`");
+    expect(section).toContain("check_release");
+    expect(section).toContain("compare_manifests");
+  });
+
+  test("says the gate runs before publishing, not after", () => {
+    // Afterwards the only fix is another release, which is the whole reason a
+    // provider wants this at all.
+    expect(agentsSection("1.0.0", facts)).toContain("before `npm publish`, not after");
+  });
+
+  test("keeps the consumer half as well", () => {
+    // Every provider is also a consumer. Replacing one briefing with the other
+    // would trade one blind spot for the opposite one.
+    const section = agentsSection("1.0.0", facts);
+    expect(section).toContain("audit_project");
+    expect(section).toContain("Saying it accurately");
+  });
+});
+
+describe("publishesContract", () => {
+  function repo(manifest: Record<string, unknown>, files: Record<string, string> = {}): string {
+    const dir = mkdtempSync(join(tmpdir(), "stantal-publishes-"));
+    writeFileSync(join(dir, "package.json"), JSON.stringify(manifest), "utf8");
+    for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body, "utf8");
+    return dir;
+  }
+
+  const PACK = 'export const tools = [{ name: "build", description: "Build a screen.", inputSchema: { type: "object", properties: {} } }];';
+
+  test("reads this project's own build with the extractor a consumer would use", () => {
+    const dir = repo({ name: "@acme/tools", version: "1.0.0", exports: { ".": "./pack.js" } }, { "pack.js": PACK });
+    const facts = publishesContract(dir);
+    expect(facts?.package).toBe("@acme/tools");
+    expect(facts?.tools).toBe(1);
+  });
+
+  test("a package with a name and no tools is not a provider", () => {
+    // Most repositories have a name. Only a tool set makes this the question.
+    const dir = repo({ name: "app", version: "1.0.0", exports: { ".": "./index.js" } }, { "index.js": "export const x = 1;" });
+    expect(publishesContract(dir)).toBeNull();
+  });
+
+  test("a private package is not published, so it is not a provider", () => {
+    const dir = repo(
+      { name: "@acme/tools", private: true, version: "1.0.0", exports: { ".": "./pack.js" } },
+      { "pack.js": PACK },
+    );
+    expect(publishesContract(dir)).toBeNull();
   });
 });

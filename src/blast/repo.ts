@@ -41,6 +41,27 @@ const SOURCE_EXTENSIONS = [
   ".vue",
 ];
 
+/**
+ * Extensions that hold prose rather than code.
+ *
+ * Listed and read, but never treated as a call site. A system prompt is as
+ * often a Markdown file as a string literal, and `stale_quote` is the one
+ * finding that has to see it: a prompt quoting a sentence the contract no
+ * longer contains is stale wherever it lives.
+ *
+ * Kept apart from the source list because the other reaches must not widen with
+ * it. A README naming a tool is documentation, not a line that stops working,
+ * and reporting it as a `tool_reference` would put an unactionable entry at the
+ * top of the one list a consumer reads.
+ */
+const PROSE_EXTENSIONS = [".md", ".mdx", ".txt", ".mdc", ".prompt"];
+
+/** True for a file listed for its prose, never for its code. */
+export function isProseFile(path: string): boolean {
+  const base = path.split("/").pop() ?? path;
+  return PROSE_EXTENSIONS.some((ext) => base.endsWith(ext));
+}
+
 /** Never descended into. Their contents are not the consumer's own code. */
 const SKIP_DIRECTORIES = new Set([
   "node_modules",
@@ -83,7 +104,7 @@ const MAX_FILE_BYTES = 2_000_000;
 export function isScannable(path: string): boolean {
   const base = path.split("/").pop() ?? path;
   if (GENERATED_FILES.has(base)) return false;
-  return SOURCE_EXTENSIONS.some((ext) => base.endsWith(ext));
+  return SOURCE_EXTENSIONS.some((ext) => base.endsWith(ext)) || isProseFile(base);
 }
 
 /**

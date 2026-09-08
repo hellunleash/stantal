@@ -39,6 +39,28 @@ export type ReachKind =
    */
   | "observed_call"
   /**
+   * A file in the repo contains, word for word, a sentence the newer version
+   * of the contract deleted.
+   *
+   * The deepest reach here, and the only one that is about the consumer's own
+   * prose rather than their code. A developer reads a tool description, copies
+   * a sentence of it into a system prompt — *"Pass `slot` only when the request
+   * names a particular place"* — and the provider later rewrites the
+   * description and drops that sentence. The prompt now instructs a model about
+   * behaviour the contract no longer describes. Nothing else in the toolchain
+   * can see it: the types are unchanged, the tests pass, the wire is identical,
+   * and both halves of the mismatch are text.
+   *
+   * It is a **verbatim** match on a normalised sentence, never a substring or a
+   * fuzzy one. A partial match would be a guess, and this finding is only worth
+   * having because it is not one: the reader can open the line and see their own
+   * copy of a sentence that is gone.
+   *
+   * The length floor is what keeps it honest. A four-word fragment appears in
+   * every repository by accident; a full sentence of guidance does not.
+   */
+  | "stale_quote"
+  /**
    * The manifest depends on the package, and the declared range admits a
    * version the finding is present in. Range, not installed version: a caret
    * range that resolves clean today will pick up the defect on the next
@@ -159,13 +181,17 @@ export function canClaimUnaffected(result: BlastResult): boolean {
 const RANK: Record<ReachKind, number> = {
   // First: the one line here that is a record rather than an argument.
   observed_call: 0,
-  dependency: 1,
-  surface_import: 2,
-  tool_reference: 3,
-  param_reference: 4,
+  // Second: not a record, but the only other reach that is exact rather than
+  // inferred. A word match says the repo mentions a tool; this one says the
+  // repo contains a sentence the contract no longer does.
+  stale_quote: 1,
+  dependency: 2,
+  surface_import: 3,
+  tool_reference: 4,
+  param_reference: 5,
   // Last: real, and the least checkable thing here. A consumer scanning the
   // list wants the lines naming a tool before the line that only mounts one.
-  model_consumer: 5,
+  model_consumer: 6,
 };
 
 export function compareReaches(a: Reach, b: Reach): number {

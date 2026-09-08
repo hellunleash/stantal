@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { publishesContract, type ProviderFacts } from "./publishes.js";
 
 /**
  * The briefing a coding agent reads instead of being told what to do.
@@ -37,7 +38,7 @@ export type WriteAgentsResult = {
  * is a question the person has to work out how to dismiss — and two of those
  * and they stop reading.
  */
-export function agentsSection(version = "0.0.0"): string {
+export function agentsSection(version = "0.0.0", provider: ProviderFacts | null = null): string {
   return [
     BEGIN,
     // Stamped so a later run can tell that this block is older than the CLI
@@ -110,6 +111,7 @@ export function agentsSection(version = "0.0.0"): string {
     "  package's contract, not about their code.",
     "- **Run the test suite once** after writing tests, and report whether it passed.",
     "",
+    ...providerSection(provider),
     "### Saying it accurately",
     "",
     "- A finding is *something a model would read differently*. It is not a bug, an",
@@ -118,9 +120,58 @@ export function agentsSection(version = "0.0.0"): string {
     "  not mean the finding is doubtful.",
     "- \"We could not read it\" is never \"it is fine.\" If `unreachable` is true for a",
     "  package, say so in the same breath as anything else you report.",
+    "- A **stale quote** is the sharpest thing here and the easiest to overstate. It",
+    "  means a file in this repo still contains, word for word, a sentence the newer",
+    "  contract deleted — usually a system prompt. Say which file and quote the",
+    "  sentence. Do not say the prompt is wrong; say the contract no longer",
+    "  describes what it tells the model.",
     "",
     END,
   ].join("\n");
+}
+
+/**
+ * The other end of the dependency, when this repository is at it.
+ *
+ * Everything above is the consumer's question: something I install is about to
+ * move under me. A repository that publishes a contract of its own has the
+ * problem from the side that causes it, and none of the rows above will ever
+ * mention it — a provider is briefed entirely about the half of the product
+ * they care about least, which is what this section fixes.
+ *
+ * Emitted only when the extractor actually read tools out of this project's own
+ * build. A section about publishing, written into a repository that publishes
+ * nothing, is noise in the one file every agent reads first.
+ */
+function providerSection(provider: ProviderFacts | null): string[] {
+  if (provider === null) return [];
+  const doors = provider.subpaths.join("`, `");
+  return [
+    "### This repository also publishes a contract",
+    "",
+    `\`${provider.package}\` ships ${provider.tools} tool(s) a model reads, on \`${doors}\`.`,
+    "So the question runs both ways here: what an upgrade does to this project, and",
+    "what **this project's next release** does to the models already calling it.",
+    "",
+    "Nobody downstream gets a warning. Their semver check passes, their types compile",
+    "and their tests are green, because everything that moved is prose.",
+    "",
+    "| Before you | Call |",
+    "|---|---|",
+    "| publish a release | **`check_release`** with this directory and the last published version. Do it before `npm publish`, not after — afterwards the only fix is another release. |",
+    "| change a tool description or a parameter | Same call. A deleted sentence is the finding this product exists for and it is invisible to every other check you run. |",
+    "| ship a contract that never goes to a registry | **`compare_manifests`** with the two documents. Nothing is fetched and no version is resolved. |",
+    "",
+    "- **Never delete a sentence of guidance to shorten a description.** If it has to",
+    "  go, say so in the release notes in the same words the sentence used, so a",
+    "  consumer grepping for it finds something.",
+    "- **A new optional parameter needs a sentence saying when to pass it.** Without",
+    "  one a model fills it because it is there, which is the anchoring failure this",
+    "  whole tool was built around.",
+    "- Report what `check_release` found and let them decide. Do not edit a",
+    "  description to make a finding go away.",
+    "",
+  ];
 }
 
 /**
@@ -132,7 +183,10 @@ export function agentsSection(version = "0.0.0"): string {
  */
 export function writeAgentsMd(directory: string, version = "0.0.0", filename = "AGENTS.md"): WriteAgentsResult {
   const file = join(directory, filename);
-  const section = agentsSection(version);
+  // Read, not asked. Whether this repo publishes a contract is a fact about its
+  // own build, and a question here would be one more thing to get wrong on a
+  // command whose whole point is that it needs no configuration.
+  const section = agentsSection(version, publishesContract(directory));
 
   if (!existsSync(file)) {
     writeFileSync(file, `# Agent notes\n\n${section}\n`, "utf8");

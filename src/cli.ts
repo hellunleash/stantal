@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
-import { isEvidencedAbsence, isPresent } from "./contract/surface.js";
+import { describeAbsence, isEvidencedAbsence, isPresent, type SurfaceResult } from "./contract/surface.js";
+import { labelFor, parseTarget, readLiveServer, type LiveTarget } from "./extract/live.js";
 import { callerFromEnv } from "./behaviour/callers.js";
 import { behaviourCacheFromEnv } from "./behaviour/run.js";
 import type { Judge } from "./prose/judge.js";
@@ -19,13 +20,16 @@ import { canClaimUnaffected } from "./blast/taxonomy.js";
 import { pacoteRegistry } from "./registry/npm.js";
 import { vertexFromEnv } from "./vertex.js";
 import { walkHistory, type HistoryResult } from "./history.js";
+import { exposureOf, fetchDownloads, type ExposureResult } from "./exposure.js";
 import {
   buildLocalReport,
   buildManifestReport,
   buildReport,
+  buildSurfacePairReport,
   countFindings,
   exitCodeFor,
   type BehaviourOptions,
+  type ConfirmedBreak,
   type Report,
   type SurfaceReport,
 } from "./report.js";
@@ -54,10 +58,13 @@ import {
   heldByRange,
   isCurrent,
   isUnreachable,
+  rangeHolds,
   reachCount,
   type AuditEntry,
   type AuditResult,
 } from "./audit.js";
+import { doctorPackage, doctorVerdict, type DoctorResult } from "./doctor.js";
+import { doctorSummary, summaryLines, type DoctorSummary } from "./verdict/summary.js";
 import { watchProject, watchSummary } from "./watch.js";
 
 /**
@@ -78,8 +85,11 @@ stantal — know whether an upgrade changes how a model uses your dependency
   stantal snapshot [dir] [--save]          the contracts this repo writes itself
   stantal <package> <from> <to> [options]
   stantal history <package> [options]
+  stantal exposure <package> [options]
+  stantal live <server> [<server>] [options]
   stantal manifest <before...> <after...> [options]
   stantal check <dir> --against <version> [options]
+  stantal doctor <package> [options]
   stantal pin <package> [options]
   stantal patch <package> <from> [options]
   stantal connect [options]
@@ -113,6 +123,32 @@ Checking a directory is the provider's gate before publishing: it reads the
 build on disk, fetches the release you name, and tells you what your next
 version does to the models already calling you -- while it still costs
 minutes to fix rather than a deprecation cycle.
+
+The doctor is the other half of that, and it runs on the consumer's side. It
+takes one package name, works out the pair itself -- what you have installed
+against what a fresh install would give you -- and reads the repository it is
+standing in. That makes it the form a provider can embed in their own CLI: it
+runs on real code, on the user's machine, and nothing leaves it. Add --against
+to judge a specific release instead of the newest.
+
+Exposure is the provider's number, and it needs no access to any user. It walks
+every release, then crosses that with npm's public per-version download counts,
+and says how much of the installed base is sitting on a version that carries a
+finding. Every install is counted, whether or not anybody ran anything, so it is
+a census rather than a survey -- do not multiply it by any number that came from
+people who opted in.
+
+Reading a live server is the one path that does not go through files. Give it a
+URL or the command that starts the server, and it speaks MCP and reads
+tools/list, so what you get is the contract as a client receives it rather than
+as we infer it. That reaches the two things a static read never will: a server
+that builds its tools at run time, and a server that is not a package at all.
+Two targets compares them. One target prints what that server offers today, and
+--emit writes it to a file you can commit, so the next comparison is an ordinary
+stantal manifest between two committed files.
+
+It only ever contacts what you name. Nothing turns a package name into a command
+here, so no other command in this tool can start a server on your machine.
 
 Snapshotting covers the contracts a repository writes rather than installs. A
 host that hands its own API to an agent generates a tool list into a file, and
@@ -151,6 +187,14 @@ Options
                         emitted patch is reapplied on every install.
   --save                snapshot: record what the contracts say today. Without
                         it, snapshot only reads and compares.
+  --emit <file>         live: write what one server offers today, as a document
+                        you can commit and compare against later.
+  --header <k=v>        live: sent with every request to a URL target, for an
+                        Authorization header. Repeatable.
+  --env <k=v>           live: given to a command target, which otherwise
+                        inherits nothing. Repeatable.
+  --timeout <ms>        live: give up if the server has not answered. Default
+                        60000, which a cold npx download can need.
   --traces <file>       An OpenTelemetry span export. Findings on tools your
                         agent actually called are reported as observed, and
                         ranked first. It can only add evidence: a tool missing
@@ -197,6 +241,13 @@ Options
                         project (~/.cache/stantal/npm, or LOCALAPPDATA on
                         Windows) — it is third-party code, not project state.
   --against <version>   check: the published release to compare the build against.
+                        doctor: the release to judge, instead of the newest.
+  --summary             doctor: also print the payload a provider would receive.
+                        Prints it and sends nothing.
+  --send <url>          doctor: print that payload and post it to a host. It
+                        carries the provider's own tool names and counts, and
+                        never a file path, a line number, or a line of your
+                        code. There is no default address.
   --current <version>   history: the version you are on now, so the walk can say
                         which release to move to. Default: the oldest walked.
   --since <version>     history: start here instead of the first release.
@@ -461,6 +512,28 @@ function renderSurface(surface: SurfaceReport): string[] {
   return lines;
 }
 
+/**
+ * The lines of the consumer's own code that a breaking change lands on.
+ *
+ * Printed **first**, above the accounting and above every surface. Everything
+ * else in this report is a claim about a package; this is a claim about them,
+ * and it is the only one they can check by opening a file. Burying it under a
+ * list of structural changes was the difference between "here is what moved"
+ * and "here is what stopped working for you".
+ */
+function renderBreaks(report: Report): string[] {
+  if (report.breaks.length === 0) return [];
+
+  const out: string[] = [`  ${red(bold(`BREAKS YOUR CODE in ${report.breaks.length} place(s)`))}`, ""];
+  for (const item of report.breaks.slice(0, 10)) {
+    out.push(`    ${red(item.rule.padEnd(20))} ${item.target}`);
+    out.push(`      ${item.evidence}  ${dim(item.detail)}`);
+  }
+  if (report.breaks.length > 10) out.push(`    ${dim(`... and ${report.breaks.length - 10} more`)}`);
+  out.push("");
+  return out;
+}
+
 function truncate(text: string, max: number): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
@@ -478,6 +551,7 @@ function render(report: Report): string {
     "",
   ];
 
+  out.push(...renderBreaks(report));
   out.push(...renderAccounting(report));
 
   const body = report.surfaces.flatMap(renderSurface);
@@ -1995,6 +2069,17 @@ function renderAuditEntry(entry: AuditEntry): string[] {
     const paint = VERDICT_COLOR[entry.report.verdict];
     out.push(`    ${paint(entry.report.verdict)}  ${dim(truncate(entry.report.headline, 88))}`);
 
+    // Above the reach line, because it is a stronger claim than reach: not
+    // "this touches you" but "this line of yours stops working".
+    if (entry.report.breaks.length > 0) {
+      const first = entry.report.breaks[0];
+      out.push(
+        `    ${red(bold(`breaks your code in ${entry.report.breaks.length} place(s)`))}  ${dim(
+          `${first?.evidence} — ${first?.rule} ${first?.target}`,
+        )}`,
+      );
+    }
+
     const blast = entry.report.blast;
     if (blast !== null && blast.reaches.length > 0) {
       const first = blast.reaches[0];
@@ -2034,6 +2119,22 @@ function renderAuditEntry(entry: AuditEntry): string[] {
 type NextStep = { action: string; why: string | null };
 
 /**
+ * How to describe a set of breaks in one clause.
+ *
+ * Two different claims share this list. Most entries are a line that *names*
+ * something removed — a call site, a switch case. A `stale_quote` is a line that
+ * *contains* a sentence the contract no longer does, which is usually a prompt
+ * and usually not code at all. Describing that as "names something it removes"
+ * would send the reader looking for a call site they do not have.
+ */
+function whatBreaks(breaks: readonly ConfirmedBreak[]): string {
+  const stale = breaks.filter((b) => b.reach === "stale_quote").length;
+  if (stale === breaks.length) return "place(s) in your own text quote a sentence it deletes";
+  if (stale === 0) return "line(s) of your code name something it removes";
+  return `line(s) of yours meet it, ${stale} of them quoting a sentence it deletes`;
+}
+
+/**
  * The ordered list at the bottom, which is the only part most people read.
  *
  * Ordered by what blocks what, not by severity. A test runner comes first
@@ -2065,9 +2166,23 @@ function nextSteps(result: AuditResult): NextStep[] {
     });
   }
 
+  // Before anything else in the plan. A package that breaks a line you have
+  // written is not the same decision as one that might read differently, and
+  // the ordered list is what somebody acts on.
+  for (const entry of result.entries) {
+    const breaks = entry.report?.breaks ?? [];
+    if (breaks.length === 0 || entry.latest === null) continue;
+    steps.push({
+      action: `do not take ${entry.package} ${entry.latest} yet`,
+      why: `${breaks.length} ${whatBreaks(breaks)}, starting at ${breaks[0]?.evidence}`,
+    });
+  }
+
   for (const entry of result.entries) {
     if (entry.report === null || entry.latest === null) continue;
     if (entry.report.verdict === "clean") continue;
+    // Already said, and said more sharply, by the loop above.
+    if (entry.report.breaks.length > 0) continue;
     if (entry.report.verdict === "unreadable") {
       steps.push({
         action: `stantal ${entry.package} ${entry.installed} ${entry.latest}`,
@@ -2176,6 +2291,503 @@ async function runWatch(
   return 0;
 }
 
+/**
+ * `stantal doctor <package>` — one package, in the repo that installed it.
+ *
+ * The command a provider embeds in their own CLI. Everything else here takes
+ * something the caller has to already know; this takes the one thing a provider
+ * always knows, which is their own name.
+ */
+async function runDoctor(
+  pkg: string | undefined,
+  values: {
+    json?: boolean | undefined;
+    cache?: string | undefined;
+    directory?: string | undefined;
+    against?: string | undefined;
+    summary?: boolean | undefined;
+    send?: string | undefined;
+  },
+  judge: Judge | null,
+  behaviour: BehaviourOptions | undefined,
+  repo: RepoSource | undefined,
+  usage: UsageProfile | undefined,
+): Promise<number> {
+  if (pkg === undefined) {
+    process.stderr.write(`stantal: doctor needs a package name.\n\n${USAGE}\n`);
+    return 2;
+  }
+
+  const directory = values.directory ?? process.cwd();
+  const result = await doctorPackage({
+    package: pkg,
+    directory,
+    registry: pacoteRegistry(),
+    judge,
+    ...(values.against === undefined ? {} : { target: values.against }),
+    ...(behaviour === undefined ? {} : { behaviour }),
+    ...(repo === undefined ? {} : { repo }),
+    ...(usage === undefined ? {} : { usage }),
+    ...(values.cache === undefined ? {} : { cacheRoot: values.cache }),
+  });
+
+  const verdict = doctorVerdict(result);
+
+  // The payload, and the two ways it is allowed to be seen. `--summary` builds
+  // it and sends nothing, which is how a provider checks what their own users
+  // would be handing them before asking anybody to hand it over.
+  const wanted = values.summary === true || values.send !== undefined;
+  const summary = wanted ? doctorSummary(result, ownVersion()) : null;
+
+  if (values.json === true) {
+    // Folded into the one document rather than printed after it. Two JSON
+    // objects on stdout is not something a caller can pipe, and `summary` is
+    // exactly the field a provider's own tooling wants to read.
+    process.stdout.write(
+      `${JSON.stringify({ verdict, ...result, ...(summary === null ? {} : { summary }) }, null, 2)}\n`,
+    );
+  } else {
+    process.stdout.write(renderDoctor(result, verdict));
+    if (summary !== null && values.send === undefined) {
+      process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+    }
+  }
+
+  if (summary !== null && values.send !== undefined) await sendSummary(summary, values.send);
+
+  // `not-applicable` exits 0. The package is not here, is not installed, or
+  // ships nothing we could read, and none of those is the consumer's fault or
+  // their problem. A provider who wires this into a postinstall must not have
+  // it fail the installs of people who are not even affected.
+  return verdict === "not-applicable" ? 0 : exitCodeFor(verdict);
+}
+
+/**
+ * Send the doctor's summary to the provider who asked for it.
+ *
+ * Separate from `publishVerdict` on purpose, and the two must not be merged.
+ * There, a person read a verdict and chose to forward it. Here, somebody is
+ * running the provider's own CLI and may not have read anything, so the payload
+ * is narrower and the disclosure is not optional.
+ *
+ * Three rules, all visible in the code below:
+ *
+ * 1. **It prints the exact payload first**, rendered from the payload itself.
+ * 2. **It goes nowhere unless a destination was typed.** There is no default
+ *    address, and unlike `--publish` there is no environment variable either:
+ *    a provider embeds this with the URL written into their own command, where
+ *    their user can read it.
+ * 3. **A failure to send is never fatal.** The doctor's answer is the product
+ *    and it has already been printed. Losing the exit code because a host was
+ *    down would replace a real result with an unrelated one.
+ */
+async function sendSummary(summary: DoctorSummary, host: string): Promise<void> {
+  const endpoint = `${host.replace(/\/+$/, "")}/s`;
+  for (const line of summaryLines(summary)) process.stdout.write(`${line}\n`);
+  process.stdout.write(`  to ${endpoint}\n`);
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(summary),
+    });
+    if (!response.ok) {
+      process.stderr.write(`stantal: could not send the summary (${response.status})\n`);
+      return;
+    }
+    process.stdout.write("  sent\n\n");
+  } catch (error) {
+    process.stderr.write(
+      `stantal: could not reach ${endpoint}: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
+}
+
+
+function renderDoctor(result: DoctorResult, verdict: ReturnType<typeof doctorVerdict>): string {
+  const out: string[] = ["", `  ${bold("stantal doctor")}  ${bold(result.package)}`, ""];
+
+  if (result.status !== "checked") {
+    // One line, and it says which of the six states this is. The distinction
+    // that has to survive here is between "there is nothing to check" and "we
+    // could not check", because only the first lets the reader stop.
+    const mark =
+      result.status === "unreachable"
+        ? yellow("gap")
+        : result.status === "current"
+          ? green("current")
+          : dim(result.status);
+    out.push(`  ${mark}  ${result.note ?? ""}`, "");
+    if (result.status === "current" && result.tools > 0) {
+      out.push(
+        `  ${dim(`${result.tools} tool(s) across ${result.subpaths.length} entry point(s), nothing newer published`)}`,
+        "",
+      );
+    }
+    if (result.status === "no-contract") {
+      // Said out loud because the person most able to correct it is the one
+      // running this: a provider looking at their own package. An entry point
+      // we cannot read is our gap, not their absence.
+      out.push(
+        `  ${dim("if this package does hand a model tools, that is a gap in our reading —")}`,
+        `  ${dim("run: stantal " + result.package + " " + (result.installed ?? "<from>") + " <to> --json")}`,
+        "",
+      );
+    }
+    return out.join("\n");
+  }
+
+  const report = result.report;
+  if (report === null) return out.join("\n");
+
+  const color = VERDICT_COLOR[report.verdict];
+  out.push(
+    `  ${result.installed} ${dim("→")} ${bold(result.target ?? "?")}  ${dim(
+      result.range === null ? "not declared in package.json" : `declared as ${result.range}`,
+    )}`,
+    "",
+    `  ${dim("VERDICT")}  ${color(bold(report.verdict))}`,
+    `           ${report.headline}`,
+    "",
+  );
+
+  out.push(...renderBreaks(report));
+
+  const counts = countFindings(report);
+  out.push(
+    `  ${dim(
+      `${counts.structural} structural change(s) · ${counts.prose} prose finding(s) · ${counts.behavioural} behavioural`,
+    )}`,
+    "",
+  );
+
+  out.push(...renderDoctorSteps(result, verdict));
+  out.push(`  ${dim("run with --json for the full report")}`, "");
+  return out.join("\n");
+}
+
+/**
+ * What to do about this one package.
+ *
+ * The audit's plan is a ranked list across a whole repository. Here there is one
+ * subject, so there is one decision, and printing four general suggestions
+ * around it would bury it.
+ */
+function renderDoctorSteps(
+  result: DoctorResult,
+  verdict: ReturnType<typeof doctorVerdict>,
+): string[] {
+  const report = result.report;
+  if (report === null) return [];
+  const target = result.target ?? "the newer release";
+  const lines: Array<[string, string]> = [];
+
+  if (report.breaks.length > 0) {
+    // First, and phrased as a refusal rather than a caution. This is the only
+    // claim here that names a line of their code, so it is the only one that
+    // cannot be argued with.
+    lines.push([
+      `do not take ${result.package} ${target} yet`,
+      `${report.breaks.length} ${whatBreaks(report.breaks)}, starting at ${report.breaks[0]?.evidence}`,
+    ]);
+  } else if (rangeHolds(report)) {
+    lines.push([
+      `leave ${result.package} alone — your range already excludes ${target}`,
+      "the findings are real and your own manifest is what is holding them out",
+    ]);
+  } else if (verdict === "unreadable") {
+    lines.push([
+      `look before taking ${result.package} ${target}`,
+      "we could not read enough of this pair to clear it",
+    ]);
+  } else if (verdict === "clean") {
+    lines.push([
+      `${result.package} ${target} is safe to take, on what we could read`,
+      "nothing structural moved and nothing here reads differently",
+    ]);
+  } else {
+    lines.push([
+      `hold ${result.package} at ${result.installed}`,
+      `${target} changes what a model reads — see: stantal ${result.package} ${result.installed} ${target}`,
+    ]);
+  }
+
+  const unpinned = result.subpaths.length;
+  if (unpinned > 0 && report.verdict !== "clean") {
+    lines.push([
+      `stantal pin ${result.package}`,
+      `records what ${result.tools} tool(s) offer today, so the next move fails a test instead of a customer`,
+    ]);
+  }
+
+  const out = [`  ${bold("WHAT TO DO")}`];
+  lines.forEach(([action, why], index) => {
+    out.push(`    ${index + 1}. ${action}`);
+    out.push(`       ${dim(why)}`);
+  });
+  out.push("");
+  return out;
+}
+
+/**
+ * `stantal exposure <package>` — the provider's number, with no access to any
+ * user.
+ *
+ * A history walk crossed with npm's public per-version download counts. Nothing
+ * of ours is involved: their registry, their download endpoint, their package.
+ * That is why it lives in the open CLI rather than behind the hosted line — the
+ * rule is whether a thing needs *our* credential, and this needs nobody's.
+ */
+async function runExposure(
+  pkg: string | undefined,
+  values: {
+    json?: boolean | undefined;
+    cache?: string | undefined;
+    since?: string | undefined;
+    until?: string | undefined;
+    concurrency?: string | undefined;
+    surface?: string[] | undefined;
+  },
+  judge: Judge | null,
+): Promise<number> {
+  if (pkg === undefined) {
+    process.stderr.write(`stantal: exposure needs a package name.\n\n${USAGE}\n`);
+    return 2;
+  }
+
+  const quiet = values.json === true;
+  try {
+    const history = await walkHistory({
+      package: pkg,
+      registry: pacoteRegistry(),
+      judge,
+      ...(values.cache !== undefined ? { cacheRoot: values.cache } : {}),
+      ...(values.since !== undefined ? { since: values.since } : {}),
+      ...(values.until !== undefined ? { until: values.until } : {}),
+      ...(values.surface !== undefined ? { subpaths: values.surface } : {}),
+      ...(values.concurrency !== undefined ? { concurrency: Number(values.concurrency) } : {}),
+      ...(quiet
+        ? {}
+        : {
+            onProgress: (done: number, total: number, version: string) => {
+              process.stderr.write(`\r  reading ${done}/${total}  ${version}${" ".repeat(12)}`);
+              if (done === total) process.stderr.write(`\r${" ".repeat(48)}\r`);
+            },
+          }),
+    });
+
+    const downloads = await fetchDownloads(pkg);
+    const result = exposureOf(history, downloads);
+
+    if (quiet) {
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    } else {
+      process.stdout.write(renderExposure(result, history));
+    }
+    // Always 0. This is a measurement, not a gate: a provider learning that
+    // most of their installed base is on an affected release has not failed a
+    // check, and failing the command would make it useless in their CI.
+    return 0;
+  } catch (error) {
+    process.stderr.write(`stantal: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
+}
+
+function renderExposure(result: ExposureResult, history: HistoryResult): string {
+  const out: string[] = [
+    "",
+    `  ${bold(result.package)}  ${dim(
+      `${result.releases} release(s) walked · ${result.rows.length} with installs ${result.window}`,
+    )}`,
+    "",
+  ];
+
+  for (const row of result.rows.slice(0, 12)) {
+    const mark =
+      row.state === "affected" ? red("AFFECTED  ") : row.state === "clean" ? green("clean     ") : dim("not walked");
+    out.push(`    ${mark}  ${row.version.padEnd(14)} ${String(row.downloads).padStart(8)}`);
+  }
+  if (result.rows.length > 12) out.push(`    ${dim(`... and ${result.rows.length - 12} more`)}`);
+
+  const counted = result.affected + result.clean;
+  const share = result.share === null ? "n/a" : `${(result.share * 100).toFixed(1)}%`;
+  out.push(
+    "",
+    `  ${bold("installs on an affected version")}  ${result.affected} of ${counted} ${dim(`(${share})`)}`,
+  );
+
+  if (result.unwalked > 0) {
+    // Said out loud rather than folded into either side. A version the walk did
+    // not cover is not a version it cleared.
+    out.push(
+      `  ${yellow("not counted")}  ${dim(`${result.unwalked} install(s) are on versions the walk did not cover`)}`,
+    );
+  }
+
+  for (const onset of history.onsets.slice(0, 6)) {
+    const still = onset.resolvedAt === null ? "still present" : `resolved at ${onset.resolvedAt}`;
+    out.push(
+      "",
+      `  ${onset.rule}  ${bold(onset.target)}`,
+      `    ${dim(
+        `introduced ${onset.introducedAt}, last clean ${onset.lastCleanVersion}, ${onset.releasesAffected} release(s), ${still}`,
+      )}`,
+    );
+  }
+
+  // Printed every time, because the number above is the one most likely to be
+  // quoted next to a different number it must never be multiplied by.
+  out.push(
+    "",
+    `  ${dim("Every install is counted here, whether or not anyone ran anything, so this")}`,
+    `  ${dim("is a census rather than a survey. A release counts as affected when it")}`,
+    `  ${dim("carries at least one finding, not all of them.")}`,
+    "",
+  );
+  return out.join("\n");
+}
+
+/**
+ * `stantal live` — read the contract a running MCP server actually hands out.
+ *
+ * Every other command in this CLI reads files. This one speaks the protocol, so
+ * it reaches the two things a static reader never will: a server that builds
+ * its tools at run time, and a server that is not a package at all.
+ *
+ * **The caller names the target, always.** Nothing here turns a package name
+ * into a command. A command runs because somebody typed it and a URL is
+ * contacted because somebody typed it, which is what keeps "never run extracted
+ * package code on the host" true. That is also why `live` is its own command
+ * rather than a flag on the audit or the history walk: on either of those, one
+ * flag would boot a hundred strangers' servers.
+ */
+async function runLive(
+  first: string | undefined,
+  second: string | undefined,
+  values: {
+    json?: boolean | undefined;
+    html?: string | undefined;
+    publish?: string | undefined;
+    emit?: string | undefined;
+    header?: string[] | undefined;
+    env?: string[] | undefined;
+    timeout?: string | undefined;
+    name?: string | undefined;
+    "emit-tests"?: boolean | undefined;
+    out?: string | undefined;
+  },
+  judge: Judge | null,
+  behaviour: BehaviourOptions | undefined,
+  repo: RepoSource | undefined,
+  usage: UsageProfile | undefined,
+): Promise<number> {
+  if (first === undefined) {
+    process.stderr.write(`stantal: live needs a server to read.\n\n${USAGE}\n`);
+    return 2;
+  }
+
+  let timeoutMs: number | undefined;
+  if (values.timeout !== undefined) {
+    if (!/^\d+$/.test(values.timeout) || Number.parseInt(values.timeout, 10) < 1) {
+      process.stderr.write(`stantal: --timeout must be a positive whole number of milliseconds\n`);
+      return 2;
+    }
+    timeoutMs = Number.parseInt(values.timeout, 10);
+  }
+
+  let headers: Record<string, string>;
+  let env: Record<string, string>;
+  try {
+    headers = pairs(values.header, "--header");
+    env = pairs(values.env, "--env");
+  } catch (error) {
+    process.stderr.write(`stantal: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
+
+  const read = async (spec: string): Promise<{ target: LiveTarget; result: SurfaceResult }> => {
+    const target = parseTarget(spec, { headers, env });
+    // Said before it happens, not after. A command target starts a process on
+    // this machine, and somebody watching the terminal is entitled to see which
+    // one before it runs.
+    process.stderr.write(
+      `  ${target.kind === "url" ? "connecting to" : "running"} ${labelFor(target)}\n`,
+    );
+    return { target, result: await readLiveServer(target, { ...(timeoutMs === undefined ? {} : { timeoutMs }) }) };
+  };
+
+  try {
+    // One target: read it and record what it says. There is nothing to compare
+    // against, so this writes the side rather than inventing one. `stantal
+    // manifest old.json new.json` is the comparison, which means a baseline is
+    // an ordinary committed file rather than a private format.
+    if (second === undefined) {
+      const { target, result } = await read(first);
+      if (!result.present) {
+        process.stderr.write(`stantal: ${describeAbsence(result.absence)}\n`);
+        return 2;
+      }
+      const document = { tools: result.contract.tools };
+      if (values.emit !== undefined) {
+        mkdirSync(join(values.emit, ".."), { recursive: true });
+        writeFileSync(values.emit, `${JSON.stringify(document, null, 2)}\n`, "utf8");
+        process.stdout.write(
+          `\n  ${green("recorded")}  ${values.emit}  ${dim(
+            `${result.contract.tools.length} tool(s) from ${labelFor(target)}`,
+          )}\n` +
+            `  ${dim("commit it, then compare later with: stantal manifest <this file> <the next one>")}\n\n`,
+        );
+        return 0;
+      }
+      process.stdout.write(`${JSON.stringify(document, null, 2)}\n`);
+      return 0;
+    }
+
+    const before = await read(first);
+    const after = await read(second);
+
+    const report = await buildSurfacePairReport({
+      from: before.result,
+      to: after.result,
+      package: values.name ?? labelFor(after.target),
+      versions: { from: labelFor(before.target), to: labelFor(after.target) },
+      subpath: "mcp-server",
+      judge,
+      ...(behaviour === undefined ? {} : { behaviour }),
+      ...(repo === undefined ? {} : { repo }),
+      ...(usage === undefined ? {} : { usage }),
+    });
+
+    process.stdout.write(values.json === true ? `${JSON.stringify(report, null, 2)}\n` : render(report));
+    if (values.html !== undefined) writeHtmlVerdict(report, values.html);
+    const host = verdictHost(values);
+    if (host !== null) await publishVerdict(report, host);
+    if (values["emit-tests"] === true) emitFromReport(report, values.out);
+    return exitCodeFor(report.verdict);
+  } catch (error) {
+    process.stderr.write(`stantal: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
+}
+
+/**
+ * `KEY=VALUE` pairs from a repeatable flag.
+ *
+ * Split on the first `=` only, because a header value and an API key both
+ * routinely contain one.
+ */
+function pairs(values: readonly string[] | undefined, flag: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const entry of values ?? []) {
+    const at = entry.indexOf("=");
+    if (at <= 0) throw new Error(`${flag} takes KEY=VALUE, got "${entry}"`);
+    out[entry.slice(0, at)] = entry.slice(at + 1);
+  }
+  return out;
+}
+
 // --- Entry point -------------------------------------------------------------
 
 export async function main(argv: readonly string[]): Promise<number> {
@@ -2214,6 +2826,12 @@ export async function main(argv: readonly string[]): Promise<number> {
         text: { type: "boolean" },
         current: { type: "string" },
         against: { type: "string" },
+        summary: { type: "boolean" },
+        emit: { type: "string" },
+        header: { type: "string", multiple: true },
+        env: { type: "string", multiple: true },
+        timeout: { type: "string" },
+        send: { type: "string" },
         since: { type: "string" },
         until: { type: "string" },
         concurrency: { type: "string" },
@@ -2281,6 +2899,10 @@ every release in the range. Run it on a single pair instead.
       return 2;
     }
     return runHistory(positionals[1], values, judge);
+  }
+
+  if (positionals[0] === "exposure") {
+    return runExposure(positionals[1], values, judge);
   }
 
   // Checked before the work starts, and before anything branches on it, so
@@ -2419,6 +3041,14 @@ GEMINI_API_KEY). Continuing without Layer 2.
 
   if (positionals[0] === "snapshot") {
     return runSnapshot(positionals[1] ?? values.directory ?? ".", values, judge);
+  }
+
+  if (positionals[0] === "live") {
+    return runLive(positionals[1], positionals[2], values, judge, behaviour, repo, usage);
+  }
+
+  if (positionals[0] === "doctor") {
+    return runDoctor(positionals[1], values, judge, behaviour, repo, usage);
   }
 
   if (positionals[0] === "check") {
