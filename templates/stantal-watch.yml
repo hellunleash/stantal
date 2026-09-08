@@ -19,6 +19,23 @@
 # versions and fail the day an upgrade takes any of the contract away, so the
 # claim is checkable in one command without trusting the pull request body.
 #
+# WHAT THIS DOES NOT WATCH, AND WHAT DOES
+#
+# Ordinary breaking changes — a removed export, a renamed function, a changed
+# signature. Those already have owners: your type-checker fails the build, your
+# tests fail, and Renovate or Dependabot open the bump in the first place. This
+# workflow deliberately does not duplicate them, and a tool that reported what
+# `tsc` already reports would be noise on top of an answer you already have.
+#
+# It watches the one class none of those can see. A tool description is prose
+# shipped inside a dependency, and it is the entire contract when the caller is
+# a model. Rewrite a sentence of it and the types still check, the tests still
+# pass, the wire is byte-identical, and the model starts calling the tool wrong.
+# There is no signal anywhere else in your stack for that, which is why this
+# runs on a schedule rather than on your build.
+#
+# So: keep Renovate, keep your type-check. Add this beside them.
+#
 # No account and no API key. Everything runs on your runner.
 
 name: stantal — watch the contracts
