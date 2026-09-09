@@ -1,10 +1,10 @@
 <h1 align="center">Stantal</h1>
 
 <p align="center">
-  <b>Self-maintaining dependencies for AI agents.</b><br/>
-  Contract testing for the dependencies your AI calls. When the caller is a
-  model, the docs <i>are</i> the contract, and a deleted sentence is a breaking
-  change with no version number.<br/>
+  <b>Self-maintaining APIs for AI agents.</b><br/>
+  Contract testing for the packages and HTTP APIs your agent calls. When the
+  caller is a model, the docs <i>are</i> the contract, and a deleted sentence is
+  a breaking change with no version number.<br/>
   Stantal finds it, proves it, and puts it back.
 </p>
 
@@ -27,15 +27,21 @@
 
 **Paste this into Claude Code, Cursor or Codex:**
 
-> Set up stantal in this repo. Run `npx stantal connect`, then read the
-> "Contract drift" section of the AGENTS.md it writes and follow it.
+> Set up stantal in this repo. Run `npm install -D stantal`, then
+> `npx stantal connect`, then read the "Contract drift" section of the
+> AGENTS.md it writes and follow it. Ask me before anything that writes.
 > It needs no account and no API key.
 
-That is the whole setup. `connect` registers the MCP server and writes an
-`AGENTS.md` section, which is a short decision procedure rather than a script.
-Your agent makes one call, then asks you about what that call actually found:
-which packages to protect, which upgrade to hold, which of your files a change
-reaches. In a repo with nothing to report it says so and stops.
+That is the whole setup, and it is the only prompt. It works the same whether
+this repo calls a contract, publishes one, or does both: `connect` reads your
+own build to find out, and writes the half that applies.
+
+`connect` registers the MCP server and writes an `AGENTS.md` section, which is a
+short decision procedure rather than a script. Your agent makes one call, then
+asks you about what that call actually found: which packages to protect, which
+upgrade to hold, which of your files a change reaches. If this project publishes
+a contract of its own, it also gets told to check a release before `npm publish`
+rather than after. In a repo with nothing to report it says so and stops.
 
 The file stays in your repository, so the next person to clone it is briefed
 without installing anything. Delete the block to opt out.
@@ -75,23 +81,26 @@ npx stantal connect
   No account, no key, no signup. Everything above ran on this machine.
 ```
 
-Nothing to install, no config to write, no signup. It reads what you already
-have.
+Installing it first is worth the ten seconds. `connect` then points your editor
+at the local copy instead of resolving `stantal` from the registry every time it
+starts, which is the difference between the server attaching and timing out on a
+cold cache. The bare `npx stantal` audit above needs nothing installed.
 
 ---
 
 ## What it is
 
 Your agent calls a tool. Everything it knows about that tool is a name, a
-description and a list of parameters: plain text, shipped inside one of your
-dependencies.
+description and a list of parameters: plain text, shipped inside a package you
+installed or generated from an API you call over HTTP.
 
 That text is the contract. A patch release rewrites one sentence of it and the
 model starts calling the tool wrong. Nothing errors, nothing changes type, no
-test fails, and the version number still says patch.
+test fails, and the version number still says patch. On an HTTP API there is no
+version number at all.
 
-Stantal reads that text out of every version of a package, diffs it, and tells
-you what a model would now read differently. It does three things, in order.
+Stantal reads that text out of every version, diffs it, and tells you what a
+model would now read differently. It does three things, in order.
 
 1. Finds it: which release changed it, and whether it reaches your code.
 2. Proves it: a test in your repo that passes today and fails the day it moves.
@@ -115,7 +124,7 @@ required parameter. Stantal reports that too, and it is the easy half, because
 something somewhere eventually throws. The half nothing checks is the prose, and
 that is where the damage is:
 
-> 22 popular packages. 487 releases. 168 changes a model would read
+> 22 popular packages. 510 releases. 168 changes a model would read
 > differently, and 145 of them had no structural signal at all. There was
 > nothing to type-check, nothing to fail, and nothing in the changelog.
 
@@ -124,7 +133,7 @@ pass an optional parameter. Everything else about that parameter stayed: the
 name, the type, its siblings' guidance. The model filled it in anyway, every
 time. 37 tool calls, 37 validation errors, nothing created. The explanation
 still exists, in a code comment directly above the line that depends on it. It
-just never reaches the model. That was 53 releases ago and it is still there
+just never reaches the model. That was 73 releases ago and it is still there
 today.
 
 What makes this kind of break invisible also makes it repairable. Nobody can
@@ -136,7 +145,7 @@ field, and it refuses unless it finds the text exactly once.
 
 ---
 
-## The four things you will actually use
+## The five things you will actually use
 
 ### 1. Lock in what your packages do today
 
@@ -194,11 +203,27 @@ When no released version is clean, this restores the prose into your installed
 copy. Descriptions only, never a schema, a type or a required field. It has to
 find the text exactly once or it refuses.
 
+### 5. An HTTP API is a contract too
+
+No package, no version number, nothing to bump. Point it at two copies of an
+OpenAPI spec:
+
+```bash
+npx stantal manifest before.json after.json --name stripe
+```
+
+Run on two real versions of Stripe's own spec, a month apart: 594 operations
+read on each side in under a second, and 3 new required parameters, 5 new
+endpoints and 2 widened enums. It then tells you which of your own lines call
+the operations that moved, whether you write `stripe.accountSessions.create` or
+`POST /v1/account_sessions`.
+
 <details>
 <summary>Everything else</summary>
 
 ```bash
 npx stantal watch                       # for a scheduled job: decide what to say
+npx stantal snapshot --save             # the contracts this repo writes itself
 npx stantal doctor @acme/sdk            # one package, in the repo that installed it
 npx stantal live <server> [<server>]    # read a running MCP server, or diff two
 npx stantal exposure @acme/sdk          # how much of an installed base is affected
@@ -207,7 +232,12 @@ npx stantal manifest <before> <after>   # a contract that never reached a regist
 npx stantal mcp                         # the MCP server itself, over stdio
 ```
 
-Flags worth knowing: `--surface <subpath>` reads one entry point only ·
+Publishing the contract rather than calling it? `check` runs against a release
+you have not shipped yet, `exposure` says how many of your users are stranded on
+one that carries a finding, and `doctor` is the one to embed in your own CLI: it
+works out the pair itself and nothing about their files leaves their machine.
+
+Flags worth knowing: `--subpath <path>` reads one entry point only ·
 `--html <file>` writes the verdict as one shareable page · `--json` prints
 everything · `--replay` answers only from recordings and cannot make a network
 call · `--repo none` skips reading your own files.
@@ -224,6 +254,11 @@ the default, and CI checks it on every commit.
 A model adds exactly one thing. Some findings are judgement calls: does this
 sentence really explain this input? Without a key those are reported as
 `unconfirmed` leads. With one, they get confirmed or dropped.
+
+It is one short question per judgement call, answered once and then cached to
+disk, so nothing repeats. Walking all 46 releases of a package raised 66
+questions and made 2 requests. The key is yours and the bill is yours; the only
+thing that spends more is `--behaviour`, which is off unless you ask for it.
 
 Set any one of these and it is picked up automatically:
 
@@ -245,7 +280,9 @@ Or put one in a `.env` file in your project, which is read automatically.
 - `STANTAL_JUDGE=none` turns it off even with a key set.
 - `STANTAL_JUDGE_MODEL=...` picks a different model.
 - `STANTAL_VERTEX_PROJECT=my-project` routes Gemini or Claude through Google
-  Cloud instead, so it bills to your cloud account rather than an API key.
+  Cloud instead, so it bills to your cloud account rather than an API key. It
+  wins over a key that is already set, because naming a project is not something
+  anyone does by accident. Leave it unset to use the vendor directly.
 
 What gets sent is one closed question per finding, carrying a tool name, a
 parameter name, and that tool's description *as published in the package*. Never
@@ -327,23 +364,6 @@ It runs with no account and no key. Set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or
 of a real model and compares what it does. A scheduled run is the one place
 worth paying for, because it happens at most once per release and lands where
 someone is deciding.
-
----
-
-## If you ship an API
-
-Run it against a release you have not published yet:
-
-```bash
-npx stantal check ./ --against 1.4.0
-```
-
-Nothing has shipped, so there is nothing to defend. You find out which of your
-changes will strand customers while it still costs ten minutes to fix.
-
-Already shipped? `npx stantal history <your-package>` gives you the release it
-entered, the last one that was safe, and how long anyone on it has had nowhere
-to go.
 
 ---
 
