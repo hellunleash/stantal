@@ -68,6 +68,13 @@ still turn a green CI job red.
   `breaks` phrased every entry as "and this line names it", which is false for a
   resource match. It now carries the reach's own wording, so the section keeps
   the property that every entry survives being opened.
+- **The reach list is grouped by line.** One call to a resource can belong to
+  every changed operation on it, and a reach is stored per finding, so a repo
+  calling `client.invoices.list()` printed sixteen identical sentences against
+  one line of source. Every line was true and the section was unreadable.
+  `place(s)` now counts distinct lines rather than findings, which is what the
+  word already claimed. The stored reaches are unchanged, because the join in
+  `breaks` needs one per finding; only the rendering folds.
 
 ### Changed
 

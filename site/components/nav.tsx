@@ -11,6 +11,7 @@ const LINKS = [
   { href: "#why", label: "Why now" },
   { href: "#how", label: "How it breaks" },
   { href: "#numbers", label: "Numbers" },
+  { href: "#apis", label: "HTTP APIs" },
   { href: "#providers", label: "For API teams" },
 ];
 
@@ -26,7 +27,7 @@ const LINKS = [
  * sit on the hero without drawing a line across it; the moment content slides
  * underneath, the line is what stops the two from blending into each other.
  */
-export function Nav() {
+export function Nav({ version }: { version: string }) {
   const [scrolled, setScrolled] = useState(false);
 
   useEffect(() => {
@@ -56,7 +57,7 @@ export function Nav() {
         </a>
 
         <span className="hidden rounded-full border border-zinc-200 px-2 py-0.5 font-mono text-[10px] text-zinc-500 sm:inline dark:border-zinc-800">
-          v0.5.0
+          v{version}
         </span>
 
         <div className="flex-1" />

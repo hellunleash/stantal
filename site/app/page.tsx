@@ -92,7 +92,7 @@ export default function Page() {
             </span>
 
             <h1 className="text-balance text-4xl font-bold leading-[1.06] tracking-[-0.033em] sm:text-6xl">
-              Self-maintaining dependencies
+              Self-maintaining APIs
               <br className="hidden sm:block" /> for AI agents.
             </h1>
 
@@ -120,7 +120,7 @@ export default function Page() {
               Paste this into Claude Code, Cursor or Codex
             </p>
             <p className="mb-4 text-sm text-zinc-500">Your agent does the rest. About a minute.</p>
-            <CopyablePrompt text="Set up stantal in this repo. Run `npx stantal connect`, then do what it prints. It needs no account and no API key. Tell me what it found." />
+            <CopyablePrompt text="Set up stantal in this repo. Run `npm install -D stantal`, then `npx stantal connect`, then read the &quot;Contract drift&quot; section of the AGENTS.md it writes and follow it. Ask me before anything that writes. It needs no account and no API key." />
           </Reveal>
 
           <Reveal className="mt-8">
@@ -128,9 +128,10 @@ export default function Page() {
               Or run it yourself
             </p>
             <p className="mb-4 text-sm text-zinc-500">
-              Claude Code, Cursor and VS Code. Takes about a second.
+              Claude Code, Cursor and VS Code. Installing it first is what lets your editor start
+              the server from the local copy instead of resolving it every time.
             </p>
-            <Copyable command="npx stantal connect" />
+            <Copyable command="npm i -D stantal && npx stantal connect" />
           </Reveal>
         </div>
       </section>
@@ -221,7 +222,7 @@ export default function Page() {
           <div className="grid gap-8 sm:grid-cols-2">
             <Stat
               n="168"
-              label="changes across 487 releases of 22 popular packages that would make an AI call them differently."
+              label="changes across 510 releases of 22 popular packages that would make an AI call them differently."
             />
             <Stat
               n="145"
@@ -233,6 +234,38 @@ export default function Page() {
             Twelve of the twenty-two packages had at least one. Ten had none, including both
             official reference servers. A tool that found something wrong everywhere would just be
             broken, so the ten matter as much as the number.
+          </p>
+        </Reveal>
+      </Section>
+
+      {/* ------------------------------------------------------------ http apis */}
+      <Section id="apis" bordered>
+        <Reveal>
+          <SectionLabel>Not only packages</SectionLabel>
+          <h2 className="text-2xl font-semibold tracking-[-0.02em] sm:text-3xl">
+            An HTTP API has no version to bump
+          </h2>
+          <p className="mt-4 max-w-2xl text-zinc-600 dark:text-zinc-400">
+            Nothing is installed, so there is no release to review and no type-checker involved at
+            any point. Stripe publishes its specification and changes it most days. Two versions of
+            it, a month apart:
+          </p>
+
+          <Copyable command="npx stantal manifest before.json after.json --name stripe" className="mt-6" />
+
+          <div className="mt-8 grid gap-8 sm:grid-cols-2">
+            <Stat n="3" bad label="required parameters added to endpoints that already existed. Every caller that omits one now fails." />
+            <Stat n="5" label="new endpoints nobody was told about. A feature launched and went unnoticed, which breaks nothing and costs just as much." />
+          </div>
+
+          <p className="mt-8 max-w-2xl text-zinc-600 dark:text-zinc-400">
+            594 operations read on each side, in about a second, from public files. Then it tells
+            you which of your own lines call the ones that moved, whether you wrote{" "}
+            <code className="rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-[13px] dark:bg-zinc-900">
+              stripe.accountSessions.create
+            </code>{" "}
+            or the raw path. Every Stripe customer got that change on one ordinary day and no build
+            anywhere went red.
           </p>
         </Reveal>
       </Section>

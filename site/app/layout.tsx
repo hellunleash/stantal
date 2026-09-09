@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Nav } from "@/components/nav";
@@ -13,9 +15,9 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-const TITLE = "Stantal — self-maintaining dependencies for AI agents";
+const TITLE = "Stantal — self-maintaining APIs for AI agents";
 const DESCRIPTION =
-  "When the caller is a model, the docs are the contract. Stantal finds the release that changed what a model reads, proves it with a test, and puts the deleted sentence back. No account, no API key.";
+  "When the caller is a model, the docs are the contract. Stantal finds the change that moved what a model reads, in a package or an HTTP API, proves it with a test, and puts the deleted sentence back. No account, no API key.";
 
 /**
  * Where this site is served from.
@@ -30,6 +32,19 @@ const DESCRIPTION =
  * anything to read it later.
  */
 const SITE_URL = process.env.STANTAL_SITE_URL ?? "https://stantal.cloud";
+
+/**
+ * The version the badge shows, read from the CLI's own manifest at build time.
+ *
+ * It used to be a literal, and it said `0.5.0` while npm was serving `0.7.0`.
+ * A published artifact advertising a version it is not is the exact defect this
+ * project exists to catch, so it is read rather than typed. Deliberately
+ * unguarded: a build that stops because the file moved is better than a site
+ * that quietly goes back to lying.
+ */
+const CLI_VERSION: string = JSON.parse(
+  readFileSync(join(process.cwd(), "..", "package.json"), "utf8"),
+).version;
 
 export const metadata: Metadata = {
   title: TITLE,
@@ -63,7 +78,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         >
           Skip to content
         </a>
-        <Nav />
+        <Nav version={CLI_VERSION} />
         {children}
       </body>
     </html>
