@@ -65,13 +65,31 @@ function byName<T extends { name: string }>(items: T[]): Map<string, T> {
 function flatten(params: Param[], prefix = ""): Map<string, Param> {
   const out = new Map<string, Param>();
   for (const p of params) {
-    const path = prefix ? `${prefix}.${p.name}` : p.name;
-    out.set(path, p);
-    if (p.children?.length) {
-      for (const [k, v] of flatten(p.children, path)) out.set(k, v);
-    }
+    walk(p, prefix ? `${prefix}.${p.name}` : p.name, out);
   }
   return out;
+}
+
+function walk(param: Param, path: string, out: Map<string, Param>): void {
+  out.set(path, param);
+  if (param.children?.length) {
+    for (const [k, v] of flatten(param.children, path)) out.set(k, v);
+  }
+  // An array's element sits on the path as `xs[]`, so its type, enum and bounds
+  // go through exactly the comparisons every other parameter does.
+  if (param.items !== undefined) walk(param.items, `${path}[]`, out);
+}
+
+/**
+ * An array element, addressed as `xs[]`.
+ *
+ * Nobody passes one. It describes a parameter rather than being one, so it is
+ * compared for what it holds and never reported as added or removed: an element
+ * we could read on one side and not the other is a gap in our reading, and
+ * "parameter `xs[]` was removed" would be that gap presented as a fact.
+ */
+function isElement(path: string): boolean {
+  return path.endsWith("[]");
 }
 
 function enumOf(c: Constraints): string[] | null {
@@ -128,7 +146,7 @@ function diffParams(tool: string, from: Tool, to: Tool): StructuralChange[] {
   const b = flatten(to.params);
 
   for (const [path, param] of b) {
-    if (a.has(path)) continue;
+    if (a.has(path) || isElement(path)) continue;
     const rule: StructuralRule = param.required ? "param_added_required" : "param_added_optional";
     changes.push({
       rule,
@@ -143,7 +161,7 @@ function diffParams(tool: string, from: Tool, to: Tool): StructuralChange[] {
   }
 
   for (const [path, param] of a) {
-    if (b.has(path)) continue;
+    if (b.has(path) || isElement(path)) continue;
     changes.push({
       rule: "param_removed",
       target: `${tool}.${path}`,

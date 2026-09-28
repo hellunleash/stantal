@@ -116,6 +116,12 @@ function paramFrom(name: string, schema: unknown, required: boolean, depth: numb
     const items = asSchema(raw.items);
     if (isObject(items.properties)) {
       param.children = childrenOf(items, depth + 1);
+    } else {
+      // An element that is not an object. `children` cannot hold it, and
+      // without it `string[]` and `number[]` normalize to the same parameter.
+      // Named `[]` and required so it sits on a dotted path beside every other
+      // parameter and needs no special case in the differ.
+      param.items = paramFrom("[]", raw.items, true, depth + 1);
     }
   }
 

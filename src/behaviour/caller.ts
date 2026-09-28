@@ -1,4 +1,4 @@
-import type { Constraints, Contract, Param, Tool } from "../contract/types.js";
+import type { Constraints, Contract, JsonType, Param, Tool } from "../contract/types.js";
 
 /**
  * Putting a contract in front of a model and recording what it does.
@@ -136,9 +136,33 @@ function presentParam(param: Param): Record<string, unknown> {
       out["properties"] = nested;
       if (required.length > 0) out["required"] = required;
     }
+  } else if (param.type === "array") {
+    // An array declares what it holds, or it is not an array on the wire.
+    //
+    // Found in a real install: `{"type":"array"}` with no `items` is rejected
+    // outright by Gemini, and the whole surface is sent on every call, so one
+    // scalar array anywhere in a contract took down the entire run. `items` was
+    // only ever written for an array of objects, which is the rarer half.
+    //
+    // When the element is genuinely unreadable, `type` comes off instead of a
+    // type being invented. That is the same choice the `unknown` branch above
+    // makes for the same reason: omitting `type` says "anything", which is the
+    // honest translation, and inventing `string` would be this product's own
+    // thesis running backwards.
+    if (param.items !== undefined) out["items"] = presentParam(param.items);
+    else delete out["type"];
   }
 
   return out;
+}
+
+/** The type this parameter goes on the wire with, or null when it carries none. */
+function declaredType(param: Param): JsonType | null {
+  if (param.type === "unknown") return null;
+  if (param.type !== "array") return param.type;
+  const readable =
+    (param.children !== undefined && param.children.length > 0) || param.items !== undefined;
+  return readable ? "array" : null;
 }
 
 function applyConstraints(out: Record<string, unknown>, constraints: Constraints): void {
@@ -206,7 +230,12 @@ export function invalidArguments(tool: Tool, args: Record<string, unknown>): str
     }
     if (value === undefined || value === null) continue;
 
-    if (param.type !== "unknown" && !matchesType(param.type, value)) {
+    // Only what the model was actually shown. `presentParam` drops `type` for a
+    // parameter we could not read, and for an array whose element we could not
+    // read — so faulting a call against either would be marking an answer wrong
+    // against a question that was never asked, and `arguments_invalid` is a
+    // finding this layer reports.
+    if (declaredType(param) !== null && !matchesType(param.type, value)) {
       problems.push(`\`${key}\` should be ${param.type}`);
     }
     const allowed = param.constraints.enum;

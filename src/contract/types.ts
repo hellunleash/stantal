@@ -54,6 +54,24 @@ export type Param = {
   // `| undefined` is required under exactOptionalPropertyTypes for zod's
   // `.optional()` to line up with the hand-written type.
   children?: Param[] | undefined;
+  /**
+   * What one element of an array looks like, when the element is not an object.
+   *
+   * `children` already carries an object element's properties, so this covers
+   * exactly the case `children` does not, and the two are never both set. One
+   * representation per fact: two would eventually disagree.
+   *
+   * Without it an array of strings and an array of numbers are the same
+   * parameter. Measured before it was added: `string[]` -> `number[]` produced
+   * zero structural changes, which is a breaking change reported as clean. It
+   * also left the wire form with no `items` at all, which some providers refuse
+   * outright.
+   *
+   * The element's `name` is `[]` and its `required` is always true. Neither is
+   * a claim about the element; they are what makes it addressable on a dotted
+   * path next to every other parameter.
+   */
+  items?: Param | undefined;
   raw?: unknown;
 };
 
@@ -67,6 +85,8 @@ export const ParamSchema: z.ZodType<Param> = z.lazy(() =>
     constraints: ConstraintsSchema,
     /** Nested object/array members, so shape changes below the top level are visible. */
     children: z.array(ParamSchema).optional(),
+    /** A non-object array element, so `string[]` and `number[]` are different parameters. */
+    items: ParamSchema.optional(),
     /** The untouched schema fragment, so extraction loses nothing. */
     raw: z.unknown().optional(),
   }),
@@ -145,7 +165,7 @@ export type Contract = {
 };
 
 /** Bump when extraction changes shape or fidelity; invalidates the cache. */
-export const EXTRACTOR_VERSION = "1";
+export const EXTRACTOR_VERSION = "2";
 
 /** Stable identity of a cached contract. Versions are immutable, so this never changes meaning. */
 export function contractKey(

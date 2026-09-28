@@ -566,6 +566,8 @@ type FieldRead = {
   description: string | null;
   constraints: Constraints;
   children: Param[] | undefined;
+  /** A non-object array element. See `Param.items`, which this becomes. */
+  items: Param | undefined;
   gaps: ZodGap[];
   raw: ZodDeclaration;
 };
@@ -674,6 +676,7 @@ function readField(node: AnyNode, path: string, context: ZodContext, depth: numb
         description: null,
         constraints: {},
         children: undefined,
+        items: undefined,
         gaps: [
           {
             path,
@@ -700,6 +703,7 @@ function readField(node: AnyNode, path: string, context: ZodContext, depth: numb
         description: null,
         constraints: {},
         children: undefined,
+        items: undefined,
         gaps: [{ path, reason: `the schema for \`${path}\` is a constant this reader could not follow` }],
         raw: { zod: chain.base, chain: chain.links.map((l) => l.method) },
       };
@@ -728,6 +732,7 @@ function readField(node: AnyNode, path: string, context: ZodContext, depth: numb
   const constraints: Constraints = {};
   const gaps: ZodGap[] = [];
   let children: Param[] | undefined;
+  let items: Param | undefined;
   let resolved: JsonType = type;
 
   if (chain.base === "enum" || chain.base === "nativeEnum") {
@@ -762,6 +767,20 @@ function readField(node: AnyNode, path: string, context: ZodContext, depth: numb
       if (element !== undefined) {
         const inner = readField(element, `${path}[]`, context, depth + 1);
         if (inner?.children !== undefined) children = inner.children;
+        else if (inner !== null) {
+          // `z.array(z.string())`. The element type was read here and then
+          // thrown away, so every scalar array normalized to a bare `array`.
+          items = {
+            name: "[]",
+            type: inner.type,
+            required: true,
+            description: inner.description,
+            constraints: inner.constraints,
+            children: undefined,
+            ...(inner.items === undefined ? {} : { items: inner.items }),
+            raw: inner.raw,
+          };
+        }
         if (inner !== null) gaps.push(...inner.gaps);
       }
     }
@@ -773,6 +792,7 @@ function readField(node: AnyNode, path: string, context: ZodContext, depth: numb
     description: null,
     constraints,
     children,
+    items,
     gaps,
     raw: { zod: chain.base, chain: [] },
   };
@@ -930,6 +950,7 @@ function readShapeLiteral(
       description: field.description,
       constraints: field.constraints,
       children: field.children,
+      ...(field.items === undefined ? {} : { items: field.items }),
       raw: field.raw,
     });
   }

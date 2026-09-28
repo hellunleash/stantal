@@ -218,6 +218,38 @@ describe("Layer 2 in the verdict", () => {
     expect(result.verdict).toBe("prose-risk");
   });
 
+  test("a provider that refuses the request degrades the run, never the report", async () => {
+    // Found in a real install. One malformed outbound payload ended the whole
+    // command with the provider's raw 400 and nothing else — no report, no
+    // partial result, nothing naming it as ours. A user reads a provider error
+    // and goes to check their credentials.
+    const caller = scriptedCaller("test:400", () => {
+      throw new Error("400 Bad Request: parameters.properties[choices].items: missing field.");
+    });
+    const result = await report(packFiles(DESCRIBED), packFiles(BARE), {
+      behaviour: { caller, intents: INTENTS },
+    });
+
+    // Layers 0 and 1 already ran and are kept.
+    expect(result.verdict).toBe("prose-risk");
+    expect(result.surfaces[0]?.behaviour?.findings).toEqual([]);
+    const reason = result.surfaces[0]?.behaviour?.skipped[0]?.reason ?? "";
+    expect(reason).toContain("test:400 refused the request");
+    // The provider's own words, so the reader can tell whose problem it is.
+    expect(reason).toContain("items: missing field");
+  });
+
+  test("a provider that refuses the corpus request is reported the same way", async () => {
+    const caller = scriptedCaller("test:seed400", () => {
+      throw new Error("401 Unauthorized");
+    });
+    const result = await report(packFiles(DESCRIBED), packFiles(BARE), { behaviour: { caller } });
+
+    expect(result.surfaces[0]?.behaviour?.skipped[0]?.reason).toContain(
+      "could not be asked for a corpus: 401 Unauthorized",
+    );
+  });
+
   test("no caller is a normal run, not an error", async () => {
     const result = await report(packFiles(DESCRIBED), packFiles(BARE), { behaviour: { caller: null } });
 

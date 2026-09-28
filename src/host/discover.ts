@@ -53,6 +53,14 @@ export type DiscoveryNote = {
 export type Discovery = {
   contracts: HostContract[];
   /**
+   * Documents git deliberately ignores, skipped rather than offered a baseline.
+   *
+   * Listed rather than dropped in silence, so a count that moved has a reason
+   * next to it. This is not a `note`: a note says we could not read something,
+   * and these were read fine. Their owner said they are not part of the repo.
+   */
+  ignored: string[];
+  /**
    * Files we could not read or parse. A gap, never a finding: a repo whose
    * contract we failed to open must not present as a repo that authors none.
    */
@@ -92,6 +100,19 @@ function isCandidate(path: string): boolean {
 const LOOKS_LIKE_A_CONTRACT = /"(tools|name|description|inputSchema|input_schema|parameters)"\s*:/;
 
 export type DiscoveryOptions = {
+  /**
+   * Paths to leave alone, from `gitIgnored`.
+   *
+   * A baseline exists to be committed and compared by somebody else, so a file
+   * git does not carry cannot serve as one. Worse, the case that prompted this
+   * was a tool's own scratch output under a directory ignored with `*`, where
+   * the filename encodes a batch index rather than an identity: a rerun that
+   * batches differently reports drift describing nothing.
+   *
+   * Passed in rather than read here, so discovery stays pure and one `git`
+   * process answers for every path at once.
+   */
+  ignored?: ReadonlySet<string> | undefined;
   /**
    * Where a descriptor's fields live, when a producer nests them.
    *
@@ -226,10 +247,15 @@ export function discoverHostContracts(repo: RepoSource, options: DiscoveryOption
   // Documents that name tools and that we could not read as contracts. Kept so
   // one sitting beside a contract can be pointed at rather than dropped.
   const declined = new Map<string, { path: string; names: string[] }[]>();
+  const ignored: string[] = [];
   let scanned = 0;
 
   for (const path of repo.files()) {
     if (!isCandidate(path)) continue;
+    if (options.ignored?.has(path) === true) {
+      ignored.push(path);
+      continue;
+    }
     scanned += 1;
 
     let doc: ReturnType<typeof readDocument>;
@@ -330,7 +356,7 @@ export function discoverHostContracts(repo: RepoSource, options: DiscoveryOption
   }
 
   contracts.sort((a, b) => a.catalog.localeCompare(b.catalog));
-  return { contracts, notes, scanned };
+  return { contracts, notes, ignored, scanned };
 }
 
 /**

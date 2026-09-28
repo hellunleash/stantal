@@ -1,7 +1,7 @@
 import { buildManifestReport } from "../report.js";
 import type { Report } from "../report.js";
 import type { Judge } from "../prose/judge.js";
-import type { RepoSource } from "../blast/repo.js";
+import { gitIgnored, type RepoSource } from "../blast/repo.js";
 import { discoverHostContracts, type Discovery, type HostContract } from "./discover.js";
 import { baselinePath, loadBaseline, readBaselineMeta, saveBaseline } from "./baseline.js";
 
@@ -47,7 +47,10 @@ export type SnapshotOptions = {
  * that edits a repository the first time it is run is one people stop running.
  */
 export async function snapshotHostContracts(options: SnapshotOptions): Promise<SnapshotResult> {
-  const discovery = discoverHostContracts(options.repo, { fieldsKey: options.fieldsKey });
+  const discovery = discoverHostContracts(options.repo, {
+    fieldsKey: options.fieldsKey,
+    ignored: gitIgnored(options.root, options.repo.files()),
+  });
   const entries: SnapshotEntry[] = [];
 
   for (const found of discovery.contracts) {

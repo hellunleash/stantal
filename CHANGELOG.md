@@ -11,6 +11,73 @@ upgrade needs a full re-run.
 
 ## [Unreleased]
 
+Everything here came out of a field report from a real install of 0.7.0 into a
+Next.js host running a third-party agent. Every claim in it was checked against
+the source before anything was changed, and two were checked by running.
+
+**Read the first two items under Fixed before upgrading.** Both can change a
+verdict you have already seen, and one changes the shape of `stantal --json`.
+
+### Fixed
+
+- **An array of strings was not a contract.** `Param` had no way to say what an
+  array holds, so `string[]` and `number[]` normalized to the same parameter and
+  a change between them reported **zero** structural changes. Measured, not
+  argued: `diffStructural` on that pair returned `{ changes: [] }`. It now
+  reports `param_type_changed` on `tool.xs[]`, breaking. `Param` gains `items`,
+  the element declaration, filled by both the JSON Schema and zod readers.
+  `EXTRACTOR_VERSION` is `2`, so cached contracts are re-read.
+
+  The same gap left the wire form with no `items` on an array, which Gemini
+  refuses outright. Layer 2 sends the whole surface on every call, so one scalar
+  array anywhere in a contract ended the run. An element we genuinely could not
+  read now drops `type` rather than inventing one, which is what the `unknown`
+  branch beside it already did. Both halves checked against the live Gemini API:
+  a property with no `type` is accepted, and an array with no `items` is refused
+  with the exact error the field report quoted.
+
+- **`stantal --json` returns what `AGENTS.md` documents.** It emitted the raw
+  audit result, in different names from the `audit_project` tool the briefing
+  describes — and `AGENTS.md` names this command as the fallback for exactly the
+  case where the MCP server has not started yet. So the fallback path was the one
+  path where none of the documented fields existed, and an agent following the
+  briefing correctly said nothing. Both doors now return `auditForAgent`.
+  **Breaking** for anything parsing the old shape.
+
+- **A provider refusing a request no longer takes the report with it.** Layer 2
+  let the error out of the command: no report, no partial result, and nothing
+  naming it as ours, so a user reads a provider's raw 400 and goes to check
+  credentials that were fine. It is now a skip carrying the provider's own words,
+  which is the rule the rest of the tool already followed. Layers 0 and 1 keep
+  their findings.
+
+  Reported as a skip and never as a finding. A refusal is evidence about the
+  request, and the request is ours as much as the contract's — the first real
+  instance was our own missing `items`, where calling it a finding would have
+  blamed the package for our bug.
+
+- **`snapshot --save` no longer offers a baseline for files git ignores.** It
+  recorded three baselines for a tool's own scratch output under a directory
+  ignored with `*`, and told the user to commit them. Their filenames encode a
+  batch index rather than an identity, so a rerun that batches differently
+  reports drift describing nothing. Discovery now skips them and says how many,
+  asking git rather than matching ignore rules here.
+
+- **`.env.local` is read.** Only `.env` was, so a repo with a working key in
+  `.env.local` — where Next.js, Vite and Create React App all put it — was told
+  to set one, ran with no judge, and reported `unconfirmed`. `.env.local` loads
+  first, and a real environment variable still wins over both. When an env file
+  is present and holds none of the key names, the hint now says so.
+
+- **A call is only faulted against what the model was shown.** `invalidArguments`
+  type-checked a parameter whose wire form carries no type, which would have
+  manufactured `arguments_invalid` on an array we never described.
+
+### Added
+
+- `AGENTS.md` says which `.stantal/` directories to commit. It holds four
+  different things and a blanket ignore rule gets three of them wrong.
+
 ## [0.7.0] - 2026-09-08
 
 An HTTP API has no package, no version to bump and no type-checker. Until this

@@ -342,16 +342,32 @@ async function behaviourFor(
     return null;
   }
 
-  const intents =
-    settings.intents ??
-    (await seedIntents({
-      // The anchor is the older side, never the newer one. Seeding from the
-      // contract under test writes the request to match the prose being
-      // evaluated, and the measurement becomes circular.
-      anchor: from.contract,
-      caller,
-      ...(settings.seedCacheDir !== undefined ? { cacheDir: settings.seedCacheDir } : {}),
-    }));
+  const skip = (reason: string): RunResult => ({
+    findings: [],
+    skipped: [{ intentId: "(corpus)", reason }],
+    caller: caller.id,
+    k: settings.k ?? 5,
+    mode: "full",
+    replayed: 0,
+    corpus: 0,
+    stats: { hits: 0, misses: 0, writes: 0 },
+  });
+
+  let intents: readonly Intent[];
+  try {
+    intents =
+      settings.intents ??
+      (await seedIntents({
+        // The anchor is the older side, never the newer one. Seeding from the
+        // contract under test writes the request to match the prose being
+        // evaluated, and the measurement becomes circular.
+        anchor: from.contract,
+        caller,
+        ...(settings.seedCacheDir !== undefined ? { cacheDir: settings.seedCacheDir } : {}),
+      }));
+  } catch (error) {
+    return skip(`${caller.id} could not be asked for a corpus: ${message(error)}`);
+  }
   if (intents.length === 0) {
     // Asked for, and it could not run. Reported rather than skipped silently:
     // `behaviour: null` means nobody asked, and the two are opposite claims. A
@@ -381,15 +397,39 @@ async function behaviourFor(
     };
   }
 
-  return runBehaviour({
-    from: { version: versions.from, contract: from.contract },
-    to: { version: versions.to, contract: to.contract },
-    intents,
-    caller,
-    ...(settings.k !== undefined ? { k: settings.k } : {}),
-    ...(settings.cache !== undefined ? { cache: settings.cache } : {}),
-    ...(settings.concurrency !== undefined ? { concurrency: settings.concurrency } : {}),
-  });
+  try {
+    return await runBehaviour({
+      from: { version: versions.from, contract: from.contract },
+      to: { version: versions.to, contract: to.contract },
+      intents,
+      caller,
+      ...(settings.k !== undefined ? { k: settings.k } : {}),
+      ...(settings.cache !== undefined ? { cache: settings.cache } : {}),
+      ...(settings.concurrency !== undefined ? { concurrency: settings.concurrency } : {}),
+    });
+  } catch (error) {
+    // One layer failing must not take the verdict with it.
+    //
+    // Layers 0 and 1 have already run and cost nothing to keep, and the rule
+    // this tool states everywhere else is that a missing model degrades an
+    // answer rather than withholding one. Layer 2 was the exception: a provider
+    // refusing one request ended the command with a raw provider error and no
+    // report at all, which reads as a credentials problem and sends the user to
+    // check a key that was fine.
+    //
+    // Reported as a skip carrying the provider's own words, never as a finding.
+    // A refusal is evidence about the *request*, and the request is ours as much
+    // as it is the contract's — the first real instance was our own wire form
+    // omitting `items` on an array, where calling it a finding would have
+    // blamed the package for our bug.
+    return skip(`${caller.id} refused the request: ${message(error)}`);
+  }
+}
+
+function message(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error);
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > 300 ? `${flat.slice(0, 297)}...` : flat;
 }
 
 /**

@@ -9,7 +9,7 @@ import { callerFromEnv } from "./behaviour/callers.js";
 import { behaviourCacheFromEnv } from "./behaviour/run.js";
 import type { Judge } from "./prose/judge.js";
 import { judgeFromEnv } from "./prose/judges.js";
-import { fsJsonSource, fsRepoSource, type RepoSource } from "./blast/repo.js";
+import { fsJsonSource, fsRepoSource, gitIgnored, type RepoSource } from "./blast/repo.js";
 import { discoverHostContracts } from "./host/discover.js";
 import { ranked, readTraces, type UsageProfile } from "./usage/otel.js";
 import { saveSnapshots, snapshotHostContracts } from "./host/snapshot.js";
@@ -53,6 +53,7 @@ import { writeAgentsMd, type WriteAgentsResult } from "./connect/agents-md.js";
 import { serveStdio } from "./serve/mcp.js";
 import {
   auditProject,
+  auditForAgent,
   auditVerdict,
   contractDependencies,
   heldByRange,
@@ -298,21 +299,39 @@ function ownVersion(): string {
 }
 
 /**
- * Load a local `.env` if there is one.
+ * Load a local env file if there is one.
+ *
+ * `.env.local` first, then `.env`, matching what Next.js, Vite and Create React
+ * App all do: the local file is the one holding the real key, and the tracked
+ * `.env` is usually a template. Order is what decides, because `loadEnvFile`
+ * does not overwrite a variable that is already set — which is also why a real
+ * environment variable still wins over both.
+ *
+ * `.env.local` was missing, and the cost was not a missing feature. A repo with
+ * a working key in `.env.local` was told to "set OPENAI_API_KEY", ran with no
+ * judge, and reported its findings as `unconfirmed`. The user believes a key is
+ * configured, the weaker analysis runs, and one word is the only signal.
  *
  * Best effort and deliberately silent. A key is optional everywhere in this
- * tool, so a missing or malformed file is not a reason to stop — it just means
- * the judge does not run and findings stay unconfirmed. A real environment
- * variable always wins over the file.
+ * tool, so a missing or malformed file is not a reason to stop.
  */
+const ENV_FILES = [".env.local", ".env"] as const;
+
 function loadDotEnv(): void {
   const load = (process as NodeJS.Process & { loadEnvFile?: (path: string) => void }).loadEnvFile;
   if (typeof load !== "function") return; // Node older than 20.12
-  try {
-    load(".env");
-  } catch {
-    // No file, or unreadable. Both are normal.
+  for (const file of ENV_FILES) {
+    try {
+      load(file);
+    } catch {
+      // No file, or unreadable. Both are normal.
+    }
   }
+}
+
+/** Whether an env file exists here that we did not get a key out of. */
+function envFileWithoutAKey(): string | null {
+  return ENV_FILES.find((file) => existsSync(file)) ?? null;
 }
 
 // --- Rendering ---------------------------------------------------------------
@@ -905,6 +924,12 @@ function runConnect(
   if (provider === null) {
     out.push(`  Judgement calls will read "unconfirmed". To have a model settle them, set`);
     out.push(`  ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY. Your key, your bill.`);
+    const file = envFileWithoutAKey();
+    if (file !== null) {
+      // A key in a file we read but did not recognise looks identical to no key
+      // at all, and the user is certain they configured one.
+      out.push(`  ${dim(`${file} was read and holds none of those names.`)}`);
+    }
   } else {
     out.push(`  Judgement calls will be settled by ${provider}.`);
   }
@@ -1533,13 +1558,18 @@ async function runSnapshot(
   }
 
   if (values.save === true) {
-    const found = discoverHostContracts(documents, { fieldsKey: values["fields-at"] });
+    const found = discoverHostContracts(documents, {
+      fieldsKey: values["fields-at"],
+      ignored: gitIgnored(root, documents.files()),
+    });
     const written = saveSnapshots(root, documents, found.contracts);
     if (values.json === true) {
       process.stdout.write(`${JSON.stringify({ discovery: found, written }, null, 2)}
 `);
     } else {
-      process.stdout.write(renderSaved(found.contracts.length, written, baselineWouldBeIgnored(root)));
+      process.stdout.write(
+        renderSaved(found.contracts.length, written, baselineWouldBeIgnored(root), found.ignored),
+      );
     }
     // A save that could not write is exit 2, not a verdict. The next run would
     // otherwise compare against a baseline nobody has.
@@ -1581,12 +1611,25 @@ function renderSaved(
   discovered: number,
   written: ReturnType<typeof saveSnapshots>,
   ignored: boolean,
+  skipped: readonly string[],
 ): string {
   const out: string[] = [""];
+  // Said whether or not anything was found, and above the count, so a number
+  // that moved carries its reason rather than looking like a loss.
+  const passedOver =
+    skipped.length === 0
+      ? []
+      : [
+          `  ${dim(`skipped ${skipped.length} document(s) git ignores: ${skipped.slice(0, 3).join(", ")}`)}`,
+          `    ${dim("a baseline nobody can commit is a comparison only this machine can make")}`,
+          "",
+        ];
+
   if (discovered === 0) {
-    out.push(`  ${dim("no contracts written by this repository were found")}`, "");
+    out.push(...passedOver, `  ${dim("no contracts written by this repository were found")}`, "");
     return `${out.join("\n")}\n`;
   }
+  out.push(...passedOver);
   out.push(`  ${bold(`saved ${written.filter((w) => w.error === null).length} baseline(s)`)}`, "");
   for (const row of written) {
     out.push(
@@ -1988,7 +2031,11 @@ async function runAudit(
   const verdict = auditVerdict(result);
 
   if (quiet) {
-    process.stdout.write(`${JSON.stringify({ verdict, ...result }, null, 2)}\n`);
+    // The same object `audit_project` returns, not the raw result. `AGENTS.md`
+    // names this command as the fallback for the case where the MCP server has
+    // not started yet, and documents the tool's field names — so a second shape
+    // here made the fallback the one path where none of them existed.
+    process.stdout.write(`${JSON.stringify(auditForAgent(result), null, 2)}\n`);
   } else {
     process.stdout.write(renderAudit(result, verdict));
   }

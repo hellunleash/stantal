@@ -464,3 +464,30 @@ describe("looksLikeZod", () => {
     expect(looksLikeZod(node, ctx.isNamespace)).toBe(false);
   });
 });
+
+describe("array elements", () => {
+  it("keeps the element type of an array of scalars", () => {
+    const tags = paramNamed(`const SCHEMA = z.object({ tags: z.array(z.string().min(1)) })`, "tags");
+    expect(tags.type).toBe("array");
+    expect(tags.items?.type).toBe("string");
+    expect(tags.items?.constraints.minLength).toBe(1);
+    expect(tags.children).toBeUndefined();
+  });
+
+  it("keeps an enum element's values, so narrowing them is visible", () => {
+    const mode = paramNamed(
+      `const SCHEMA = z.object({ mode: z.array(z.enum(["fast", "slow"])) })`,
+      "mode",
+    );
+    expect(mode.items?.constraints.enum).toEqual(["fast", "slow"]);
+  });
+
+  it("leaves an object element in children", () => {
+    const rows = paramNamed(
+      `const SCHEMA = z.object({ rows: z.array(z.object({ a: z.string() })) })`,
+      "rows",
+    );
+    expect(rows.children?.map((c) => c.name)).toEqual(["a"]);
+    expect(rows.items).toBeUndefined();
+  });
+});

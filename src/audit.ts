@@ -5,11 +5,17 @@ import { extractFromModule } from "./extract/module.js";
 import { packageDirectory } from "./testkit.js";
 import { testFileName } from "./emit/vitest.js";
 import { hostReadiness, type HostReadiness } from "./emit/host.js";
-import { buildReport, type BehaviourOptions, type Report, type VerdictLevel } from "./report.js";
+import {
+  buildReport,
+  countFindings,
+  type BehaviourOptions,
+  type Report,
+  type VerdictLevel,
+} from "./report.js";
 import type { Registry } from "./registry/npm.js";
 import type { Judge } from "./prose/judge.js";
 import type { UsageProfile } from "./usage/otel.js";
-import { fsJsonSource, type RepoSource } from "./blast/repo.js";
+import { fsJsonSource, gitIgnored, type RepoSource } from "./blast/repo.js";
 import { discoverHostContracts, type DiscoveryNote, type HostContract } from "./host/discover.js";
 import { baselinePath, loadBaseline } from "./host/baseline.js";
 
@@ -360,7 +366,10 @@ export async function auditProject(options: AuditOptions): Promise<AuditResult> 
   // Offline, and it stays offline: a walk over the repo's own JSON, parsed by
   // the same extractor `stantal manifest` uses. Nothing is fetched, so this
   // costs nothing on the run a first-time user makes.
-  const discovery = discoverHostContracts(fsJsonSource(directory));
+  const documents = fsJsonSource(directory);
+  const discovery = discoverHostContracts(documents, {
+    ignored: gitIgnored(directory, documents.files()),
+  });
   const authored: AuthoredContract[] = discovery.contracts.map((contract) => {
     let baseline: string | null = null;
     try {
@@ -397,6 +406,71 @@ function message(error: unknown): string {
  * — because a CI step that goes green after failing to look is the precise
  * false claim this tool exists to avoid.
  */
+/**
+ * The audit, shaped for whoever has to act on it.
+ *
+ * A full report per dependency is tens of kilobytes of nested detail, and
+ * burying the one line that matters inside it is the same failure this project
+ * exists to find. Every field here is one an agent is told to branch on.
+ *
+ * **One shape, two doors.** The `audit_project` tool and `stantal --json`
+ * return this, because `AGENTS.md` documents these names and then names
+ * `stantal --json` as the fallback for exactly the case where the MCP server
+ * has not started yet. Two shapes meant the fallback path was the one path
+ * where nothing an agent had been told to look for existed, and its own rule
+ * is to say nothing about a condition it cannot see. Found in a real install.
+ */
+export function auditForAgent(result: AuditResult): Record<string, unknown> {
+  return {
+      verdict: auditVerdict(result),
+      declared_dependencies: result.declared,
+      contract_dependencies: result.entries.length,
+      can_run_tests: result.readiness.hasRunner,
+      missing_for_tests: result.readiness.missing,
+      // Contracts written here rather than installed. On a real application
+      // the dependency list covered 1 of 35, because the rest of what a model
+      // reads was generated in the repo. An agent that only ever saw the
+      // dependencies would confidently report a repo as covered when most of
+      // its contract was never looked at.
+      authored_contracts: result.authored.map((contract) => ({
+        catalog: contract.catalog,
+        documents: contract.sources,
+        tools: contract.tools,
+        // False means nothing is watching it: there is no saved copy, so a
+        // regeneration cannot be compared against anything.
+        has_baseline: contract.baseline !== null,
+      })),
+      authored_unreadable: result.authoredNotes.map((n) => ({ where: n.where, detail: n.detail })),
+      dependencies: result.entries.map((entry) => ({
+        package: entry.package,
+        installed: entry.installed,
+        latest: entry.latest,
+        upgrade_available: entry.latest !== null && !isCurrent(entry),
+        tools: entry.tools,
+        subpaths: entry.subpaths,
+        pinned: entry.pinnedSubpaths.length === entry.subpaths.length,
+        unpinned_subpaths: entry.subpaths.filter((s) => !entry.pinnedSubpaths.includes(s)),
+        verdict: entry.report?.verdict ?? null,
+        headline: entry.report?.headline ?? null,
+        findings: entry.report === null ? null : countFindings(entry.report),
+        reaches:
+          entry.report?.blast?.reaches.slice(0, 8).map((r) => ({
+            kind: r.kind,
+            target: r.target,
+            evidence: r.evidence,
+          })) ?? null,
+        // The findings are real and this project's declared range admits
+        // none of the versions carrying them. Different advice from both
+        // "nothing reaches you" and "hold it", so it travels separately.
+        held_by_declared_range: heldByRange(entry),
+        // Kept, never collapsed into the verdict. "We could not read this"
+        // and "we read it and it is fine" are opposite claims.
+        unreachable: isUnreachable(entry),
+        note: entry.note,
+      })),
+  };
+}
+
 export function auditVerdict(result: AuditResult): VerdictLevel | "nothing-to-check" {
   const verdicts = result.entries
     .map((e) => e.report?.verdict)

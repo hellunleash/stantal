@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import type { Contract } from "../contract/types.js";
+import type { Contract, Param } from "../contract/types.js";
 import { diffStructural } from "./structural.js";
 
 /**
@@ -194,5 +194,82 @@ describe("diffStructural — nested params", () => {
     const diff = diffStructural(base, after);
     expect(diff.changes[0]?.rule).toBe("param_type_changed");
     expect(diff.changes[0]?.target).toBe("t.target.id");
+  });
+});
+
+/**
+ * An array's element type is part of the contract.
+ *
+ * Before it was modelled, `string[]` and `number[]` were the same parameter and
+ * this pair reported zero changes — a breaking change presenting as clean.
+ */
+describe("diffStructural — array elements", () => {
+  const arrayOf = (element: Partial<Param>): Contract => ({
+    ecosystem: "npm",
+    package: "example",
+    version: "1.0.0",
+    surface: "mcp-server",
+    extractedAt: "1970-01-01T00:00:00.000Z",
+    extractorVersion: "fixture",
+    tools: [
+      {
+        name: "ask",
+        description: "Ask something.",
+        params: [
+          {
+            name: "choices",
+            type: "array",
+            required: true,
+            description: null,
+            constraints: {},
+            items: {
+              name: "[]",
+              type: "string",
+              required: true,
+              description: null,
+              constraints: {},
+              ...element,
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  test("a changed element type is breaking", () => {
+    const diff = diffStructural(arrayOf({}), arrayOf({ type: "number" }));
+    expect(diff.changes.map((c) => [c.rule, c.target])).toEqual([
+      ["param_type_changed", "ask.choices[]"],
+    ]);
+    expect(diff.breaking).toBe(true);
+  });
+
+  test("a narrowed element enum is breaking", () => {
+    const diff = diffStructural(
+      arrayOf({ constraints: { enum: ["a", "b"] } }),
+      arrayOf({ constraints: { enum: ["a"] } }),
+    );
+    expect(diff.changes.map((c) => c.rule)).toEqual(["enum_narrowed"]);
+  });
+
+  test("an element we read on one side only is not a parameter appearing or vanishing", () => {
+    const unread: Contract = {
+      ...arrayOf({}),
+      tools: [
+        {
+          name: "ask",
+          description: "Ask something.",
+          params: [
+            { name: "choices", type: "array", required: true, description: null, constraints: {} },
+          ],
+        },
+      ],
+    };
+
+    // Both directions. "We could not read the element" is a gap in our reading,
+    // and reporting it as `param_removed choices[]` would present that gap as a
+    // fact about the package.
+    expect(diffStructural(arrayOf({}), unread).changes).toEqual([]);
+    expect(diffStructural(unread, arrayOf({})).changes).toEqual([]);
   });
 });

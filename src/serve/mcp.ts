@@ -20,14 +20,7 @@ import { pacoteRegistry } from "../registry/npm.js";
 import { walkHistory } from "../history.js";
 import { planRemedy } from "../remedy/plan.js";
 import { fsRepoSource } from "../blast/repo.js";
-import {
-  auditProject,
-  auditVerdict,
-  contractDependencies,
-  heldByRange,
-  isCurrent,
-  isUnreachable,
-} from "../audit.js";
+import { auditForAgent, auditProject, contractDependencies } from "../audit.js";
 import type { Judge } from "../prose/judge.js";
 
 export { contractDependencies };
@@ -170,58 +163,7 @@ export function createServer(options: ServerOptions = {}): McpServer {
         ...(skip_reach === true ? {} : { repo: fsRepoSource(root) }),
       });
 
-      // Shaped for a model rather than handed over raw. A full report per
-      // dependency is tens of kilobytes of nested detail, and burying the one
-      // line that matters inside it is the same failure this project exists to
-      // find. The follow-up tools return the detail when it is wanted.
-      return json({
-        verdict: auditVerdict(result),
-        declared_dependencies: result.declared,
-        contract_dependencies: result.entries.length,
-        can_run_tests: result.readiness.hasRunner,
-        missing_for_tests: result.readiness.missing,
-        // Contracts written here rather than installed. On a real application
-        // the dependency list covered 1 of 35, because the rest of what a model
-        // reads was generated in the repo. An agent that only ever saw the
-        // dependencies would confidently report a repo as covered when most of
-        // its contract was never looked at.
-        authored_contracts: result.authored.map((contract) => ({
-          catalog: contract.catalog,
-          documents: contract.sources,
-          tools: contract.tools,
-          // False means nothing is watching it: there is no saved copy, so a
-          // regeneration cannot be compared against anything.
-          has_baseline: contract.baseline !== null,
-        })),
-        authored_unreadable: result.authoredNotes.map((n) => ({ where: n.where, detail: n.detail })),
-        dependencies: result.entries.map((entry) => ({
-          package: entry.package,
-          installed: entry.installed,
-          latest: entry.latest,
-          upgrade_available: entry.latest !== null && !isCurrent(entry),
-          tools: entry.tools,
-          subpaths: entry.subpaths,
-          pinned: entry.pinnedSubpaths.length === entry.subpaths.length,
-          unpinned_subpaths: entry.subpaths.filter((s) => !entry.pinnedSubpaths.includes(s)),
-          verdict: entry.report?.verdict ?? null,
-          headline: entry.report?.headline ?? null,
-          findings: entry.report === null ? null : countFindings(entry.report),
-          reaches:
-            entry.report?.blast?.reaches.slice(0, 8).map((r) => ({
-              kind: r.kind,
-              target: r.target,
-              evidence: r.evidence,
-            })) ?? null,
-          // The findings are real and this project's declared range admits
-          // none of the versions carrying them. Different advice from both
-          // "nothing reaches you" and "hold it", so it travels separately.
-          held_by_declared_range: heldByRange(entry),
-          // Kept, never collapsed into the verdict. "We could not read this"
-          // and "we read it and it is fine" are opposite claims.
-          unreachable: isUnreachable(entry),
-          note: entry.note,
-        })),
-      });
+      return json(auditForAgent(result));
     },
   );
 

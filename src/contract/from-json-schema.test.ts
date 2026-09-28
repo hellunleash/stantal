@@ -85,3 +85,49 @@ describe("toolFrom", () => {
     expect(toolFrom("t", undefined, {}).description).toBeNull();
   });
 });
+
+describe("array elements", () => {
+  test("reads the element of an array of scalars", () => {
+    const [xs] = paramsFromInputSchema({
+      type: "object",
+      properties: { xs: { type: "array", items: { type: "string", minLength: 1 } } },
+    });
+    expect(xs?.type).toBe("array");
+    expect(xs?.items?.name).toBe("[]");
+    expect(xs?.items?.type).toBe("string");
+    expect(xs?.items?.constraints.minLength).toBe(1);
+    // `children` holds an object element's properties. Both set would be two
+    // representations of one fact.
+    expect(xs?.children).toBeUndefined();
+  });
+
+  test("an object element stays in children, with no items beside it", () => {
+    const [rows] = paramsFromInputSchema({
+      type: "object",
+      properties: {
+        rows: { type: "array", items: { type: "object", properties: { a: { type: "string" } } } },
+      },
+    });
+    expect(rows?.children?.map((c) => c.name)).toEqual(["a"]);
+    expect(rows?.items).toBeUndefined();
+  });
+
+  test("an array with no declared element gets neither", () => {
+    const [xs] = paramsFromInputSchema({
+      type: "object",
+      properties: { xs: { type: "array" } },
+    });
+    expect(xs?.type).toBe("array");
+    expect(xs?.items).toBeUndefined();
+    expect(xs?.children).toBeUndefined();
+  });
+
+  test("an array of arrays keeps both levels", () => {
+    const [xs] = paramsFromInputSchema({
+      type: "object",
+      properties: { xs: { type: "array", items: { type: "array", items: { type: "number" } } } },
+    });
+    expect(xs?.items?.type).toBe("array");
+    expect(xs?.items?.items?.type).toBe("number");
+  });
+});

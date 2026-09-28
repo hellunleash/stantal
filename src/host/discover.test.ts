@@ -160,3 +160,36 @@ describe("baselineSlug", () => {
     expect(baselineSlug("src/agent/mcp.json")).toBe("src-agent-mcp");
   });
 });
+
+/**
+ * A tool's own scratch output, under a directory its owner ignores with `*`.
+ *
+ * Found in a real install: `snapshot --save` recorded three baselines for
+ * per-batch judge output and told the user to commit them. The filenames encode
+ * a batch index rather than an identity, so a rerun that batches differently
+ * reports drift describing nothing.
+ */
+describe("documents git ignores", () => {
+  const repo = () =>
+    memoryRepoSource({
+      ".agent/tools.json": SKELETON,
+      ".agent/data/judge-1.json": SKELETON,
+      ".agent/data/judge-2.json": SKELETON,
+    });
+
+  it("offers a baseline for all of them when nobody says otherwise", () => {
+    expect(discoverHostContracts(repo()).contracts).toHaveLength(3);
+  });
+
+  it("skips them, and says which", () => {
+    const found = discoverHostContracts(repo(), {
+      ignored: new Set([".agent/data/judge-1.json", ".agent/data/judge-2.json"]),
+    });
+
+    expect(found.contracts.map((c) => c.catalog)).toEqual([".agent/tools.json"]);
+    expect(found.ignored).toEqual([".agent/data/judge-1.json", ".agent/data/judge-2.json"]);
+    // Not a note. A note says we could not read something; these read fine, and
+    // their owner said they are not part of the repo.
+    expect(found.notes).toEqual([]);
+  });
+});

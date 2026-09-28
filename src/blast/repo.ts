@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import type { PackageJson } from "../extract/package-source.js";
@@ -184,6 +185,40 @@ function sourceOver(root: string, rules: WalkRules): RepoSource {
 /** The consumer's own source, for Layer 3. Dot directories are tooling, not code. */
 export function fsRepoSource(root: string): RepoSource {
   return sourceOver(root, { keep: isScannable, dotDirectories: false });
+}
+
+/**
+ * Which of these paths git deliberately ignores.
+ *
+ * Asked of git rather than matched here. A repo's ignore rules are a stack of
+ * files with negations and nested overrides, and the one that mattered in the
+ * field was a nested `.gitignore` holding a single `*` — a directory whose owner
+ * ignores it on purpose. Any matcher written here would be a worse copy of the
+ * one already installed.
+ *
+ * Returns an empty set when git cannot answer: not installed, or not a
+ * repository. Failing open is deliberate. This decides what to *hide*, so
+ * "we could not check" must leave everything visible.
+ */
+export function gitIgnored(root: string, paths: readonly string[]): ReadonlySet<string> {
+  if (paths.length === 0) return new Set();
+
+  const run = spawnSync("git", ["-C", root, "check-ignore", "--stdin"], {
+    input: `${paths.join("\n")}\n`,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+
+  // 0 = some are ignored, 1 = none are. Anything else (128 for "not a git
+  // repository", or a spawn failure) means git did not answer the question.
+  if (run.error !== undefined || (run.status !== 0 && run.status !== 1)) return new Set();
+
+  return new Set(
+    (run.stdout ?? "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0),
+  );
 }
 
 /**

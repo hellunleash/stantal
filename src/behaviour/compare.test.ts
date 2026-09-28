@@ -359,6 +359,58 @@ describe("presenting a contract to a model", () => {
     const wire = presentTool(tool("make", [param("thing", { type: "unknown" })]));
     expect(wire.inputSchema.properties["thing"]).toEqual({});
   });
+
+  // An array with no `items` is refused outright by at least one provider, and
+  // the whole surface goes out on every call — so one of these anywhere in a
+  // contract used to end the run with a raw 400 and no finding.
+  it("declares what an array of scalars holds", () => {
+    const wire = presentTool(
+      tool("make", [
+        param("choices", {
+          type: "array",
+          items: param("[]", { required: true, description: "one option" }),
+        }),
+      ]),
+    );
+
+    expect(wire.inputSchema.properties["choices"]).toEqual({
+      type: "array",
+      items: { type: "string", description: "one option" },
+    });
+  });
+
+  it("does not fault a call against a type the model was never shown", () => {
+    // The wire form omits `type` for an array whose element we could not read.
+    // Faulting the answer against it would mark a call wrong on a question that
+    // was never asked, and `arguments_invalid` is a finding this layer reports.
+    const unread = tool("make", [param("xs", { type: "array" })]);
+    expect(presentTool(unread).inputSchema.properties["xs"]).toEqual({});
+    expect(invalidArguments(unread, { xs: "not an array" })).toEqual([]);
+
+    // Declared, so still checked.
+    const known = tool("make", [param("xs", { type: "array", items: param("[]") })]);
+    expect(invalidArguments(known, { xs: "not an array" })).toEqual(["`xs` should be array"]);
+  });
+
+  it("drops array rather than declaring an element it never read", () => {
+    const wire = presentTool(tool("make", [param("xs", { type: "array" })]));
+    // Not `{ type: "array" }`, which is invalid, and not an invented element
+    // type. "Anything" is the honest translation of "we could not read it".
+    expect(wire.inputSchema.properties["xs"]).toEqual({});
+  });
+
+  it("still builds items from children for an array of objects", () => {
+    const wire = presentTool(
+      tool("make", [
+        param("rows", { type: "array", children: [param("a", { required: true })] }),
+      ]),
+    );
+
+    expect(wire.inputSchema.properties["rows"]).toEqual({
+      type: "array",
+      items: { type: "object", properties: { a: { type: "string" } }, required: ["a"] },
+    });
+  });
 });
 
 describe("a field the older version did not declare", () => {
