@@ -193,8 +193,12 @@ jobs:
           node -e '
             const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
             if (typeof r.verdict !== "string") throw new Error("the audit produced no verdict");
-            if (!Array.isArray(r.entries)) throw new Error("the audit produced no entries");
-            console.log(`keyless audit: ${r.verdict}, ${r.entries.length} contract dependency/ies`);
+            // The shape `AGENTS.md` documents. This read `r.entries` until the
+            // output changed to match the briefing, and then failed every push
+            // for a fortnight on a check that was stale, not on a keyless run
+            // that was broken.
+            if (!Array.isArray(r.dependencies)) throw new Error("the audit produced no dependencies list");
+            console.log(`keyless audit: ${r.verdict}, ${r.dependencies.length} contract dependency/ies`);
           ' "$audit"
 
       # The provider's form of the same promise. `stantal doctor` is what goes
