@@ -37,6 +37,15 @@ export type JudgeQuestion =
       description: string;
       /** The other parameters, so the judge can see the field in context. */
       siblings: readonly string[];
+    }
+  | {
+      id: string;
+      kind: "is_guidance_preserved";
+      tool: string;
+      /** The sentence the older description carried and the newer one does not. */
+      removed: string;
+      /** The newer description as shipped. The only text the answer may quote. */
+      description: string;
     };
 
 export type Verdict = "yes" | "no" | "unclear";
@@ -98,8 +107,12 @@ export function verifyAnswer(question: JudgeQuestion, answer: JudgeAnswer): Judg
     if (quote.length === 0 || !source.includes(quote)) return null;
   }
 
-  // Asserting that guidance exists means being able to point at it.
-  if (question.kind === "is_parameter_documented" && answer.verdict === "yes" && answer.quote === null) {
+  // Asserting that guidance exists means being able to point at it. The same
+  // holds for guidance said to have survived a rewrite: a `yes` retires a
+  // finding, so it has to show the words that now carry it.
+  const assertsText =
+    question.kind === "is_parameter_documented" || question.kind === "is_guidance_preserved";
+  if (assertsText && answer.verdict === "yes" && answer.quote === null) {
     return null;
   }
 
@@ -149,6 +162,28 @@ export function renderQuestion(question: JudgeQuestion): string {
       "Answer yes only if the description gives guidance a caller could act on for that",
       "specific parameter. A passing mention of the word is not guidance.",
       'If yes, quote the exact sentence from the description that does it.',
+    ].join("\n");
+  }
+
+  if (question.kind === "is_guidance_preserved") {
+    return [
+      `Tool: ${question.tool}`,
+      "",
+      "A sentence the previous version of this tool's description carried, which the",
+      "new version does not:",
+      "---",
+      question.removed,
+      "---",
+      "",
+      "Tool description as shipped now:",
+      "---",
+      question.description,
+      "---",
+      "",
+      "Does the new description still tell a caller what the removed sentence told them?",
+      "Answer yes only if a caller reading only the new description would learn the same",
+      "guidance, in whatever words. Covering the same topic is not enough.",
+      "If yes, quote the exact sentence from the new description that carries it.",
     ].join("\n");
   }
 

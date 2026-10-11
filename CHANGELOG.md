@@ -18,7 +18,62 @@ the source before anything was changed, and two were checked by running.
 **Read the first two items under Fixed before upgrading.** Both can change a
 verdict you have already seen, and one changes the shape of `stantal --json`.
 
+The second half came from running the published CLI on other people's public
+repositories the way their owners would: an API provider's spec history, its
+tool package, and a repository of agents defined in config. It found real
+changes, and it found six places where our own output claimed more than it had
+read. Those six are the items marked **false claim** below.
+
 ### Fixed
+
+- **False claim: a rewritten description was "guidance removed", `certain`.**
+  Six tool descriptions in one release had been made about four times longer
+  and clearer, and each was reported as guidance removed, because the old
+  sentence was no longer there. A removal is now a text fact only when it is a
+  cut. When a description loses a sentence and gains at least as much new text,
+  or the sentence survives in a shortened form, the finding carries a question
+  for the judge and reads `unconfirmed` until it is answered. Its headline says
+  the sentence "has no counterpart in the rewritten description" and never "was
+  removed". A judge that says the guidance survived has to quote the sentence
+  that now carries it, or nothing is retired. **This can lower the confidence of
+  findings you have already seen.** A patch is never offered for one.
+
+- **False claim: a union read as `unknown`, and `unknown` compared as a type.**
+  A request body written as `anyOf` of two objects read as having no fields. The
+  next release wrote the same body plainly and every field in it was reported as
+  added, one as a new required parameter, breaking. A nullable union and a union
+  of objects are now read through. Where a schema is still `unknown` on one side
+  only, the type change, the bounds and any fields beneath it are withheld and
+  listed under `suppressed`, and a change in required-ness is still claimed. On
+  the pair this was found on, three breaking changes had been reported and two
+  were false. Three are reported now, all true, one of which the old reading
+  had hidden. `EXTRACTOR_VERSION` is `3`.
+
+- **A YAML spec is read.** `stantal manifest` took JSON only, so a spec kept as
+  `openapi.yaml` came back `unparseable` and the comparison was refused. More
+  than one SDK generator writes nothing but YAML. The parser is loaded only
+  after `JSON.parse` has failed. Plain prose is still not a document, though
+  YAML would accept it.
+
+- **`stantal snapshot` and the audit find a YAML spec too.** Discovery listed
+  `.json` only, so a repository whose contract is `openapi.yaml` wrote "none
+  found".
+
+- **False claim: `manifest` reported the spec reaching itself.** Run from the
+  folder holding the two specs, it listed five places the change "reaches you",
+  every one a line of the file being compared. The documents handed to a
+  comparison are now left out of the repository scan.
+
+- **False claim: "none found" about a repository full of agents.** Each agent
+  was a config file listing tool names, with the descriptions and schemas
+  defined in source code. Every document was read, nothing could be extracted,
+  and the report said the repository writes no contract. It now says "none could
+  be read" and names the tools that are listed and described nowhere. Reading
+  tool definitions out of source code in other languages is not built.
+
+- **False claim: `stantal history` advised "stay, 1.0.1 is already clean"** to
+  somebody walking a package they publish. With no `--current` there is no hop
+  to recommend, and it now says that.
 
 - **An array of strings was not a contract.** `Param` had no way to say what an
   array holds, so `string[]` and `number[]` normalized to the same parameter and
@@ -77,6 +132,10 @@ verdict you have already seen, and one changes the shape of `stantal --json`.
 
 - `AGENTS.md` says which `.stantal/` directories to commit. It holds four
   different things and a blanket ignore rule gets three of them wrong.
+- A third judge question, `is_guidance_preserved`. Existing recordings are
+  untouched: a recording is keyed on the question's text, and no earlier
+  question changed.
+- `yaml` as a dependency. It has none of its own.
 
 ## [0.7.0] - 2026-09-08
 

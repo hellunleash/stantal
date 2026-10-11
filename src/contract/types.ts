@@ -165,7 +165,7 @@ export type Contract = {
 };
 
 /** Bump when extraction changes shape or fidelity; invalidates the cache. */
-export const EXTRACTOR_VERSION = "2";
+export const EXTRACTOR_VERSION = "3";
 
 /** Stable identity of a cached contract. Versions are immutable, so this never changes meaning. */
 export function contractKey(

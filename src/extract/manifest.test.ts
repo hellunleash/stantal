@@ -89,6 +89,47 @@ describe("absent is not empty", () => {
     expect(isEvidencedAbsence(result.absence.reason)).toBe(false);
   });
 
+  test("reads a YAML spec the same as the JSON one", () => {
+    // More than one SDK generator writes YAML and nothing else. Read as JSON
+    // only, such a spec refused the comparison before it began.
+    const yaml = [
+      "openapi: 3.1.0",
+      "info:",
+      "  title: Catalogue",
+      "  version: '1'",
+      "paths:",
+      "  /items:",
+      "    get:",
+      "      operationId: listItems",
+      "      summary: List the items in the catalogue.",
+      "      parameters:",
+      "        - name: limit",
+      "          in: query",
+      "          description: How many to return.",
+      "          schema:",
+      "            type: integer",
+      "            maximum: 100",
+    ].join("\n");
+
+    const result = read(yaml, "openapi.yaml");
+    if (!isPresent(result)) throw new Error("expected a contract");
+    expect(result.fidelity).toBe("complete");
+
+    const tool = result.contract.tools[0]!;
+    expect(tool.name).toBe("listItems");
+    expect(tool.description).toBe("List the items in the catalogue.");
+    expect(tool.params.map((p) => [p.name, p.type, p.constraints.maximum])).toEqual([["limit", "integer", 100]]);
+  });
+
+  test("plain prose is not a document, though YAML would accept it", () => {
+    // Every line of text is a valid YAML scalar. "It parsed" must not be true
+    // of a README.
+    const result = read("This file explains how the tools work.", "README.md");
+    if (result.present) throw new Error("expected an absence");
+    expect(result.absence.reason).toBe("unparseable");
+    expect(isEvidencedAbsence(result.absence.reason)).toBe(false);
+  });
+
   test("JSON with no tool list is unparseable, never `no tools`", () => {
     // The distinction is the whole point. Calling this "lists no tools" would
     // claim something about a file we have no reason to think is a manifest.

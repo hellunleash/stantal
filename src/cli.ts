@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { describeAbsence, isEvidencedAbsence, isPresent, type SurfaceResult } from "./contract/surface.js";
@@ -9,7 +9,7 @@ import { callerFromEnv } from "./behaviour/callers.js";
 import { behaviourCacheFromEnv } from "./behaviour/run.js";
 import type { Judge } from "./prose/judge.js";
 import { judgeFromEnv } from "./prose/judges.js";
-import { fsJsonSource, fsRepoSource, gitIgnored, type RepoSource } from "./blast/repo.js";
+import { fsJsonSource, fsRepoSource, gitIgnored, withoutFiles, type RepoSource } from "./blast/repo.js";
 import { discoverHostContracts } from "./host/discover.js";
 import { ranked, readTraces, type UsageProfile } from "./usage/otel.js";
 import { saveSnapshots, snapshotHostContracts } from "./host/snapshot.js";
@@ -1656,7 +1656,9 @@ function renderSnapshot(result: Awaited<ReturnType<typeof snapshotHostContracts>
   const out: string[] = ["", `  ${bold("contracts this repository writes")}  ${dim(`${discovery.scanned} document(s) read`)}`, ""];
 
   if (entries.length === 0) {
-    out.push(`  ${dim("none found")}`);
+    // "None found" is a claim about the repository. With a gap on record it is
+    // a claim we have not earned, so the line says what happened instead.
+    out.push(`  ${dim(discovery.notes.length > 0 ? "none could be read" : "none found")}`, "");
   }
 
   for (const entry of entries) {
@@ -1903,10 +1905,23 @@ async function runHistory(
 
     // Layer 4 reads the completed walk and decides. Every fact it needs was
     // already measured, so it costs nothing and never calls out.
-    const remedy = planRemedy({
-      walk: result,
-      ...(values.current === undefined ? {} : { current: values.current }),
-    });
+    //
+    // Only when told where the reader stands. The planner falls back to the
+    // oldest release, which is right for a library caller that means it and
+    // wrong printed here: a provider walking their own history was told to
+    // "stay, 1.0.1 is already clean" about a package they publish. With no
+    // `--current` there is no hop to recommend, and saying so is the answer.
+    const remedy: Remedy =
+      values.current === undefined
+        ? {
+            kind: "unknown",
+            target: null,
+            latest: result.versions.at(-1) ?? null,
+            headline: "pass --current <version> to get a recommendation from where you stand",
+            because: [],
+            unverifiable: [],
+          }
+        : planRemedy({ walk: result, current: values.current });
 
     process.stdout.write(
       quiet
@@ -3129,7 +3144,22 @@ GEMINI_API_KEY). Continuing without Layer 2.
   }
 
   if (positionals[0] === "manifest") {
-    return runManifest(positionals[1], positionals[2], values, judge, behaviour, repo, usage);
+    // The documents being compared are not the consumer's code, wherever they
+    // happen to be kept.
+    const inputs = [positionals[1], positionals[2]]
+      .flatMap((spec) => (spec ?? "").split(","))
+      .map((path) => path.trim())
+      .filter((path) => path.length > 0)
+      .map((path) => relative(resolve(repoArg), resolve(path)).split(sep).join("/"));
+    return runManifest(
+      positionals[1],
+      positionals[2],
+      values,
+      judge,
+      behaviour,
+      repo === undefined ? undefined : withoutFiles(repo, inputs),
+      usage,
+    );
   }
 
   if (positionals[0] === "mcp") {

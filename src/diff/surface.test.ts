@@ -155,4 +155,17 @@ describe("diffSurfaces, extraction gaps", () => {
     expect(comparison.degraded).toBe(false);
     expect(comparison.suppressed).toEqual([]);
   });
+
+  test("a change against a schema nobody could type is withheld, not claimed", () => {
+    const comparison = diffSurfaces(
+      present("1.0.0", [tool("build", [{ ...STRING_PARAM, type: "unknown" }])]),
+      present("2.0.0", [tool("build", [{ ...STRING_PARAM, type: "integer" }])]),
+    );
+    expect(comparison.diff?.changes).toEqual([]);
+    expect(comparison.breaking).toBe(false);
+    expect(comparison.suppressed.map((c) => c.rule)).toEqual(["param_type_changed"]);
+    // Withheld is a gap, and a gap is said out loud.
+    expect(comparison.degraded).toBe(true);
+    expect(comparison.note).toContain("1 withheld");
+  });
 });

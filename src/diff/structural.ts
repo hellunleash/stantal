@@ -55,6 +55,14 @@ export type StructuralDiff = {
   breaking: boolean;
   /** Tools whose contract moved at all. */
   changedTools: string[];
+  /**
+   * Changes that were computed and are not claimed, because one side of the
+   * comparison is a schema we could not read.
+   *
+   * Absent when there are none. `diffSurfaces` moves them into `suppressed`, so
+   * they are reported as withheld rather than dropped.
+   */
+  withheld?: StructuralChange[];
 };
 
 function byName<T extends { name: string }>(items: T[]): Map<string, T> {
@@ -140,15 +148,58 @@ function boundsDelta(
   return null;
 }
 
-function diffParams(tool: string, from: Tool, to: Tool): StructuralChange[] {
+/**
+ * Paths where exactly one side is a schema we could not read.
+ *
+ * `unknown` is what normalization gives a schema it found and could not type: a
+ * union with no single type, a `$ref` nobody followed, an empty `{}`. It means
+ * "we read nothing here", and a difference against nothing is not a change.
+ * Compared naively, a parameter that was always an integer and was once spelled
+ * as a union reports `changed type from unknown to integer`, breaking, and every
+ * bound on it reports as newly tightened.
+ *
+ * Both sides `unknown` is left alone: nothing is claimed about the type, and
+ * whatever sits beside it on the schema is compared like for like.
+ */
+function unreadOnOneSide(a: Map<string, Param>, b: Map<string, Param>): Set<string> {
+  const out = new Set<string>();
+  for (const [path, before] of a) {
+    const after = b.get(path);
+    if (after === undefined) continue;
+    if ((before.type === "unknown") !== (after.type === "unknown")) out.add(path);
+  }
+  return out;
+}
+
+/** The path itself, or anything beneath it: a field of it, or its element. */
+function isWithin(path: string, unread: ReadonlySet<string>): boolean {
+  for (const root of unread) {
+    if (path === root || path.startsWith(`${root}.`) || path.startsWith(`${root}[]`)) return true;
+  }
+  return false;
+}
+
+function diffParams(
+  tool: string,
+  from: Tool,
+  to: Tool,
+): { changes: StructuralChange[]; withheld: StructuralChange[] } {
   const changes: StructuralChange[] = [];
+  const withheld: StructuralChange[] = [];
   const a = flatten(from.params);
   const b = flatten(to.params);
+  const unread = unreadOnOneSide(a, b);
+
+  // A field under a parameter we could not read on one side was never seen on
+  // that side, so "added" and "removed" there describe our reading. Whether the
+  // parameter itself became required is still a fact: that comes from the list
+  // beside it, which was read on both sides.
+  const sink = (path: string) => (isWithin(path, unread) ? withheld : changes);
 
   for (const [path, param] of b) {
     if (a.has(path) || isElement(path)) continue;
     const rule: StructuralRule = param.required ? "param_added_required" : "param_added_optional";
-    changes.push({
+    sink(path).push({
       rule,
       target: `${tool}.${path}`,
       tool,
@@ -162,7 +213,7 @@ function diffParams(tool: string, from: Tool, to: Tool): StructuralChange[] {
 
   for (const [path, param] of a) {
     if (b.has(path) || isElement(path)) continue;
-    changes.push({
+    sink(path).push({
       rule: "param_removed",
       target: `${tool}.${path}`,
       tool,
@@ -177,7 +228,7 @@ function diffParams(tool: string, from: Tool, to: Tool): StructuralChange[] {
     if (!after) continue;
 
     if (before.type !== after.type) {
-      changes.push({
+      sink(path).push({
         rule: "param_type_changed",
         target: `${tool}.${path}`,
         tool,
@@ -208,7 +259,7 @@ function diffParams(tool: string, from: Tool, to: Tool): StructuralChange[] {
     if (beforeEnum && afterEnum && beforeEnum.join("|") !== afterEnum.join("|")) {
       const removed = beforeEnum.filter((v) => !afterEnum.includes(v));
       const rule: StructuralRule = removed.length > 0 ? "enum_narrowed" : "enum_widened";
-      changes.push({
+      sink(path).push({
         rule,
         target: `${tool}.${path}`,
         tool,
@@ -225,7 +276,7 @@ function diffParams(tool: string, from: Tool, to: Tool): StructuralChange[] {
     const bounds = boundsDelta(before.constraints, after.constraints);
     if (bounds) {
       const rule: StructuralRule = bounds === "tightened" ? "constraint_tightened" : "constraint_relaxed";
-      changes.push({
+      sink(path).push({
         rule,
         target: `${tool}.${path}`,
         tool,
@@ -237,13 +288,14 @@ function diffParams(tool: string, from: Tool, to: Tool): StructuralChange[] {
     }
   }
 
-  return changes;
+  return { changes, withheld };
 }
 
 export function diffStructural(from: Contract, to: Contract): StructuralDiff {
   const a = byName(from.tools);
   const b = byName(to.tools);
   const changes: StructuralChange[] = [];
+  const withheld: StructuralChange[] = [];
 
   for (const name of b.keys()) {
     if (a.has(name)) continue;
@@ -269,12 +321,16 @@ export function diffStructural(from: Contract, to: Contract): StructuralDiff {
 
   for (const [name, before] of a) {
     const after = b.get(name);
-    if (after) changes.push(...diffParams(name, before, after));
+    if (!after) continue;
+    const params = diffParams(name, before, after);
+    changes.push(...params.changes);
+    withheld.push(...params.withheld);
   }
 
   return {
     changes,
     breaking: changes.some((c) => c.breaking),
     changedTools: [...new Set(changes.map((c) => c.tool))].sort(),
+    ...(withheld.length === 0 ? {} : { withheld }),
   };
 }

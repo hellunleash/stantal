@@ -3,7 +3,37 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { gitIgnored } from "./repo.js";
+import { gitIgnored, memoryRepoSource, withoutFiles } from "./repo.js";
+
+/**
+ * A spec kept in the repository it is compared from names every one of its own
+ * operations. Scanned, it reported the contract reaching itself.
+ */
+describe("withoutFiles", () => {
+  const repo = memoryRepoSource({
+    "package.json": "{}",
+    "src/billing.ts": "client.accountSessions.create()",
+    "specs/after.json": '{"paths":{"/v1/account_sessions":{}}}',
+  });
+
+  it("leaves the named documents out of the listing", () => {
+    const scanned = withoutFiles(repo, ["specs/after.json"]);
+    expect(scanned.files()).not.toContain("specs/after.json");
+    expect(scanned.files()).toContain("src/billing.ts");
+  });
+
+  it("still reads them, since being an input does not make a file unreadable", () => {
+    expect(withoutFiles(repo, ["specs/after.json"]).read("specs/after.json")).toContain("account_sessions");
+  });
+
+  it("keeps the repo's own manifest", () => {
+    expect(withoutFiles(repo, ["specs/after.json"]).packageJson()).toEqual({});
+  });
+
+  it("is the same source when nothing is named", () => {
+    expect(withoutFiles(repo, [])).toBe(repo);
+  });
+});
 
 /**
  * `gitIgnored` fails open, which is the right default and also means a broken

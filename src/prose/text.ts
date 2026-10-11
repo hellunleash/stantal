@@ -140,6 +140,24 @@ export function similarity(a: string, b: string): number {
 }
 
 /**
+ * How much of `part` is made of words from `whole`, 0 to 1.
+ *
+ * `similarity` divides by the longer side, so a sentence that kept its first
+ * half scores as unrelated to the sentence it was cut down from. This asks the
+ * one-sided question instead: is the short one mostly built out of the long
+ * one. A handful of tokens proves nothing either way, so anything under four
+ * scores zero.
+ */
+export function containment(part: string, whole: string): number {
+  const inner = tokens(part);
+  const outer = tokens(whole);
+  if (inner.size < 4 || outer.size === 0) return 0;
+  let shared = 0;
+  for (const token of inner) if (outer.has(token)) shared += 1;
+  return shared / inner.size;
+}
+
+/**
  * Sentences that are genuinely gone, not merely reworded.
  *
  * A description that gets tightened rewrites most of its sentences. Reporting

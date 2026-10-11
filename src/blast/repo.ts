@@ -188,6 +188,28 @@ export function fsRepoSource(root: string): RepoSource {
 }
 
 /**
+ * The same source with named files left out of the listing.
+ *
+ * For the documents a comparison was handed. A spec kept in the repository it
+ * is compared from names every one of its own operations, so scanning it
+ * reports the contract reaching itself: five "call sites", all of them lines of
+ * the file under comparison. They are skipped rather than noted, like a
+ * lockfile, because we read them and know exactly what they are.
+ *
+ * Only the listing changes. `read` still answers for them, since a file being
+ * an input does not make it unreadable.
+ */
+export function withoutFiles(source: RepoSource, paths: readonly string[]): RepoSource {
+  if (paths.length === 0) return source;
+  const hidden = new Set(paths);
+  return {
+    files: () => source.files().filter((path) => !hidden.has(path)),
+    read: (path) => source.read(path),
+    packageJson: () => source.packageJson(),
+  };
+}
+
+/**
  * Which of these paths git deliberately ignores.
  *
  * Asked of git rather than matched here. A repo's ignore rules are a stack of
@@ -221,18 +243,39 @@ export function gitIgnored(root: string, paths: readonly string[]): ReadonlySet<
   );
 }
 
+/** A serialized document the manifest reader can parse. */
+export function isDocument(path: string): boolean {
+  return /\.(json|ya?ml)$/i.test(path);
+}
+
 /**
- * Every JSON document in the repo, for contract discovery.
+ * Every JSON or YAML document in the repo, for contract discovery.
  *
  * Descends into dot directories, which Layer 3 skips. A host writes its
  * generated tool list where its own tooling lives, so the directory Layer 3 is
  * right to ignore is the first place to look here.
+ *
+ * YAML is listed because the reader takes it: a spec kept as `openapi.yaml` is
+ * as much a contract this repository writes as one kept as JSON, and a walk
+ * that listed only `.json` found nothing in a repo holding one. The name stays
+ * for the callers that import it.
  */
 export function fsJsonSource(root: string): RepoSource {
   return sourceOver(root, {
-    keep: (name) => name.endsWith(".json") && !GENERATED_FILES.has(name),
+    keep: (name) => isDocument(name) && !GENERATED_FILES.has(name),
     dotDirectories: true,
   });
+}
+
+/**
+ * In-memory documents, listed by the rule `fsJsonSource` lists by.
+ *
+ * `memoryRepoSource` lists what Layer 3 scans, which leaves YAML out on
+ * purpose. Discovery reads YAML, so a test of it needs the walk it really gets.
+ */
+export function memoryDocumentSource(files: Record<string, string>): RepoSource {
+  const keep = (path: string) => isDocument(path) && !GENERATED_FILES.has(path.split("/").pop() ?? path);
+  return { ...memoryRepoSource(files), files: () => Object.keys(files).filter(keep).sort() };
 }
 
 /** In-memory repo, for tests and for a caller that already has the text. */

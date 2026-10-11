@@ -9,10 +9,12 @@ import {
 } from "./taxonomy.js";
 import {
   addedSentences,
+  containment,
   looksLikeExample,
   looksLikeModeSwitch,
   mentionsParameter,
   deletedSentences,
+  sentences,
 } from "./text.js";
 
 /**
@@ -200,6 +202,9 @@ function undocumentedOptional(tool: Tool): Candidate[] {
 /** Below this, a deleted sentence is an edit rather than a loss of guidance. */
 const MIN_GUIDANCE_LENGTH = 40;
 
+/** A surviving sentence this much made of a removed one is that sentence, shortened. */
+const SHORTENED_THRESHOLD = 0.8;
+
 /**
  * Guidance that was shipped and is gone.
  *
@@ -215,15 +220,41 @@ const MIN_GUIDANCE_LENGTH = 40;
  *
  * At most one finding per target. A rewrite that drops six sentences is one
  * event, and reporting it six times would inflate every count downstream.
+ *
+ * **A cut is a text fact. A rewrite is a question about meaning.** When a
+ * description loses a sentence and gains nothing, the guidance is gone and no
+ * reader is needed to say so. When it loses a sentence and gains at least as
+ * much new text, the sentence being gone proves nothing: measured on a real
+ * package, "Deletes are permanent." became "Permanently delete a stored source
+ * document…" inside a description four times the length, and this rule called
+ * that removed guidance, `certain`, six tools in a row. So a rewrite carries a
+ * question, and without an answer it is a lead rather than a finding.
  */
 function guidanceRemoved(before: Tool, after: Tool): Candidate[] {
   if (before.description === null || after.description === null) return [];
   const surviving = new Set(after.params.map((p) => p.name));
+  const newDescription = after.description;
 
   type Strongest = { rule: ProseRule; quote: string; param: string | null; count: number };
   const strongest = new Map<string, Strongest>();
 
-  for (const sentence of deletedSentences(before.description, after.description)) {
+  const deleted = deletedSentences(before.description, after.description);
+  // The same test run the other way: text in the new description that nothing
+  // in the old one resembles. Rewordings of surviving sentences are excluded on
+  // both sides, so this compares what was taken out with what was put in.
+  const fresh = deletedSentences(after.description, before.description);
+  const length = (list: readonly string[]) => list.reduce((sum, s) => sum + s.length, 0);
+  const replaced = deleted.length > 0 && length(fresh) >= length(deleted);
+
+  // The other way a sentence can be gone without being cut: it was shortened.
+  // "Provide a query to include results, whose entries carry ids…" became
+  // "Provide a query to also include results." The sentence is still there, and
+  // whether the half that went was the guidance is, again, a question.
+  const kept = sentences(after.description);
+  const shortened = (sentence: string) =>
+    kept.some((survivor) => containment(survivor, sentence) >= SHORTENED_THRESHOLD);
+
+  for (const sentence of deleted) {
     if (sentence.length < MIN_GUIDANCE_LENGTH) continue;
 
     const param = [...surviving].find((name) => mentionsParameter(sentence, name) !== null) ?? null;
@@ -254,10 +285,19 @@ function guidanceRemoved(before: Tool, after: Tool): Candidate[] {
   }
 
   return [...strongest.entries()].map(([target, entry]) => {
+    const rewritten = replaced || shortened(entry.quote);
     const more = entry.count > 1 ? ` (and ${entry.count - 1} more sentence(s))` : "";
     const subject = entry.param === null ? `\`${after.name}\`` : `\`${entry.param}\``;
-    const headline =
-      entry.rule === "mode_switch_changed"
+    // A rewrite is worded as what the text shows and no further. "Was removed"
+    // is the claim the judge is being asked about, so it cannot be the headline
+    // of a finding nobody has judged yet.
+    const headline = rewritten
+      ? entry.rule === "mode_switch_changed"
+        ? `the sentence setting when to pass ${subject} has no counterpart in the rewritten description${more}`
+        : entry.rule === "example_removed"
+          ? `a worked example for ${subject} has no counterpart in the rewritten description${more}`
+          : `guidance for ${subject} has no counterpart in the rewritten description${more}`
+      : entry.rule === "mode_switch_changed"
         ? `the sentence setting when to pass ${subject} was removed${more}`
         : entry.rule === "example_removed"
           ? `a worked example was removed from ${subject}${more}`
@@ -271,6 +311,17 @@ function guidanceRemoved(before: Tool, after: Tool): Candidate[] {
       after: after.description,
       quote: entry.quote,
       headline,
+      ...(rewritten
+        ? {
+            question: {
+              id: `preserved:${target}`,
+              kind: "is_guidance_preserved" as const,
+              tool: after.name,
+              removed: entry.quote,
+              description: newDescription,
+            },
+          }
+        : {}),
     };
   });
 }
@@ -362,11 +413,20 @@ function applyAnswer(
     return null;
   }
 
+  // For a rewrite the evidence is the sentence that is gone, and it stays the
+  // quote whatever the judge points at. A patch restores exactly that span, and
+  // a quote swapped for one from the new description would be restoring text
+  // that never left.
+  const quote =
+    candidate.question.kind === "is_guidance_preserved"
+      ? base.evidence.quote
+      : (answer.quote ?? base.evidence.quote);
+
   return {
     ...base,
     basis: "judged",
     confidence: "likely",
-    evidence: { ...base.evidence, quote: answer.quote ?? base.evidence.quote },
+    evidence: { ...base.evidence, quote },
   };
 }
 

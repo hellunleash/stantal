@@ -162,7 +162,10 @@ export function diffSurfaces(from: SurfaceResult, to: SurfaceResult): SurfaceCom
   const { toolSetUnreliable, unreliableTools } = suppression(from, to);
 
   const kept: StructuralChange[] = [];
-  const suppressed: StructuralChange[] = [];
+  // What the differ computed against a schema it could not read on one side.
+  // Withheld there for the same reason as the rest of this list, and reported
+  // here so it is never simply missing.
+  const suppressed: StructuralChange[] = [...(full.withheld ?? [])];
   for (const change of full.changes) {
     const hidden =
       (toolSetUnreliable && TOOL_PRESENCE_RULES.has(change.rule)) || unreliableTools.has(change.tool);

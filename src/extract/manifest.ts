@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { toolFrom } from "../contract/from-json-schema.js";
 import { openApiToolList } from "./openapi.js";
 import {
@@ -9,7 +10,7 @@ import {
 import { EXTRACTOR_VERSION, type Ecosystem, type Surface, type Tool } from "../contract/types.js";
 
 /**
- * Manifest adapter — a contract that was already serialized to JSON.
+ * Manifest adapter — a contract that was already serialized, to JSON or YAML.
  *
  * The other two extractors work for what a package *publishes*: boot the server
  * and ask it (`mcp.ts`), or read the shipped source without running it
@@ -92,7 +93,7 @@ const ABSENCE_DETAIL: Record<SurfaceAbsenceReason, string> = {
   no_package_json: "the manifest carries no package identity",
   not_exported: "the manifest does not offer this surface",
   file_missing: "the manifest file was not supplied",
-  unparseable: "the file is not parseable as a JSON tool manifest",
+  unparseable: "the file is not parseable as a JSON or YAML tool manifest",
   no_descriptors: "the manifest lists no tools",
   // Not reachable from a document reader. Named so the map stays exhaustive:
   // a reason added later has to be given a sentence here rather than silently
@@ -103,6 +104,38 @@ const ABSENCE_DETAIL: Record<SurfaceAbsenceReason, string> = {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const require = createRequire(import.meta.url);
+
+/**
+ * One document's text, as data. JSON first, then YAML.
+ *
+ * A spec is as often YAML as JSON, and more than one SDK generator writes
+ * nothing else. Read as JSON only, such a file came back `unparseable`, which
+ * refuses the comparison: correct for a file we cannot read, and wrong for a
+ * format we simply had not learned.
+ *
+ * The parser is loaded only when JSON has already failed, so a run that never
+ * meets YAML never pays for it.
+ *
+ * Returns undefined for anything that is not a document. That includes text
+ * YAML accepts and nothing here can use: every line of plain prose is a valid
+ * YAML scalar, and "it parsed" would otherwise be true of a README.
+ */
+export function parseDocument(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Not JSON. Fall through.
+  }
+  try {
+    const { parse } = require("yaml") as { parse: (source: string) => unknown };
+    const root = parse(text);
+    return typeof root === "object" && root !== null ? root : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -285,12 +318,8 @@ export function extractFromManifest(options: ManifestExtractOptions): SurfaceRes
   for (const source of sources) {
     const where = source.origin ?? origin;
 
-    let root: unknown;
-    try {
-      root = JSON.parse(source.text);
-    } catch {
-      return absent("unparseable", [where]);
-    }
+    const root = parseDocument(source.text);
+    if (root === undefined) return absent("unparseable", [where]);
 
     const entries = toolList(root);
     // No recognizable list is *not* the same as an empty one. This document may

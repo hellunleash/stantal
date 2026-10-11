@@ -131,3 +131,62 @@ describe("array elements", () => {
     expect(xs?.items?.items?.type).toBe("number");
   });
 });
+
+describe("unions", () => {
+  test("a nullable union is the type beside null", () => {
+    const [note] = paramsFromInputSchema({
+      type: "object",
+      properties: {
+        note: { description: "A note.", anyOf: [{ type: "string", maxLength: 200 }, { type: "null" }] },
+      },
+    });
+    expect(note?.type).toBe("string");
+    expect(note?.constraints.maxLength).toBe(200);
+    expect(note?.description).toBe("A note.");
+  });
+
+  test("a union of objects reads as every field a caller may send", () => {
+    // Written as a union and written plainly, this is the same body. Read as
+    // unknown, the plain spelling in the next release reported every field
+    // as added and one of them as newly required.
+    const [body] = paramsFromInputSchema({
+      type: "object",
+      properties: {
+        body: {
+          anyOf: [
+            { type: "object", properties: { prompt: { type: "string" } }, required: ["prompt"] },
+            {
+              type: "object",
+              properties: { prompt: { type: "string" }, buckets: { type: "array" } },
+              required: ["prompt", "buckets"],
+            },
+          ],
+        },
+      },
+    });
+    expect(body?.type).toBe("object");
+    expect(body?.children?.map((c) => [c.name, c.required])).toEqual([
+      ["prompt", true],
+      ["buckets", false],
+    ]);
+  });
+
+  test("a union with no single type stays unknown", () => {
+    // A string or a number has no one type to give it. Left unread on purpose:
+    // the differ withholds claims against unknown instead of comparing it.
+    const [page] = paramsFromInputSchema({
+      type: "object",
+      properties: { page: { anyOf: [{ type: "string", pattern: "^[0-9]+$" }, { type: "number" }] } },
+    });
+    expect(page?.type).toBe("unknown");
+    expect(page?.constraints).toEqual({});
+  });
+
+  test("an explicit type beside a union is left alone", () => {
+    const [id] = paramsFromInputSchema({
+      type: "object",
+      properties: { id: { type: "string", anyOf: [{ minLength: 1 }, { pattern: "^x" }] } },
+    });
+    expect(id?.type).toBe("string");
+  });
+});

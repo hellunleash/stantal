@@ -93,8 +93,63 @@ function toDescription(raw: JsonSchemaish): string | null {
   return normalizeDescription(raw.description);
 }
 
+/**
+ * Read through a union where the union says only one thing.
+ *
+ * `anyOf` and `oneOf` used to normalize to `unknown` whatever was inside them,
+ * and the differ then compared that `unknown` against the next release's plain
+ * schema. Measured on a real API: a body written as a union of two objects read
+ * as having no fields, so when the next spec wrote the same body plainly every
+ * field in it was reported as added, one of them as a new required parameter.
+ * Nothing had changed but the spelling.
+ *
+ * Two shapes are unambiguous and are read here:
+ *
+ * - **Nullable.** One real branch beside `null`. The parameter is that branch.
+ * - **A union of objects.** A caller may send any branch, so the fields are the
+ *   union of every branch's, and a field is required only where every branch
+ *   requires it. That is the weakest reading, which is the safe direction: it
+ *   can under-report a requirement and cannot invent one.
+ *
+ * Everything else stays `unknown`, because a union of a string and a number has
+ * no single type to give it. The differ withholds claims against `unknown`
+ * rather than comparing it, so leaving a union unread is a gap and never a
+ * finding.
+ *
+ * An explicit `type` beside the union wins and nothing is rewritten.
+ */
+function throughUnion(raw: JsonSchemaish): JsonSchemaish {
+  if (raw.type !== undefined) return raw;
+  const union = raw.anyOf ?? raw.oneOf;
+  if (!Array.isArray(union) || union.length === 0) return raw;
+
+  const branches = union.map(asSchema).filter((branch) => branch.type !== "null");
+  const { anyOf: _anyOf, oneOf: _oneOf, ...outer } = raw;
+
+  if (branches.length === 1) {
+    // What is written on the union itself is about this use of the type, so it
+    // wins over the same key inside the branch.
+    return throughUnion({ ...branches[0], ...outer });
+  }
+
+  if (branches.length > 1 && branches.every((branch) => isObject(branch.properties))) {
+    const properties: Record<string, unknown> = {};
+    for (const branch of branches) {
+      for (const [key, sub] of Object.entries(branch.properties ?? {})) {
+        if (!(key in properties)) properties[key] = sub;
+      }
+    }
+    const required = Object.keys(properties).filter((key) =>
+      branches.every((branch) => Array.isArray(branch.required) && branch.required.includes(key)),
+    );
+    return { ...outer, type: "object", properties, ...(required.length > 0 ? { required } : {}) };
+  }
+
+  return raw;
+}
+
 function paramFrom(name: string, schema: unknown, required: boolean, depth: number): Param {
-  const raw = asSchema(schema);
+  const raw = throughUnion(asSchema(schema));
   const type = toJsonType(raw);
 
   const param: Param = {

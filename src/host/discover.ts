@@ -1,6 +1,6 @@
-import { extractFromManifest } from "../extract/manifest.js";
+import { extractFromManifest, parseDocument } from "../extract/manifest.js";
 import { isPresent } from "../contract/surface.js";
-import type { RepoSource } from "../blast/repo.js";
+import { isDocument, type RepoSource } from "../blast/repo.js";
 
 /**
  * Contracts a repository *writes*, as opposed to ones it installs.
@@ -91,13 +91,19 @@ const OURS = ".stantal/";
 const NEVER = new Set(["package.json", "tsconfig.json", "jsconfig.json", "composer.json"]);
 
 function isCandidate(path: string): boolean {
-  if (!path.endsWith(".json")) return false;
+  if (!isDocument(path)) return false;
   if (path === OURS.slice(0, -1) || path.startsWith(OURS)) return false;
   return !NEVER.has(path.split("/").pop() ?? path);
 }
 
-/** Keys a serialized tool list has at least one of. Any of them earns a parse. */
-const LOOKS_LIKE_A_CONTRACT = /"(tools|name|description|inputSchema|input_schema|parameters)"\s*:/;
+/**
+ * Keys a serialized tool list has at least one of. Any of them earns a parse.
+ *
+ * Written for both spellings: JSON quotes its keys, and YAML usually does not
+ * and puts them at the start of a line or after a list dash.
+ */
+const LOOKS_LIKE_A_CONTRACT =
+  /"(tools|name|description|inputSchema|input_schema|parameters)"\s*:|^[ \t]*(?:-[ \t]+)?(tools|name|description|inputSchema|input_schema|parameters|paths)[ \t]*:/m;
 
 export type DiscoveryOptions = {
   /**
@@ -184,12 +190,8 @@ function readDocument(
  * watching the skeleton alone.
  */
 function nameHints(text: string): string[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return [];
-  }
+  const parsed = parseDocument(text);
+  if (parsed === undefined) return [];
   const root = parsed as Record<string, unknown> | null;
   const tools = root === null || typeof root !== "object" ? undefined : root["tools"];
   if (tools !== undefined && typeof tools === "object" && tools !== null && !Array.isArray(tools)) {
@@ -199,6 +201,31 @@ function nameHints(text: string): string[] {
   return list
     .map((entry) => (typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>)["name"] : null))
     .filter((name): name is string => typeof name === "string");
+}
+
+/**
+ * Tools a document names and says nothing else about.
+ *
+ * `tools: [search_web, verify_identity]` is a selection, not a contract: it
+ * says which tools an agent is given and leaves every descriptor somewhere
+ * else. Found on a real repository where each agent was a YAML file listing
+ * tool names, the prose was a text file beside it, and the schemas were a dict
+ * in a Python module. Every document was read, nothing was extracted, and the
+ * report said "none found" about a repository that hands a model nine tools.
+ *
+ * Two names at least, and names only. One string in a list called `tools` is
+ * too little to call a selection, and a list holding anything but strings is a
+ * descriptor list the extractor has already had its turn at.
+ */
+function bareToolNames(text: string): string[] {
+  if (!/\btools\b/.test(text)) return [];
+  const parsed = parseDocument(text);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return [];
+  const tools = (parsed as Record<string, unknown>)["tools"];
+  if (!Array.isArray(tools) || tools.length < 2) return [];
+  return tools.every((entry) => typeof entry === "string" && entry.trim().length > 0)
+    ? (tools as string[])
+    : [];
 }
 
 /** The catalog's tool names, from the rows the walk collected. */
@@ -247,6 +274,9 @@ export function discoverHostContracts(repo: RepoSource, options: DiscoveryOption
   // Documents that name tools and that we could not read as contracts. Kept so
   // one sitting beside a contract can be pointed at rather than dropped.
   const declined = new Map<string, { path: string; names: string[] }[]>();
+  // Documents that only name tools. Checked against what was found once the
+  // walk is over, since the descriptors may sit in a file not yet reached.
+  const selections: { path: string; names: string[] }[] = [];
   const ignored: string[] = [];
   let scanned = 0;
 
@@ -270,7 +300,13 @@ export function discoverHostContracts(repo: RepoSource, options: DiscoveryOption
     }
     const dir = directoryOf(path);
     if (doc === null) {
-      const names = nameHints(repo.read(path) ?? "");
+      const text = repo.read(path) ?? "";
+      const bare = bareToolNames(text);
+      if (bare.length > 0) {
+        selections.push({ path, names: bare });
+        continue;
+      }
+      const names = nameHints(text);
       if (names.length >= 2) {
         const rows = declined.get(dir) ?? [];
         rows.push({ path, names });
@@ -353,6 +389,33 @@ export function discoverHostContracts(repo: RepoSource, options: DiscoveryOption
           `If its fields are nested under a wrapper, pass --fields-at <key> so both halves are read.`,
       });
     }
+  }
+
+  // Tools that are named and described nowhere we read. One note for all of
+  // them: a repository with ten agents lists the same handful of tools ten
+  // times, and ten notes would bury the one thing being said.
+  //
+  // This is a gap and is worded as one. The definitions exist, since something
+  // hands them to a model, and they are in a form this reader does not take:
+  // source code rather than a serialized document, most often. Saying "none
+  // found" there would be our limit presented as their absence.
+  const declared = new Set<string>();
+  for (const rows of found.values()) for (const row of rows) for (const name of row.tools) declared.add(name);
+  const orphaned = selections
+    .map((s) => ({ path: s.path, names: s.names.filter((name) => !declared.has(name)) }))
+    .filter((s) => s.names.length > 0);
+  if (orphaned.length > 0) {
+    const names = [...new Set(orphaned.flatMap((s) => s.names))].sort();
+    const shown = names.slice(0, 6).map((name) => `\`${name}\``).join(", ");
+    const more = names.length > 6 ? ` and ${names.length - 6} more` : "";
+    const others = orphaned.length > 1 ? ` (and ${orphaned.length - 1} more document(s) like it)` : "";
+    notes.push({
+      where: orphaned[0]!.path,
+      detail:
+        `names ${names.length} tool(s)${others} that no document here describes: ${shown}${more}. ` +
+        `Their descriptions and schemas are defined somewhere this reader does not look, source code most likely, ` +
+        `so nothing is claimed about them. If the running system can serve them over MCP, \`stantal live\` reads them there.`,
+    });
   }
 
   contracts.sort((a, b) => a.catalog.localeCompare(b.catalog));

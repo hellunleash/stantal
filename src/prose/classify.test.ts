@@ -255,6 +255,92 @@ describe("guidance_removed, widened", () => {
   });
 });
 
+/**
+ * A cut is a text fact. A rewrite is a question about meaning.
+ *
+ * Found by running the tool on a real package the way its publisher would: six
+ * descriptions had been rewritten to four times their length, every one of them
+ * kept its guidance in new words, and every one was reported as guidance
+ * removed, `certain`.
+ */
+describe("guidance_removed, rewritten", () => {
+  const tool = (description: string): Tool => ({ name: "archive", description, params: [param("id", true)] });
+
+  const GONE = "Archiving is permanent and cannot be undone by the caller.";
+  const KEPT = "Permanently archive one stored record so that it stops appearing in any listing.";
+  const before = tool(`Archive a record by its id. ${GONE}`);
+  const after = tool(
+    `${KEPT} Use the record id returned by the list tool, and expect a refusal while the record is still processing.`,
+  );
+  const pair = () => [surface([before], "1.0.0"), surface([after])] as const;
+
+  test("with no judge it is a lead, not a certain finding", async () => {
+    const result = await classifyProse(...pair());
+    const finding = result.findings.find((f) => f.rule === "guidance_removed");
+    expect(finding).toMatchObject({ target: "archive", basis: "deterministic", confidence: "unconfirmed" });
+    expect(finding?.evidence.quote).toBe(GONE);
+  });
+
+  test("the headline claims what the text shows and no more", async () => {
+    const result = await classifyProse(...pair());
+    expect(result.findings[0]?.headline).toContain("no counterpart in the rewritten description");
+    expect(result.findings[0]?.headline).not.toContain("was removed");
+  });
+
+  test("a judge that can point at the surviving guidance retires it", async () => {
+    const judge = scriptedJudge({ "preserved:archive": { verdict: "yes", quote: KEPT } });
+    const result = await classifyProse(...pair(), judge);
+    expect(result.findings.filter((f) => f.rule === "guidance_removed")).toEqual([]);
+  });
+
+  test("a yes that points at nothing retires nothing", async () => {
+    const judge = scriptedJudge({ "preserved:archive": { verdict: "yes" } });
+    const result = await classifyProse(...pair(), judge);
+    expect(result.findings[0]).toMatchObject({ rule: "guidance_removed", confidence: "unconfirmed" });
+  });
+
+  test("a yes quoting text that is not in the new description retires nothing", async () => {
+    const judge = scriptedJudge({ "preserved:archive": { verdict: "yes", quote: "Archives cannot be reversed." } });
+    const result = await classifyProse(...pair(), judge);
+    expect(result.findings[0]).toMatchObject({ rule: "guidance_removed", confidence: "unconfirmed" });
+  });
+
+  test("a no confirms it, and the evidence stays the sentence that is gone", async () => {
+    // A patch restores exactly the quoted span. A quote swapped for one from
+    // the new description would be restoring text that never left.
+    const judge = scriptedJudge({ "preserved:archive": { verdict: "no", quote: KEPT } });
+    const result = await classifyProse(...pair(), judge);
+    expect(result.findings[0]).toMatchObject({ rule: "guidance_removed", basis: "judged", confidence: "likely" });
+    expect(result.findings[0]?.evidence.quote).toBe(GONE);
+  });
+
+  test("a sentence that was only shortened is a question too", async () => {
+    // Nothing was added, so this is not a rewrite by length. The sentence is
+    // still there with its tail gone, and whether the tail was the guidance is
+    // not something a rule can see.
+    const long = tool(
+      "Fetch one record. Provide a filter to include matching entries, whose ids may then be passed to the remove tool.",
+    );
+    const short = tool("Fetch one record. Provide a filter to also include matching entries.");
+
+    const lead = await classifyProse(surface([long], "1.0.0"), surface([short]));
+    expect(lead.findings[0]).toMatchObject({ rule: "guidance_removed", confidence: "unconfirmed" });
+
+    const judge = scriptedJudge({
+      "preserved:archive": { verdict: "yes", quote: "Provide a filter to also include matching entries." },
+    });
+    const judged = await classifyProse(surface([long], "1.0.0"), surface([short]), judge);
+    expect(judged.findings).toEqual([]);
+  });
+
+  test("a cut with a few new words beside it is still a cut", async () => {
+    const shorter = tool("Archive a record by its id. Returns the record.");
+    const result = await classifyProse(surface([before], "1.0.0"), surface([shorter]));
+    expect(result.findings[0]).toMatchObject({ rule: "guidance_removed", confidence: "certain" });
+    expect(result.findings[0]?.headline).toContain("was removed");
+  });
+});
+
 describe("extraction gaps, scoped", () => {
   const schemaGap: ExtractionNote = {
     code: "descriptor_schema_unresolved",

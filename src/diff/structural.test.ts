@@ -273,3 +273,81 @@ describe("diffStructural — array elements", () => {
     expect(diffStructural(unread, arrayOf({})).changes).toEqual([]);
   });
 });
+
+/**
+ * `unknown` is what a schema normalizes to when it was found and not typed. A
+ * difference against it is a difference against nothing.
+ *
+ * Found on a real API: `limit` was spelled as a union of a digit string and a
+ * number, then spelled `integer` with a maximum. The parameter never changed.
+ * The report said its type had, and that its bounds had tightened, both
+ * breaking.
+ */
+describe("diffStructural — a schema read on one side only", () => {
+  const withParam = (param: Param): Contract => ({
+    ecosystem: "http",
+    package: "example",
+    version: "1",
+    surface: "openapi",
+    extractedAt: "1970-01-01T00:00:00.000Z",
+    extractorVersion: "fixture",
+    tools: [{ name: "list", description: "List things.", params: [param] }],
+  });
+
+  const unread: Param = { name: "limit", type: "unknown", required: false, description: null, constraints: {} };
+  const typed: Param = {
+    name: "limit",
+    type: "integer",
+    required: false,
+    description: null,
+    constraints: { minimum: 1, maximum: 100 },
+  };
+
+  test("claims no type change and no tightening against a type it never read", () => {
+    const diff = diffStructural(withParam(unread), withParam(typed));
+    expect(diff.changes).toEqual([]);
+    expect(diff.breaking).toBe(false);
+  });
+
+  test("returns what it withheld, so nothing is simply missing", () => {
+    const diff = diffStructural(withParam(unread), withParam(typed));
+    expect(diff.withheld?.map((c) => [c.rule, c.target])).toEqual([
+      ["param_type_changed", "list.limit"],
+      ["constraint_tightened", "list.limit"],
+    ]);
+  });
+
+  test("holds in the other direction too", () => {
+    const diff = diffStructural(withParam(typed), withParam(unread));
+    expect(diff.changes).toEqual([]);
+    expect(diff.withheld).toHaveLength(2);
+  });
+
+  test("fields under an unread parameter are not added or removed", () => {
+    const body: Param = {
+      name: "body",
+      type: "object",
+      required: false,
+      description: null,
+      constraints: {},
+      children: [{ name: "key", type: "string", required: true, description: null, constraints: {} }],
+    };
+    const diff = diffStructural(withParam({ ...unread, name: "body" }), withParam(body));
+    // `body.key` was never seen on the unread side. "Required parameter added"
+    // would be a statement about our reading.
+    expect(diff.changes).toEqual([]);
+    expect(diff.withheld?.map((c) => c.rule)).toContain("param_added_required");
+  });
+
+  test("required-ness is still claimed, because that was read on both sides", () => {
+    const diff = diffStructural(withParam(unread), withParam({ ...typed, required: true }));
+    expect(diff.changes.map((c) => c.rule)).toEqual(["param_became_required"]);
+    expect(diff.breaking).toBe(true);
+  });
+
+  test("two readable types still report a change", () => {
+    const diff = diffStructural(withParam({ ...typed, type: "string", constraints: {} }), withParam(typed));
+    expect(diff.changes.map((c) => c.rule)).toEqual(["param_type_changed", "constraint_tightened"]);
+    expect(diff.withheld).toBeUndefined();
+  });
+});

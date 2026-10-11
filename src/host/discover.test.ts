@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { memoryRepoSource } from "../blast/repo.js";
+import { memoryDocumentSource, memoryRepoSource } from "../blast/repo.js";
 import { baselineSlug, discoverHostContracts } from "./discover.js";
 
 const SKELETON = JSON.stringify({
@@ -152,12 +152,101 @@ describe("a spec is a contract too", () => {
     expect(found.contracts[0]?.catalog).toBe("openapi.json");
     expect(found.contracts[0]?.tools).toBe(1);
   });
+
+  it("finds the same spec kept as YAML", () => {
+    // `manifest` reads YAML, and discovery promises to find exactly what
+    // `manifest` can compare. A walk that listed only `.json` broke that.
+    const yaml = [
+      "openapi: 3.0.3",
+      "paths:",
+      "  /jobs:",
+      "    get:",
+      "      operationId: list_jobs",
+      "      summary: List open jobs.",
+      "      parameters:",
+      "        - name: limit",
+      "          in: query",
+      "          schema:",
+      "            type: integer",
+    ].join("\n");
+    const found = discoverHostContracts(memoryDocumentSource({ "api/openapi.yaml": yaml }));
+    expect(found.contracts.map((c) => [c.catalog, c.tools])).toEqual([["api/openapi.yaml", 1]]);
+  });
+
+  it("is not fooled by ordinary YAML config", () => {
+    const found = discoverHostContracts(
+      memoryDocumentSource({
+        ".github/workflows/ci.yml": "name: ci\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n",
+        "compose.yaml": "name: stack\nservices:\n  web:\n    image: nginx\n",
+      }),
+    );
+    expect(found.contracts).toEqual([]);
+    expect(found.notes).toEqual([]);
+    expect(found.scanned).toBe(2);
+  });
+});
+
+/**
+ * A document that names tools and describes none of them.
+ *
+ * The shape is an agent declared in config: which tools it gets, and nothing
+ * about what they are. The descriptors live in source code. Reading every
+ * document and extracting nothing, the report used to say "none found" about a
+ * repository that hands a model tools.
+ */
+describe("tools that are named and described nowhere", () => {
+  const agent = (tools: string[]) => `name: Helper\ntools:\n${tools.map((t) => `  - ${t}`).join("\n")}\n`;
+
+  it("says so, as a gap, when nothing in the repo describes them", () => {
+    const found = discoverHostContracts(
+      memoryDocumentSource({ "agents/helper/config.yaml": agent(["search_docs", "open_ticket"]) }),
+    );
+    expect(found.contracts).toEqual([]);
+    expect(found.notes).toHaveLength(1);
+    expect(found.notes[0]?.where).toBe("agents/helper/config.yaml");
+    expect(found.notes[0]?.detail).toContain("names 2 tool(s)");
+    expect(found.notes[0]?.detail).toContain("`open_ticket`, `search_docs`");
+    expect(found.notes[0]?.detail).toContain("nothing is claimed");
+  });
+
+  it("is one note for a repo full of agents, not one per agent", () => {
+    const found = discoverHostContracts(
+      memoryDocumentSource({
+        "agents/a/config.yaml": agent(["search_docs", "open_ticket"]),
+        "agents/b/config.yaml": agent(["search_docs", "close_ticket"]),
+        "agents/c/config.json": JSON.stringify({ tools: ["search_docs", "open_ticket"] }),
+      }),
+    );
+    expect(found.notes).toHaveLength(1);
+    expect(found.notes[0]?.detail).toContain("names 3 tool(s) (and 2 more document(s) like it)");
+  });
+
+  it("stays quiet when a document here does describe them", () => {
+    const found = discoverHostContracts(
+      memoryDocumentSource({
+        ".agent/tools.json": SKELETON,
+        "agents/helper/config.yaml": agent(["host_get_record", "host_list_records"]),
+      }),
+    );
+    expect(found.contracts).toHaveLength(1);
+    expect(found.notes).toEqual([]);
+  });
+
+  it("does not read one string in a list as a selection", () => {
+    const found = discoverHostContracts(memoryDocumentSource({ "config.yaml": "tools:\n  - hammer\n" }));
+    expect(found.notes).toEqual([]);
+  });
 });
 
 describe("baselineSlug", () => {
   it("names a baseline after the file it snapshots", () => {
     expect(baselineSlug(".agent/tools.json")).toBe("agent-tools");
     expect(baselineSlug("src/agent/mcp.json")).toBe("src-agent-mcp");
+  });
+
+  it("keeps a YAML spec apart from a JSON one beside it", () => {
+    expect(baselineSlug("api/openapi.yaml")).toBe("api-openapi-yaml");
+    expect(baselineSlug("api/openapi.json")).toBe("api-openapi");
   });
 });
 
