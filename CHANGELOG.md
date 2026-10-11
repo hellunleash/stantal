@@ -11,12 +11,15 @@ upgrade needs a full re-run.
 
 ## [Unreleased]
 
-Everything here came out of a field report from a real install of 0.7.0 into a
+## [0.8.0] - 2026-10-11
+
+The first half came out of a field report from a real install of 0.7.0 into a
 Next.js host running a third-party agent. Every claim in it was checked against
 the source before anything was changed, and two were checked by running.
 
-**Read the first two items under Fixed before upgrading.** Both can change a
-verdict you have already seen, and one changes the shape of `stantal --json`.
+**Read four items under Fixed before upgrading:** the first two, the array item
+and the `stantal --json` item. Each can change a verdict you have already seen,
+and the last changes the shape of `stantal --json`.
 
 The second half came from running the published CLI on other people's public
 repositories the way their owners would: an API provider's spec history, its
@@ -843,7 +846,8 @@ These are properties of the tool, not features, and breaking one is a bug:
   `.omit()`, `.partial()` and `.extend()` produce a note carrying a path instead
   of a contract nobody can trust.
 
-[Unreleased]: https://github.com/hellunleash/stantal/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/hellunleash/stantal/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/hellunleash/stantal/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/hellunleash/stantal/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/hellunleash/stantal/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/hellunleash/stantal/compare/v0.4.0...v0.5.0
